@@ -73,6 +73,19 @@ The renderers are pure — same run in, same bytes out — so the
 sha256 recorded on the run is a stable content hash of the file
 the bank receives.
 
+**Bank feedback** closes the batch-booking loop: the bank
+answers a batch-booked file per ``PmtInf`` group, not per file,
+and the answers are recorded on the run
+(``service.record_handoff_group_receipts``) — one receipt per
+group, its members stamped from the export receipt this module
+writes, so each member carries its group's fate. A rejected
+group's later answer supersedes the first; an accepted group is
+final. The reads here (:func:`batch_group_members`,
+:func:`current_group_receipts`, :func:`group_receipt_by_member`)
+derive everything from the run record — the group membership
+from the export receipt, never recomputed from the lines,
+because the bank answered the file that was sent.
+
 The run they render is the export-time run: before rendering, the
 service re-verifies each member's discount (``paymentruns.
 discount_drift``) and adjusts any member whose window closed since
@@ -88,7 +101,12 @@ import io
 import xml.etree.ElementTree as ET
 
 from .matching import _parse_date
-from .schemas import HandoffCreditorEntry, PaymentRun, PaymentRunLine
+from .schemas import (
+    HandoffCreditorEntry,
+    HandoffGroupReceipt,
+    PaymentRun,
+    PaymentRunLine,
+)
 from .supplier_master import _iban_norm, _masked
 
 HANDOFF_COLUMNS = [
@@ -298,6 +316,62 @@ def batch_groups(
         key = chosen.isoformat() if chosen is not None else (run.window_end or "")
         groups.setdefault(key, []).append(line)
     return sorted(groups.items())
+
+
+def batch_group_members(run: PaymentRun) -> dict[str, list[str]]:
+    """The batch-booked export's groups, read back from its
+    receipt: execution date → the member invoice ids exported
+    under it, in export order.
+
+    The membership is read from the export-time completion
+    entries (``handoff_creditor_entries`` — each stamped with
+    its group's date at export), NOT recomputed from the run's
+    lines: the bank answered the file that was sent, whose
+    grouping the receipt is the record of. A run that was not
+    batch-booked (or not exported) has no groups — an empty
+    dict, never a reconstruction. Pure."""
+    if not run.handoff_batch_booking:
+        return {}
+    groups: dict[str, list[str]] = {}
+    for entry in run.handoff_creditor_entries:
+        if not entry.execution_date:
+            continue
+        groups.setdefault(entry.execution_date, []).append(entry.invoice_id)
+    return groups
+
+
+def current_group_receipts(run: PaymentRun) -> dict[str, HandoffGroupReceipt]:
+    """Each group's standing receipt: execution date → the
+    latest non-superseded :class:`HandoffGroupReceipt`. A group
+    whose rejected answer was later superseded reads by its
+    newest answer; a group with no answer is absent. Pure."""
+    current: dict[str, HandoffGroupReceipt] = {}
+    for receipt in run.handoff_group_receipts:
+        if receipt.superseded:
+            continue
+        current[receipt.execution_date] = receipt
+    return current
+
+
+def group_receipt_by_member(run: PaymentRun) -> dict[str, dict]:
+    """Every batch member's bank answer, by invoice id: the
+    standing receipt of the group it exported in — status,
+    the group's execution date and PmtInf id, the bank's
+    reason or reference. Members whose group has no standing
+    answer are absent: unmarked means unanswered, not accepted.
+    Pure."""
+    current = current_group_receipts(run)
+    marked: dict[str, dict] = {}
+    for date, receipt in current.items():
+        for invoice_id in receipt.member_invoice_ids:
+            marked[invoice_id] = {
+                "status": receipt.status,
+                "execution_date": date,
+                "pmt_inf_id": receipt.pmt_inf_id,
+                "detail": receipt.detail,
+                "bank_reference": receipt.bank_reference,
+            }
+    return marked
 
 
 def render_handoff_pain001(

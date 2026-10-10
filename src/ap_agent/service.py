@@ -80,6 +80,7 @@ from .schemas import (
     DocumentInput,
     EscalationDigest,
     GoodsReceipt,
+    HandoffGroupReceipt,
     HandoffProfile,
     HandoffProfileEvent,
     InformationEscalation,
@@ -3866,6 +3867,12 @@ class InvoiceService:
         )
         run.handoff_generated_by = actor
         run.handoff_format = resolved_format
+        run.handoff_batch_booking = batch_booking
+        # A fresh export is a fresh file: the bank's per-group
+        # answers belonged to the previous file's groups, and a
+        # receipt must never read against a file it did not
+        # answer. The new file starts unanswered.
+        run.handoff_group_receipts = []
         run.handoff_profile_id = profile.profile_id if profile else ""
         run.handoff_execution_date = execution_date
         if batch_booking:
@@ -3888,6 +3895,151 @@ class InvoiceService:
                     f"under the profile's {profile.lead_days}d lead."
                     if execution_date and execution_date != run.window_end
                     else "."
+                )
+            )
+        store.save_payment_run(run)
+        return run
+
+    def record_handoff_group_receipts(
+        self,
+        run_id: str,
+        *,
+        actor: str,
+        receipts: list,
+    ) -> PaymentRun:
+        """Record the bank's per-group answers for a batch-booked
+        export (``HandoffGroupReceipt``).
+
+        The loop the batch booking left open: the file went out
+        as one ``PmtInf`` per requested execution date, and the
+        bank answers per group — one books, another bounces. The
+        answers are recorded against their groups here, each
+        receipt stamped with the group's ``PmtInf`` id and its
+        members (from the export receipt — the file the bank
+        actually saw), so every member carries its group's fate
+        on the run. Recording is bookkeeping, like the posting
+        receipt: no payment state changes, no member moves.
+
+        The guards are the loop's integrity, and the recording
+        is validated WHOLE before anything is written (a refusal
+        refuses it entire, the clarify idiom): the run must have
+        a batch-booked pain.001 export in force (a flat file has
+        no groups to answer); every answer must name a group the
+        export actually made, carry a known status, and a
+        rejection must carry the bank's reason; one answer per
+        group per recording. A group the bank already ACCEPTED
+        is final — its money booked, a second answer is a
+        bank-side correction, not a receipt — while a REJECTED
+        group's later answer supersedes the first (the group was
+        corrected and re-presented), the old receipt staying on
+        the run marked superseded."""
+        from .handoff import batch_group_members
+
+        if not (actor or "").strip():
+            raise ValueError(
+                "Provide 'actor' — bank feedback is recorded "
+                "against a name; an unattributed recording is "
+                "refused"
+            )
+        if not receipts:
+            raise ValueError(
+                "Provide at least one group receipt — an empty "
+                "recording answers nothing"
+            )
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        if not run.handoff_generated_at:
+            raise ValueError(
+                f"Payment run {run_id} has no hand-off export — "
+                "the bank cannot answer a file that was never "
+                "generated; export it first"
+            )
+        if not (run.handoff_format == "pain001" and run.handoff_batch_booking):
+            raise ValueError(
+                f"Payment run {run_id} was exported as "
+                f"{run.handoff_format or 'unknown'}"
+                + (
+                    " without batch booking"
+                    if run.handoff_format == "pain001"
+                    else ""
+                )
+                + " — per-group bank answers belong to a "
+                "batch-booked pain.001 file, whose PmtInf groups "
+                "are what the bank answers"
+            )
+        groups = batch_group_members(run)
+        if not groups:
+            raise ValueError(
+                f"Payment run {run_id}'s export receipt names no "
+                "batch groups — there is nothing for the bank's "
+                "answers to attach to"
+            )
+        standing = {
+            receipt.execution_date: receipt
+            for receipt in run.handoff_group_receipts
+            if not receipt.superseded
+        }
+        # Validate the whole recording before writing any of it.
+        seen: set[str] = set()
+        for receipt in receipts:
+            date = (receipt.execution_date or "").strip()
+            if date in seen:
+                raise ValueError(
+                    f"Two answers for the {date} group in one "
+                    "recording — the bank answers a group once "
+                    "per file; record them in separate recordings"
+                )
+            seen.add(date)
+            if date not in groups:
+                names = ", ".join(sorted(groups))
+                raise ValueError(
+                    f"No group with requested execution date "
+                    f"{date!r} in run {run_id}'s export — its "
+                    f"groups are: {names}. An answer for a group "
+                    "the file never made is refused, not filed "
+                    "against the nearest date"
+                )
+            if receipt.status not in ("accepted", "rejected"):
+                raise ValueError(
+                    f"Unknown group receipt status "
+                    f"{receipt.status!r} for the {date} group — "
+                    "the bank accepts a group or rejects it"
+                )
+            if receipt.status == "rejected" and not (
+                receipt.detail or ""
+            ).strip():
+                raise ValueError(
+                    f"The {date} group was rejected with no "
+                    "reason recorded — a rejection without the "
+                    "bank's reason cannot be acted on; record "
+                    "the reason the bank gave"
+                )
+            current = standing.get(date)
+            if current is not None and current.status == "accepted":
+                raise ValueError(
+                    f"The {date} group already stands accepted "
+                    f"(recorded by {current.recorded_by}) — its "
+                    "money is booked; a second answer is a "
+                    "bank-side correction, not a receipt"
+                )
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for receipt in receipts:
+            date = (receipt.execution_date or "").strip()
+            current = standing.get(date)
+            if current is not None:
+                current.superseded = True
+            run.handoff_group_receipts.append(
+                HandoffGroupReceipt(
+                    pmt_inf_id=f"{run.run_id}-{date}",
+                    execution_date=date,
+                    status=receipt.status,
+                    detail=(receipt.detail or "").strip(),
+                    bank_reference=(receipt.bank_reference or "").strip(),
+                    member_invoice_ids=list(groups[date]),
+                    recorded_by=actor,
+                    recorded_at=stamp,
                 )
             )
         store.save_payment_run(run)

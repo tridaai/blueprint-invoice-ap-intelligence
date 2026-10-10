@@ -52,6 +52,7 @@ from .schemas import (
     InvoiceInput,
     MasterChangeDecisionRequest,
     InformationReplyRequest,
+    HandoffGroupReceiptsRequest,
     InformationWaitItem,
     LagSegmentProposal,
     LagSegmentProposalDecisionRequest,
@@ -710,6 +711,30 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         try:
             return svc.export_payment_run_handoff(
                 run_id, actor=_decision_actor(request), as_of=as_of, format=format
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/payment-runs/{run_id}/handoff/group-receipts", response_model=PaymentRun, dependencies=_AUTH)
+    def record_handoff_group_receipts(run_id: str, request: HandoffGroupReceiptsRequest) -> PaymentRun:
+        """Record the bank's per-group answers for a batch-booked
+        export. The bank answers a batch-booked pain.001 per
+        PmtInf group, not per file: each receipt names its group
+        by requested execution date and is recorded against it —
+        the group's PmtInf id and members stamped from the export
+        receipt, so every member carries its group's fate on the
+        run. A rejection must carry the bank's reason; an accepted
+        group is final; a rejected group's later answer
+        supersedes its first. The recording is validated whole —
+        one bad answer refuses it entire — and changes no payment
+        state: it is the bank's word about a file already sent."""
+        try:
+            return svc.record_handoff_group_receipts(
+                run_id,
+                actor=_decision_actor(request),
+                receipts=request.receipts,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

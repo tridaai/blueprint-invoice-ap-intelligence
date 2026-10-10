@@ -658,6 +658,34 @@ class PostingReceiptRequest(BaseModel):
         return self.actor or self.approver or self.reviewer
 
 
+class HandoffGroupReceiptInput(BaseModel):
+    """One group's answer in a bank-feedback recording: the
+    group is named by its requested execution date (its PmtInf
+    id is the run id + that date, computed at recording)."""
+
+    execution_date: str  # the group's requested execution date
+    status: str  # accepted | rejected
+    detail: str = ""  # the bank's reason — required when rejected
+    bank_reference: str = ""
+
+
+class HandoffGroupReceiptsRequest(BaseModel):
+    """Record the bank's per-group answers for a batch-booked
+    export (the body of
+    ``POST /payment-runs/{id}/handoff/group-receipts``): the
+    answers as the bank file gave them, recorded by a named
+    operator. A recording is validated whole — one bad answer
+    refuses it entire."""
+
+    receipts: list[HandoffGroupReceiptInput] = Field(default_factory=list)
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
 class OpenPostingItem(BaseModel):
     """One approved invoice the ERP loop still owes an answer for:
     approved longer ago than the grace window, with no posted
@@ -1201,6 +1229,40 @@ class HandoffCreditorEntry(BaseModel):
     execution_date: str = ""
 
 
+class HandoffGroupReceipt(BaseModel):
+    """The bank's answer for one batch-booked ``PmtInf`` group.
+
+    A batch-booked pain.001 file is several payment
+    instructions in one message, and the bank answers them per
+    group, not per file: one group books, another bounces (a
+    creditor account the bank cannot credit, a value date it
+    will not take). This is that answer, recorded against the
+    group it belongs to — its ``PmtInf`` id (run id + the
+    group's requested execution date) and the group's members,
+    stamped from the export receipt at recording time, so each
+    member carries the group's fate on the run.
+
+    Recording is bookkeeping, like the posting receipt: the
+    agent paid nothing and un-pays nothing — the receipt is the
+    bank's word about the file the customer already handed it.
+    A rejected group may be answered again (the group is
+    corrected and re-presented; the new receipt supersedes the
+    old, which stays on the run marked ``superseded``). An
+    accepted group is final: the money is booked, and a second
+    answer for it is a bank-side correction, not a receipt.
+    """
+
+    pmt_inf_id: str = ""  # f"{run_id}-{execution_date}" — the group's id in the file
+    execution_date: str = ""  # the group's requested execution date
+    status: str = ""  # accepted | rejected
+    detail: str = ""  # the bank's reason — required when rejected
+    bank_reference: str = ""  # the bank's reference for the group, when it gives one
+    member_invoice_ids: list[str] = Field(default_factory=list)
+    recorded_by: str = ""
+    recorded_at: str = ""  # ISO timestamp
+    superseded: bool = False  # a later receipt for the same group replaced this one
+
+
 class PaymentRun(BaseModel):
     """A proposed payment run: approved invoices grouped by currency
     and due window, totals computed in code. The run is a draft
@@ -1262,6 +1324,21 @@ class PaymentRun(BaseModel):
     # (the master holds approved bank details) or still carrying
     # the at-import marker (it does not). Masked labels only.
     handoff_creditor_entries: list[HandoffCreditorEntry] = Field(
+        default_factory=list
+    )
+    # Whether the latest export batch-booked (the governing
+    # profile's call): the pain.001 carried one PmtInf per
+    # requested execution date, BtchBookg true. Stamped at export
+    # — the profile in force NOW is not the profile that shaped
+    # the file THEN, and the bank's per-group answers
+    # (handoff_group_receipts) are only meaningful against the
+    # file's own shape.
+    handoff_batch_booking: bool = False
+    # The bank's per-group answers for a batch-booked export:
+    # one receipt per PmtInf group (accepted | rejected), the
+    # group's members stamped from the export receipt. A rejected
+    # group's later answer supersedes its earlier one.
+    handoff_group_receipts: list[HandoffGroupReceipt] = Field(
         default_factory=list
     )
     # Drift forecast, computed at confirmation: the discounted
