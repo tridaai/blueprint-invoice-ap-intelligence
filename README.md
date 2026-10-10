@@ -91,6 +91,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 41. **Creditor-completion coverage** — `/metrics` also prices the marker risk over *exports* (master coverage counts records): per currency and per hand-off format, the share of exported members — and of exported value — whose creditor account was completed from the governed master versus the share that still carried the `SUPPLIER-MASTER-AT-IMPORT` marker, read off each run's completion receipt. Receipt-less legacy exports are counted as such, so the denominator never quietly shrinks.
 42. **Four-eyes aging in the queue** — a four-eyes run confirmed once is locked out of export until its second confirmer arrives, and now that wait ages: past `PAYMENT_RUN_FOUR_EYES_AGING_DAYS` (default 2) the run joins the approver queue (`GET /queue`) as an action item with the first confirmer named — the person to nudge, and the one person who cannot be the second.
 43. **Escalation digest** — the day's escalations composed into one operator summary (`GET /digest`, console panel): recovery cases past their SLA, escalated open postings, invoices stuck at the gate, four-eyes stalls, plus the day's run news — discounts forecast to lapse on runs confirmed today, drift realised on runs exported today. Composed deterministically from the records, in the reconciliation summary's discipline; the agent sends nothing.
+44. **Stored digest artifacts** — the computed digest describes the records as they are now, so a day's escalations cannot be re-derived once the records move. An operator can store the day's first-computed digest (`POST /digest/{date}/store`, migration 0010): read back verbatim at `GET /digest/{date}`, stamped with who stored it and when, provenance `stored` — first-computed wins, a stored day is never overwritten, and `GET /digest` stays the live recomputation, labelled `computed`. `GET /digest/history` reads the stored series as headline counts with day-over-day changes against the previous stored day; days nobody stored are absent, not interpolated. The stored copy is the one a human forwards or files.
+45. **Marker-risk onboarding worklist** — completion coverage prices the marker; `GET /suppliers/marker-worklist` (console panel) turns the same export receipts into the work: suppliers ranked by marked export value (export-time net, ranked within currency — values are never compared across currencies), each with its marked value, invoice count and ids, export count, and last marked export date. A supplier the governed master now covers with approved bank details — the completion's own has-details rule, checked against the live master — resolves off the list, counted with its formerly-marked value so the queue's shrinkage is visible. The console's per-supplier button prefills the governed master-change form: onboarding stays a human's governed act, one click away.
+46. **Forecast-aware four-eyes waits** — the four-eyes aging threshold is per run now. The configured `PAYMENT_RUN_FOUR_EYES_AGING_DAYS` is the patience for a run whose discounts are safe; a run whose confirmation-time drift forecast flags members lapsing before the expected export cannot export until its second confirmation lands, so the wait itself is the leak — its threshold tightens to 0 days and it joins the queue (`GET /queue`) on the first day of the wait, carrying the lapse count and the projected value at risk, sorted ahead of merely-old waits. The forecast is read as stamped at confirmation, never recomputed in the queue. The digest says it too: lapses on unseconded runs are flagged `blocked_on_four_eyes` — the projection is blocked on the wait, not the export.
+47. **Open-posting escalation webhook** — open postings past `POSTING_ESCALATION_DAYS` get the recovery cases' push treatment: the sweep (`POST /postings/escalate`) fires the signed `posting_escalation` webhook over the same opt-in `ACTION_WEBHOOK_URL` seam and HMAC scheme, carrying the posting's snapshot (invoice, supplier, amount, approver, age, and the ERP's failure reason when a receipt failed). Each dispatch is ledgered on the invoice record itself (`posting_escalations`, beside the receipt fields), deduped per open episode — an episode runs from the approval, or from the latest failed receipt, since a failure is new information worth one escalation of its own; a posted receipt closes the item and is the reset. With no webhook configured nothing fires and nothing is recorded; `/metrics` counts the recorded pushes beside the items past the line.
 
 ## Quickstart
 
@@ -121,7 +125,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 318 tests
+make test        # 344 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -200,7 +204,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 318 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 344 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
