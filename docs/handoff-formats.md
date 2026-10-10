@@ -182,3 +182,35 @@ or a reasonless rejection refuses the entire recording, so the
 run never carries a half-filed answer set. A fresh export is a
 fresh file and clears the previous file's answers: the new
 file starts unanswered.
+
+Two consequences ride on those answers. A **rejected** group
+can be re-exported alone (`POST /payment-runs/{run_id}/handoff/
+groups/{execution_date}/reexport`): re-sending the whole file
+would re-present the groups that already booked, so the
+bounced group goes out as its own single-`PmtInf` pain.001 —
+the group's own `PmtInfId`, its members only, no `BtchBookg`
+element, stored beside the run's files under
+`handoff-group-<date>-reexport-<n>.pain001.xml` (`GET` on the
+same path downloads the latest one). Its figures are the first
+file's, with the discount drift re-verified as of the
+re-export date and itemised on the re-export record — a member
+whose window closed in between is re-priced for the new file,
+never silently — and its `ReqdExctnDt` is the later of the
+group's date and the re-export date. The bank's rejection
+reason is carried onto the re-export record, and the group's
+receipts reset: the rejected receipt stands superseded, and
+the bank's answer to the new file records against the group
+exactly as the first answer did. Only a rejected group can be
+re-exported — an accepted group is final, an unanswered group
+has not bounced, and a group already re-presented and awaiting
+its answer is refused a third file.
+
+And an answer that never comes is not silence the system
+tolerates: past `GROUP_RECEIPT_AGING_DAYS` (default 5) an
+unanswered group joins the approver queue and the escalation
+digest with its members and value named, its clock running
+from the file the bank is currently answering — the whole
+export, or the group's solo re-export when it was
+re-presented. `/metrics` counts the coverage
+(`payment_runs.group_answers`): groups accepted, rejected,
+unanswered, and re-exported.
