@@ -37,12 +37,12 @@ from dataclasses import dataclass, field
 
 from .bundles import segment_bundle
 from .checkpoints import get_checkpointer
-from .config import env_float, env_str, load_dotenv
+from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
-from .queue import build_queue
+from .queue import build_queue, recovery_case_aging
 from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
@@ -118,6 +118,18 @@ def payment_run_four_eyes_threshold() -> float:
     return env_float(
         "PAYMENT_RUN_FOUR_EYES_THRESHOLD", PAYMENT_RUN_FOUR_EYES_DEFAULT
     )
+
+
+# Default recovery-case SLA: a case may sit in one status this many
+# days before the queue flags it as stuck (RECOVERY_CASE_SLA_DAYS
+# overrides it).
+RECOVERY_CASE_SLA_DEFAULT_DAYS = 14
+
+
+def recovery_case_sla_days() -> int:
+    """The configured recovery-case SLA, in days per status."""
+    load_dotenv()
+    return max(1, env_int("RECOVERY_CASE_SLA_DAYS", RECOVERY_CASE_SLA_DEFAULT_DAYS))
 
 
 @dataclass
@@ -558,6 +570,18 @@ class InvoiceService:
                 output_tokens += telemetry.output_tokens or 0
             if telemetry.estimated_cost_usd is not None:
                 costs.append(telemetry.estimated_cost_usd)
+        packs = self._get_store().list_recovery_packs()
+        sla_days = recovery_case_sla_days()
+        case_items, case_buckets, case_breaches = recovery_case_aging(
+            packs,
+            as_of=datetime.now(timezone.utc).date(),
+            sla_days=sla_days,
+        )
+        cases_by_status: dict[str, int] = {}
+        for pack in packs:
+            cases_by_status[pack.case_status] = (
+                cases_by_status.get(pack.case_status, 0) + 1
+            )
         return {
             "runs_total": len(records),
             "by_status": by_status,
@@ -575,6 +599,14 @@ class InvoiceService:
             "total_estimated_cost_usd": (
                 round(sum(costs), 4) if costs else None
             ),
+            "recovery_cases": {
+                "total": len(packs),
+                "open": len(case_items),
+                "by_status": cases_by_status,
+                "sla_days": sla_days,
+                "sla_breaches": case_breaches,
+                "age_buckets": case_buckets,
+            },
         }
 
     def audit_rows(self) -> list[dict]:
@@ -1104,10 +1136,17 @@ class InvoiceService:
 
     def queue_view(self, as_of: str = "") -> QueueView:
         """The AP aging queue: invoices still at the gate, aged by
-        due date, overdue first, with the triage mix. A pure read
-        over the store — it decides and writes nothing."""
+        due date, overdue first, with the triage mix — plus the open
+        recovery cases with their per-status aging and SLA flags. A
+        pure read over the store — it decides and writes nothing."""
         anchor = _parse_date(as_of) if as_of else None
-        return build_queue(self._get_store().list_records(), as_of=anchor)
+        store = self._get_store()
+        return build_queue(
+            store.list_records(),
+            as_of=anchor,
+            recovery_packs=store.list_recovery_packs(),
+            recovery_sla_days=recovery_case_sla_days(),
+        )
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)

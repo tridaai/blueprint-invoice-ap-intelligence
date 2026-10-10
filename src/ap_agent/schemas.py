@@ -795,9 +795,29 @@ class QueueItem(BaseModel):
     discount_days_left: Optional[int] = None
 
 
+class RecoveryCaseAgingItem(BaseModel):
+    """One open recovery case, aged: how long the case has existed
+    and how long it has sat in its current status. A case breaches
+    its SLA when the current status has lasted longer than the
+    configured limit — money is leaking while it sits."""
+
+    pack_id: str
+    duplicate_invoice_id: str
+    supplier_name: str = ""
+    currency: str = "USD"
+    amount: float = 0.0
+    case_status: str = "opened"  # the step the case is stuck on
+    age_days: Optional[int] = None  # since the case opened
+    status_age_days: Optional[int] = None  # since the last transition
+    sla_breached: bool = False
+    bucket: str = "unknown"  # age_0_7 | age_8_30 | age_30_plus | unknown
+
+
 class QueueView(BaseModel):
     """The aging queue: awaiting invoices, overdue first, with the
-    triage mix — a pure read model over the store's records."""
+    triage mix — a pure read model over the store's records. Open
+    recovery cases ride along with their own aging, because a case
+    stuck at one step is the other half of the approver's workload."""
 
     as_of: str = ""
     count: int = 0
@@ -806,6 +826,11 @@ class QueueView(BaseModel):
     totals_by_currency: dict[str, float] = Field(default_factory=dict)
     buckets: dict[str, int] = Field(default_factory=dict)
     items: list[QueueItem] = Field(default_factory=list)
+    recovery_cases: list[RecoveryCaseAgingItem] = Field(default_factory=list)
+    recovery_buckets: dict[str, int] = Field(default_factory=dict)
+    recovery_open_count: int = 0
+    recovery_sla_breaches: int = 0
+    recovery_sla_days: int = 0
 
 
 # ---------------------------------------------------------------------------

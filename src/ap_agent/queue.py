@@ -13,17 +13,93 @@ answers it from the store's records, in code:
 
 It writes nothing and decides nothing — the same drafts wait at the
 same gate; this is the order a human works them in.
+
+Open **recovery cases** age here too: a duplicate-payment case
+sitting in ``supplier_contacted`` for a month is money leaking, so
+each open case carries its total age, the age of its current
+status, and an SLA flag (``RECOVERY_CASE_SLA_DAYS``) — the queue
+answers "what is stuck, and since when?" for cases as well as
+invoices.
 """
 
 from __future__ import annotations
 
 from datetime import date
+from typing import Iterable
 
 from .matching import _parse_date
-from .schemas import QueueItem, QueueView
+from .schemas import QueueItem, QueueView, RecoveryCaseAgingItem, RecoveryPack
 from .store import ApprovalRecord
 
 _SEVERITY_RANK = {"high": 0, "moderate": 1, "low": 2}
+
+DEFAULT_RECOVERY_SLA_DAYS = 14
+
+
+def _age_bucket(age_days: int | None) -> str:
+    if age_days is None:
+        return "unknown"
+    if age_days > 30:
+        return "age_30_plus"
+    if age_days >= 8:
+        return "age_8_30"
+    return "age_0_7"
+
+
+def recovery_case_aging(
+    packs: Iterable[RecoveryPack],
+    *,
+    as_of: date,
+    sla_days: int = DEFAULT_RECOVERY_SLA_DAYS,
+) -> tuple[list[RecoveryCaseAgingItem], dict[str, int], int]:
+    """Age the open recovery cases: (items, buckets, sla_breaches).
+
+    Closed cases are done and drop out. A case's age runs from the
+    pack's creation; its status age runs from the last history
+    event (the transition that put it in its current status). The
+    SLA is on the *status* age — a freshly-transitioned old case is
+    moving, not stuck. Work order: SLA breaches first, then the
+    longest-stuck, then the oldest.
+    """
+    items: list[RecoveryCaseAgingItem] = []
+    buckets: dict[str, int] = {}
+    breaches = 0
+    for pack in packs:
+        if pack.case_status == "closed":
+            continue
+        created = _parse_date(pack.created_at)
+        age_days = (as_of - created).days if created is not None else None
+        last_at = pack.case_history[-1].at if pack.case_history else pack.created_at
+        since = _parse_date(last_at)
+        status_age = (as_of - since).days if since is not None else None
+        breached = status_age is not None and status_age > sla_days
+        if breached:
+            breaches += 1
+        bucket = _age_bucket(age_days)
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+        items.append(
+            RecoveryCaseAgingItem(
+                pack_id=pack.pack_id,
+                duplicate_invoice_id=pack.duplicate_invoice_id,
+                supplier_name=pack.supplier_name,
+                currency=pack.currency,
+                amount=pack.amount,
+                case_status=pack.case_status,
+                age_days=age_days,
+                status_age_days=status_age,
+                sla_breached=breached,
+                bucket=bucket,
+            )
+        )
+    items.sort(
+        key=lambda item: (
+            0 if item.sla_breached else 1,
+            -(item.status_age_days or 0),
+            -(item.age_days or 0),
+            item.pack_id,
+        )
+    )
+    return items, buckets, breaches
 
 
 def _bucket(days_overdue: int | None, due: date | None, as_of: date) -> str:
@@ -43,11 +119,16 @@ def _bucket(days_overdue: int | None, due: date | None, as_of: date) -> str:
 
 
 def build_queue(
-    records: list[ApprovalRecord], *, as_of: date | None = None
+    records: list[ApprovalRecord],
+    *,
+    as_of: date | None = None,
+    recovery_packs: Iterable[RecoveryPack] = (),
+    recovery_sla_days: int = DEFAULT_RECOVERY_SLA_DAYS,
 ) -> QueueView:
     """The aging queue over the store's records, as of a date
     (today when not given — tests and API callers pass it
-    explicitly for a stable view)."""
+    explicitly for a stable view). Open recovery cases age
+    alongside the invoices (see :func:`recovery_case_aging`)."""
     as_of = as_of or date.today()
     items: list[QueueItem] = []
     triage_mix: dict[str, int] = {}
@@ -107,6 +188,9 @@ def build_queue(
         )
 
     items.sort(key=sort_key)
+    case_items, case_buckets, case_breaches = recovery_case_aging(
+        recovery_packs, as_of=as_of, sla_days=recovery_sla_days
+    )
     return QueueView(
         as_of=as_of.isoformat(),
         count=len(items),
@@ -115,4 +199,9 @@ def build_queue(
         totals_by_currency=totals,
         buckets=buckets,
         items=items,
+        recovery_cases=case_items,
+        recovery_buckets=case_buckets,
+        recovery_open_count=len(case_items),
+        recovery_sla_breaches=case_breaches,
+        recovery_sla_days=recovery_sla_days,
     )
