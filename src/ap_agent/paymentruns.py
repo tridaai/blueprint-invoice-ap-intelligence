@@ -33,6 +33,11 @@ confirms. The agent's part stops exactly where its authority stops:
   as a forecast, so the warning arrives while the confirmer can
   still act on it. A forecast is labelled as one, in the data and
   in the note; the export-time drift check stays the authority.
+- And the forecast itself is scored (:func:`forecast_accuracy`):
+  every exported run's flags are set against its measured drift,
+  so the projection the confirmer trusted earns or loses its keep
+  in numbers — precision, recall, and the value on each side of
+  the ledger, aggregated into the same metrics section.
 """
 
 from __future__ import annotations
@@ -289,6 +294,165 @@ def _lag_stats(lags: list[float]) -> dict | None:
     }
 
 
+def _new_accuracy_cell() -> dict:
+    return {
+        "flagged_drifted": 0,
+        "flagged_saved": 0,
+        "unflagged_drifted": 0,
+        "unflagged_saved": 0,
+        "value_flagged": 0.0,
+        "value_lost_flagged": 0.0,
+        "value_lost_unflagged": 0.0,
+    }
+
+
+def _accuracy_rates(cell: dict) -> tuple[float | None, float | None]:
+    flagged = cell["flagged_drifted"] + cell["flagged_saved"]
+    drifted = cell["flagged_drifted"] + cell["unflagged_drifted"]
+    precision = round(cell["flagged_drifted"] / flagged, 4) if flagged else None
+    recall = round(cell["flagged_drifted"] / drifted, 4) if drifted else None
+    return precision, recall
+
+
+def forecast_accuracy(runs: list[PaymentRun]) -> dict:
+    """Score the confirmation-time drift forecasts against what
+    the exports actually measured — the ``forecast_accuracy``
+    entry of :func:`handoff_metrics`.
+
+    A forecast is a projection; this is its report card. For every
+    *exported* run whose confirmation carried a forecast computed
+    from a measured lag (its ``drift_forecast_basis`` says so),
+    each discounted member lands in one cell of the two-by-two:
+
+    - **flagged & drifted** — the warning fired and the discount
+      still lapsed: the forecast was right; the process was slow.
+    - **flagged & saved** — the warning fired and the member
+      exported in time: the outcome the warning exists to buy
+      (the forecast cannot distinguish "saved by the warning" from
+      "would have been fine" — it claims neither).
+    - **unflagged & drifted** — the miss: a discount lapsed that
+      no forecast named. This is the cell that argues for a
+      better lag statistic — or for retiring the forecast.
+    - **unflagged & saved** — the quiet majority, counted so the
+      rates have honest denominators.
+
+    A member counts as drifted when its export-time drift entry
+    lost value (``discount_lost`` > 0); a partial re-price is
+    drift too. Precision = flagged∩drifted ÷ flagged; recall =
+    flagged∩drifted ÷ drifted; ``None`` when the denominator is
+    empty — no rate is dressed up over zero cases.
+
+    Runs exported before forecasts existed, and runs whose
+    confirmation honestly made no forecast (no measured lag yet),
+    are *unscored*: their drift is reported separately
+    (``unscored_drift``) rather than counted against a forecast
+    nobody made. Pure over the runs given.
+    """
+    overall = _new_accuracy_cell()
+    by_currency: dict[str, dict] = {}
+    scored_runs = 0
+    unscored_runs = 0
+    unscored_members = 0
+    unscored_value = 0.0
+    for run in runs:
+        if not run.handoff_generated_at:
+            continue
+        drifted = {
+            entry.invoice_id: entry
+            for entry in run.handoff_drift
+            if entry.discount_lost > 0.005
+        }
+        if not run.drift_forecast_basis.startswith("forecast from"):
+            unscored_runs += 1
+            unscored_members += len(drifted)
+            unscored_value += sum(
+                entry.discount_lost for entry in drifted.values()
+            )
+            continue
+        scored_runs += 1
+        cell = by_currency.setdefault(run.currency, _new_accuracy_cell())
+        flagged = {entry.invoice_id: entry for entry in run.drift_forecast}
+        members = (
+            set(flagged)
+            | set(drifted)
+            | {
+                line.invoice_id
+                for line in run.lines
+                if line.discount_amount > 0
+            }
+        )
+        for target in (overall, cell):
+            target["value_flagged"] = round(
+                target["value_flagged"]
+                + sum(entry.discount_amount for entry in flagged.values()),
+                2,
+            )
+        for invoice_id in members:
+            is_flagged = invoice_id in flagged
+            is_drifted = invoice_id in drifted
+            if is_flagged and is_drifted:
+                bucket = "flagged_drifted"
+            elif is_flagged:
+                bucket = "flagged_saved"
+            elif is_drifted:
+                bucket = "unflagged_drifted"
+            else:
+                bucket = "unflagged_saved"
+            for target in (overall, cell):
+                target[bucket] += 1
+                if is_drifted:
+                    key = (
+                        "value_lost_flagged"
+                        if is_flagged
+                        else "value_lost_unflagged"
+                    )
+                    target[key] = round(
+                        target[key] + drifted[invoice_id].discount_lost, 2
+                    )
+    precision, recall = _accuracy_rates(overall)
+    return {
+        "scored_runs": scored_runs,
+        "unscored_runs": unscored_runs,
+        "members": {
+            key: overall[key]
+            for key in (
+                "flagged_drifted",
+                "flagged_saved",
+                "unflagged_drifted",
+                "unflagged_saved",
+            )
+        },
+        "precision": precision,
+        "recall": recall,
+        "value_flagged": overall["value_flagged"],
+        "value_lost_flagged": overall["value_lost_flagged"],
+        "value_lost_unflagged": overall["value_lost_unflagged"],
+        "by_currency": {
+            currency: {
+                **{
+                    key: cell[key]
+                    for key in (
+                        "flagged_drifted",
+                        "flagged_saved",
+                        "unflagged_drifted",
+                        "unflagged_saved",
+                        "value_flagged",
+                        "value_lost_flagged",
+                        "value_lost_unflagged",
+                    )
+                },
+                "precision": _accuracy_rates(cell)[0],
+                "recall": _accuracy_rates(cell)[1],
+            }
+            for currency, cell in sorted(by_currency.items())
+        },
+        "unscored_drift": {
+            "members": unscored_members,
+            "value_lost": round(unscored_value, 2),
+        },
+    }
+
+
 def handoff_metrics(runs: list[PaymentRun]) -> dict:
     """The hand-off story, aggregated over the stored runs — the
     ``payment_runs`` section of ``/metrics``.
@@ -298,8 +462,11 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
     currencies, and how long runs sat between proposal,
     confirmation and export — the confirm→export lag is the
     process leak that causes drift, so the two are reported side
-    by side. Pure over the runs given; runs exported before the
-    receipt fields existed simply contribute what they carry.
+    by side. The confirmation-time forecast is scored in the same
+    section (:func:`forecast_accuracy`): a projection that is
+    never graded is just a decoration. Pure over the runs given;
+    runs exported before the receipt fields existed simply
+    contribute what they carry.
     """
     by_status: dict[str, int] = {}
     by_format: dict[str, int] = {}
@@ -343,6 +510,7 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
             "confirm_to_export": _lag_stats(confirm_lags),
             "proposal_to_export": _lag_stats(proposal_lags),
         },
+        "forecast_accuracy": forecast_accuracy(runs),
     }
 
 
