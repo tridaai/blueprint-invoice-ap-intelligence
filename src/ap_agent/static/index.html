@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trida AI Blueprint — Invoice / AP Document Intelligence</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  :root { --ink:#0A0A0A; --muted:#5b6472; --line:#e3e6ec; --accent:#4F46E5; --accent-soft:#eef2ff; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; --bg:#ffffff; --panel:#f8fafc; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--ink); background:var(--bg); }
+  header { border-bottom:1px solid var(--line); padding:14px 22px; display:flex; align-items:center; gap:14px; }
+  header img { height:30px; }
+  header h1 { font-size:17px; margin:0; font-weight:650; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:12.5px; }
+  main { max-width:1080px; margin:0 auto; padding:20px 22px 60px; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:16px; }
+  select, input[type=text] { font:inherit; font-size:13.5px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  button { font:inherit; font-size:13.5px; padding:8px 16px; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button.secondary { background:#fff; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .note { font-size:12.5px; color:var(--muted); }
+  section { border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:14px; background:#fff; }
+  section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px 22px; font-size:13.5px; }
+  .grid b { display:block; font-size:11.5px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; margin-bottom:2px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:#dcfce7; color:var(--ok); } .pill.warn { background:#fef3c7; color:var(--warn); }
+  .pill.bad { background:#fee2e2; color:var(--bad); } .pill.info { background:var(--accent-soft); color:var(--accent); }
+  pre { white-space:pre-wrap; word-break:break-word; font-size:13px; line-height:1.5; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin:6px 0; }
+  ul { margin:6px 0; padding-left:18px; font-size:13.5px; line-height:1.55; }
+  .fraud { border-color:#fca5a5; background:#fef2f2; }
+  .kv { font-size:13.5px; line-height:1.6; }
+  .hidden { display:none; }
+  #status { font-size:13.5px; color:var(--muted); margin:10px 0; min-height:20px; }
+  .gate { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+</style>
+</head>
+<body>
+<header>
+  <img src="/static/brand/tridaai-logo.png" alt="Trida AI">
+  <div>
+    <h1>Invoice / AP Document Intelligence Agent</h1>
+    <p>Trida AI Blueprint · Built on NVIDIA NIM · synthetic data · drafts stop at a finance approver — nothing is approved or paid by the agent</p>
+  </div>
+</header>
+<main>
+  <div class="bar">
+    <label class="note" for="sample">Sample invoice</label>
+    <select id="sample"></select>
+    <button id="run">Analyse invoice</button>
+    <input type="text" id="apikey" placeholder="API key (if API_KEY is set)" size="22">
+    <span class="note" id="evalnote"></span>
+  </div>
+  <div id="status">Pick a sample invoice and analyse it. The full pipeline runs: OCR → vision verify → three-way match → triage → diagnosis → drafts → guardrails → approver gate.</div>
+  <div id="out" class="hidden">
+    <section id="sec-summary"></section>
+    <section id="sec-ocr"></section>
+    <section id="sec-match"></section>
+    <section id="sec-triage"></section>
+    <section id="sec-diagnosis"></section>
+    <section id="sec-options"></section>
+    <section id="sec-drafts"></section>
+    <section id="sec-checks"></section>
+    <section id="sec-gate"></section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let currentId = null;
+
+function headers() {
+  const h = {"Content-Type": "application/json"};
+  const k = $("apikey").value.trim();
+  if (k) h["X-API-Key"] = k;
+  return h;
+}
+async function loadSamples() {
+  const res = await fetch("/samples", {headers: headers()});
+  const samples = await res.json();
+  $("sample").innerHTML = samples.map(s =>
+    `<option value="${esc(s.invoice_id)}">${esc(s.invoice_id)} — ${esc(s.supplier_name)} · ${esc(s.currency)} ${esc(s.total_amount)}</option>`).join("");
+  window._samples = Object.fromEntries(samples.map(s => [s.invoice_id, s]));
+}
+async function loadEvals() {
+  try {
+    const res = await fetch("/evals/results", {headers: headers()});
+    if (!res.ok) return;
+    const r = await res.json();
+    $("evalnote").textContent = `Golden evals: outcome ${r.outcome_match}, match status ${r.match_status_match} (synthetic regression gate)`;
+  } catch (e) { /* no eval results yet */ }
+}
+function pill(text, cls) { return `<span class="pill ${cls}">${esc(text)}</span>`; }
+function sevPill(sev) { return pill(sev, sev === "low" ? "ok" : sev === "moderate" ? "warn" : "bad"); }
+
+function render(r) {
+  currentId = r.invoice_id;
+  const f = r.facts, t = r.triage;
+  $("sec-summary").innerHTML = `<h2>Invoice</h2><div class="grid">
+    <div><b>Invoice</b>${esc(r.invoice_id)} · ${esc(r.invoice_number || "—")}</div>
+    <div><b>Supplier</b>${esc(r.supplier_name)}</div>
+    <div><b>Triage outcome</b>${pill(t.outcome, t.outcome === "clean_match" ? "ok" : "warn")} ${sevPill(t.severity)}</div>
+    <div><b>Status</b>${esc(r.status)} · external action: ${r.external_action_taken ? "yes (webhook)" : "none"}</div>
+    <div><b>Match status</b>${esc(f.match_status)} · score ${f.match_score}</div>
+    <div><b>Autonomy (printed only)</b>${r.autonomy && r.autonomy.eligible_for_auto_triage ? "eligible for auto-triage" : "human decision required"}</div>
+  </div>
+  <p class="kv">${esc(t.rationale)}</p>`;
+
+  const ocrRows = (r.ocr_results || []).map(o =>
+    `<tr><td>${esc(o.document_id || o.doc_type)}</td><td>${esc(o.engine)}</td><td>${o.mean_confidence}</td><td>${o.low_confidence ? pill("LOW", "bad") : pill("ok", "ok")}</td><td>${o.char_count} chars</td></tr>`).join("");
+  const v = r.vision || {};
+  $("sec-ocr").innerHTML = `<h2>OCR + vision verify</h2>
+    <table><tr><th>Document</th><th>Engine</th><th>Mean confidence</th><th></th><th>Text</th></tr>${ocrRows}</table>
+    <p class="kv" style="margin-top:10px"><b>Vision verdict</b> (via ${esc(v.source || "—")}): detected <b>${esc(v.document_type_detected || "—")}</b> · is_invoice <b>${v.is_invoice}</b> · legible <b>${v.legible}</b> · quality <b>${esc(v.quality || "—")}</b></p>`;
+
+  const lineRows = (f.line_matches || []).map(m =>
+    `<tr><td>${m.line_no}</td><td>${esc(m.description)}</td><td>${m.invoice_qty} @ ${m.invoice_price}</td><td>${m.po_qty ?? "—"} @ ${m.po_price ?? "—"}</td><td>${m.received_qty ?? "—"}</td><td>${pill(m.status, m.status === "matched" ? "ok" : "bad")}</td><td>${esc(m.detail)}</td></tr>`).join("");
+  $("sec-match").innerHTML = `<h2>Three-way match (computed in code)</h2>
+    <table><tr><th>#</th><th>Line</th><th>Invoiced</th><th>PO</th><th>Received</th><th>Status</th><th>Detail</th></tr>${lineRows || '<tr><td colspan="7">No lines matched — see discrepancies.</td></tr>'}</table>
+    <p class="kv" style="margin-top:10px">Lines total ${f.invoice_lines_total} ${esc(f.currency)} · stated total ${f.invoice_total_stated} · totals variance ${f.totals_variance_pct}% · tax stated ${f.tax_stated} vs expected ${f.tax_expected} · currency consistent: ${f.currency_consistent}${f.duplicate_suspected ? ` · <b>suspected duplicate of ${esc(f.duplicate_of)}</b>` : ""}</p>
+    ${(f.discrepancies || []).length ? `<ul>${f.discrepancies.map(d => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}`;
+
+  const cc = r.cross_check || {};
+  $("sec-triage").innerHTML = `<h2>Triage cross-check</h2><div class="kv">
+    Rules: <b>${esc(cc.rule_outcome || t.outcome)}</b> · LLM: <b>${esc(cc.llm_outcome || "unavailable")}</b>${cc.llm_confidence != null ? ` (${cc.llm_confidence})` : ""} · Resolution: <b>${esc(cc.resolution || "rules_only")}</b><br>
+    <span class="note">${esc(cc.note || "")}</span></div>
+    <ul>${(t.signals || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul>`;
+
+  const d = r.diagnosis || {};
+  $("sec-diagnosis").innerHTML = `<h2>Diagnosis (composed by: ${esc(d.source || "—")})</h2>
+    <p class="kv">${esc(d.summary || "")}</p>
+    ${(d.tool_calls || []).length ? `<p class="kv"><b>Tool calls:</b> ${d.tool_calls.map(c => esc(c.name)).join(", ")}</p>` : ""}
+    <ul>${(d.risk_factors || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+    <p class="kv"><b>Policies:</b> ${(r.policies || []).map(p => `[${esc(p.policy_id)}] ${esc(p.title)}`).join(" · ") || "none"}</p>`;
+
+  $("sec-options").innerHTML = `<h2>Next-step options (scored by code)</h2>
+    <table><tr><th>Option</th><th>Score</th><th></th><th>Description</th></tr>
+    ${(r.options || []).map(o => `<tr><td>${esc(o.title)}</td><td>${o.score}</td><td>${o.recommended ? pill("recommended", "info") : ""}</td><td>${esc(o.description)}</td></tr>`).join("")}</table>`;
+
+  const dr = r.drafts || {};
+  $("sec-drafts").innerHTML = `<h2>Drafts (never sent by the agent)</h2>
+    <p class="kv"><b>Subject:</b> ${esc(dr.subject || "")}</p>
+    <b class="note">SUPPLIER QUERY LETTER</b><pre>${esc(dr.supplier_letter || "")}</pre>
+    <b class="note">AP PACKET (internal)</b><pre>${esc(dr.ap_packet || "")}</pre>
+    ${r.needs_information && r.information_request ? `<b class="note">INFORMATION REQUEST (composed, not sent)</b><pre>${esc(r.information_request.message || "")}</pre>` : ""}`;
+
+  const ver = r.verification || {}, rev = r.review || {}, val = r.validation || {};
+  const checkRows = (val.checks || []).map(c => `<tr><td>${c.passed ? pill("PASS", "ok") : pill("FAIL", "bad")}</td><td>${esc(c.name)}</td><td>${esc(c.detail)}</td></tr>`).join("");
+  const tel = r.telemetry || {};
+  $("sec-checks").innerHTML = `<h2>Verification · review · guardrails · telemetry</h2>
+    <p class="kv">Self-check: <b>${ver.grounded ? "grounded" : "NOT GROUNDED"}</b> (${esc(ver.source || "—")})${(ver.issues || []).length ? " — " + ver.issues.map(esc).join("; ") : ""}<br>
+    Independent review: <b>${esc((rev.verdict || "—").toUpperCase())}</b> (${esc(rev.source || "—")})${r.reviewer_blocked ? " — REVIEWER BLOCKED" : ""}${(rev.findings || []).length ? " — " + rev.findings.map(esc).join("; ") : ""}</p>
+    <table><tr><th></th><th>Guardrail</th><th>Detail</th></tr>${checkRows}</table>
+    ${r.repair_attempted ? `<p class="kv">Repair attempted (${r.repair_attempts}): ${r.repaired ? "redraft passed" : "still failing"}</p>` : ""}
+    <p class="kv">Telemetry: ${esc(tel.backend || "—")}${tel.model ? " · " + esc(tel.model) : ""} · ${tel.model_calls ?? 0} model call(s) · ${tel.input_tokens == null ? "tokens n/a (offline)" : tel.input_tokens + " in / " + tel.output_tokens + " out"} · ${tel.latency_seconds ?? "—"}s</p>`;
+
+  const fraud = r.bank_change_blocked;
+  $("sec-gate").className = fraud ? "fraud" : "";
+  $("sec-gate").innerHTML = `<h2>Approver gate</h2>
+    ${fraud ? `<p class="kv"><b>⛔ Bank-detail change request screened in the supplier text.</b> This case is blocked for payment preparation; the new details were never echoed into the drafts. Verify any bank change out-of-band per [AP-BANK-01].</p>` : ""}
+    ${(r.fraud_flags || []).map(x => `<p class="kv">Fraud screen: ${esc(x)}</p>`).join("")}
+    ${(r.injection_flags || []).map(x => `<p class="kv">Injection screen: ${esc(x)}</p>`).join("")}
+    <p class="kv">Status: <b>${esc(r.status)}</b>${r.decided_by ? ` · decided by ${esc(r.decided_by)}${r.decision_reason ? " — " + esc(r.decision_reason) : ""}` : ""}</p>
+    <div class="gate">
+      <input type="text" id="actor" placeholder="Your name (approver)" size="20">
+      <input type="text" id="reason" placeholder="Reason (recorded; teaches later runs)" size="34">
+      <button id="approve">Approve packet</button>
+      <button id="reject" class="secondary">Reject</button>
+    </div>
+    <p class="note">Approving records the decision only — it never pays the invoice. Drafts that fail guardrails cannot be approved (the API returns 422).</p>`;
+  $("approve").onclick = () => decide("approve");
+  $("reject").onclick = () => decide("reject");
+  $("out").classList.remove("hidden");
+}
+
+async function decide(kind) {
+  const actor = $("actor").value.trim(), reason = $("reason").value.trim();
+  if (!actor) { $("status").textContent = "Enter your name first — decisions are attributable."; return; }
+  const res = await fetch(`/invoices/${currentId}/${kind}`, {method: "POST", headers: headers(), body: JSON.stringify({actor, reason})});
+  const body = await res.json();
+  if (!res.ok) { $("status").textContent = `Decision refused (${res.status}): ${body.detail || "unknown error"}`; return; }
+  $("status").textContent = `Recorded: ${body.status} by ${body.decided_by}. No payment was made — approval readies the packet for the AP system of record.`;
+  render(body);
+}
+
+$("run").onclick = async () => {
+  const sample = window._samples[$("sample").value];
+  $("status").textContent = "Analysing…";
+  $("run").disabled = true;
+  try {
+    const res = await fetch("/invoices/analyze", {method: "POST", headers: headers(), body: JSON.stringify(sample)});
+    const body = await res.json();
+    if (!res.ok) { $("status").textContent = `Analysis failed (${res.status}): ${body.detail || ""}`; return; }
+    render(body);
+    $("status").textContent = `Analysed ${body.invoice_id}: ${body.triage.outcome} — awaiting a finance approver.`;
+  } finally { $("run").disabled = false; }
+};
+
+loadSamples(); loadEvals();
+</script>
+</body>
+</html>
