@@ -31,6 +31,7 @@ from .schemas import (
     EscalationDigest,
     HandoffProfile,
     LagSegmentProposal,
+    SupplierContactProposal,
     MasterChangeRequest,
     PaymentRun,
     ProfileChangeProposal,
@@ -224,6 +225,7 @@ class InMemoryStore:
         self._handoff_profiles: dict[str, str] = {}
         self._profile_proposals: dict[str, str] = {}
         self._lag_proposals: dict[str, str] = {}
+        self._supplier_contact_proposals: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
@@ -384,6 +386,37 @@ class InMemoryStore:
                 self._lag_proposals[k] for k in sorted(self._lag_proposals)
             ]
         return [LagSegmentProposal.model_validate_json(p) for p in payloads]
+
+    def save_supplier_contact_proposal(
+        self, proposal: SupplierContactProposal
+    ) -> None:
+        with self._lock:
+            self._supplier_contact_proposals[proposal.proposal_id] = (
+                proposal.model_dump_json()
+            )
+
+    def get_supplier_contact_proposal(
+        self, proposal_id: str
+    ) -> SupplierContactProposal | None:
+        with self._lock:
+            payload = self._supplier_contact_proposals.get(proposal_id)
+        return (
+            SupplierContactProposal.model_validate_json(payload)
+            if payload
+            else None
+        )
+
+    def list_supplier_contact_proposals(
+        self,
+    ) -> list[SupplierContactProposal]:
+        with self._lock:
+            payloads = [
+                self._supplier_contact_proposals[k]
+                for k in sorted(self._supplier_contact_proposals)
+            ]
+        return [
+            SupplierContactProposal.model_validate_json(p) for p in payloads
+        ]
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -721,6 +754,41 @@ class PostgresStore:
         proposals = [
             LagSegmentProposal.model_validate(d)
             for d in self._all_blobs("lag_segment_proposals")
+        ]
+        return sorted(proposals, key=lambda p: p.proposal_id)
+
+    # --- Round-19 artefacts: supplier-contact proposals
+    # (migration 0014). Same blob pattern, keyed by proposal id;
+    # the documents-up-front list is derived from this ledger.
+
+    def save_supplier_contact_proposal(
+        self, proposal: SupplierContactProposal
+    ) -> None:
+        self._save_blob(
+            "supplier_contact_proposals",
+            "proposal_id",
+            proposal.proposal_id,
+            proposal.model_dump_json(),
+        )
+
+    def get_supplier_contact_proposal(
+        self, proposal_id: str
+    ) -> SupplierContactProposal | None:
+        data = self._get_blob(
+            "supplier_contact_proposals", "proposal_id", proposal_id
+        )
+        return (
+            SupplierContactProposal.model_validate(data)
+            if data is not None
+            else None
+        )
+
+    def list_supplier_contact_proposals(
+        self,
+    ) -> list[SupplierContactProposal]:
+        proposals = [
+            SupplierContactProposal.model_validate(d)
+            for d in self._all_blobs("supplier_contact_proposals")
         ]
         return sorted(proposals, key=lambda p: p.proposal_id)
 

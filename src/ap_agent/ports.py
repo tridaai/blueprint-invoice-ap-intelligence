@@ -64,7 +64,12 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
     )
     from .schemas import BundleResult, MasterChangeRequest, PaymentRun, RecoveryPack
     from .schemas import EscalationDigest, StatementReconciliation, SupplierMasterRecord
-    from .schemas import HandoffProfile, LagSegmentProposal, ProfileChangeProposal
+    from .schemas import (
+        HandoffProfile,
+        LagSegmentProposal,
+        ProfileChangeProposal,
+        SupplierContactProposal,
+    )
     from .store import ApprovalRecord
 
 
@@ -168,6 +173,12 @@ class Store(Protocol):
     def get_lag_segment_proposal(self, proposal_id: str) -> "LagSegmentProposal | None": ...
 
     def list_lag_segment_proposals(self) -> list["LagSegmentProposal"]: ...
+
+    def save_supplier_contact_proposal(self, proposal: "SupplierContactProposal") -> None: ...
+
+    def get_supplier_contact_proposal(self, proposal_id: str) -> "SupplierContactProposal | None": ...
+
+    def list_supplier_contact_proposals(self) -> list["SupplierContactProposal"]: ...
 
     def prior_invoices(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
 

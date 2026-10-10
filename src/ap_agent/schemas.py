@@ -1638,6 +1638,98 @@ class LagSegmentProposalDecisionRequest(BaseModel):
         return self.actor or self.approver or self.reviewer
 
 
+class SupplierContactProposalEvent(BaseModel):
+    """One entry in a supplier-contact proposal's audit trail:
+    the drafting, and the decision that closed it."""
+
+    status: str = ""  # proposed | approved | rejected
+    actor: str = ""
+    at: str = ""  # ISO timestamp
+    note: str = ""
+
+
+class SupplierContactProposal(BaseModel):
+    """A governed change to a supplier's onboarding document
+    checklist, drafted from the re-analysis analytics.
+
+    The analytics name the suppliers re-analysis cannot
+    unblock: their cases are re-read, reply by reply, and the
+    outcome does not move — because the document that would
+    settle the case was never collected. Asking for it
+    mid-dispute, one clarification at a time, is the process
+    failing politely. This is the governed path from that
+    pattern to a standing change, under the proposals
+    discipline (drafted from the evidence by one operator,
+    decided by a second, applied only on approval):
+
+    - ``collect_documents_upfront`` — the supplier's re-analyses
+      keep landing unchanged; approval puts the supplier on the
+      documents-up-front list: their onboarding checklist gains
+      the missing documents, collected before the first invoice
+      rather than chased after the tenth. The queue's
+      information waits for a listed supplier read
+      ``documents_upfront`` — the pattern, named where it
+      happens.
+    - ``release_documents_upfront`` — a listed supplier whose
+      record since listing shows every re-analysis moving its
+      case (none landing unchanged): the checklist did its
+      work, and approval takes the supplier off the list.
+
+    Who stands listed is DERIVED from this ledger — the latest
+    approved decision per supplier — so the proposals are the
+    audit trail and the state in one document, and drafting
+    applies nothing: left undecided, a proposal is a question,
+    not a checklist change. The drafting rests on the
+    analytics' own counts, recorded as ``evidence`` at draft
+    time; an approval whose evidence has moved since the draft
+    is refused, to be re-drafted against fresh analytics."""
+
+    proposal_id: str  # SCP-0001 …
+    supplier_name: str = ""
+    kind: str  # collect_documents_upfront | release_documents_upfront
+    basis: str = ""  # the analytics' account the proposal answers
+    # The analytics readings the draft rests on (re-analysis and
+    # unchanged counts; for a release, the listing's readings
+    # too) — the decider compares evidence, not prose.
+    evidence: dict = Field(default_factory=dict)
+    proposed_by: str = ""
+    proposed_at: str = ""
+    status: str = "pending"  # pending | approved | rejected
+    decided_by: Optional[str] = None
+    decided_at: Optional[str] = None
+    decision_note: str = ""
+    applied_at: Optional[str] = None  # when approval landed the decision
+    history: list[SupplierContactProposalEvent] = Field(
+        default_factory=list
+    )
+
+
+class SupplierContactProposalDraftRequest(BaseModel):
+    """Draft supplier-contact proposals from the re-analysis
+    analytics: the operator running the drafting sweep."""
+
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class SupplierContactProposalDecisionRequest(BaseModel):
+    """The second operator's decision on a supplier-contact
+    proposal: proposer ≠ decider, as on the other proposals."""
+
+    approve: bool
+    note: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
 class ProfileProposalDraftRequest(BaseModel):
     """Draft profile-change proposals from the effectiveness
     grades: the operator running the drafting sweep."""
@@ -1801,6 +1893,13 @@ class InformationWaitItem(BaseModel):
     # Whether this episode has already been escalated by the
     # information-wait sweep (its ledger entry is on the record).
     escalated: bool = False
+    # Whether the supplier stands on the governed
+    # documents-up-front list (an approved supplier-contact
+    # proposal): the documents this wait is chasing are exactly
+    # what the supplier was asked to file at onboarding — the
+    # checklist change doing its work, named so the chase reads
+    # as the pattern it is, not a one-off.
+    documents_upfront: bool = False
 
 
 class GroupReceiptWaitItem(BaseModel):

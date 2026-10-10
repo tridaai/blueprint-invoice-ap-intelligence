@@ -90,6 +90,8 @@ from .schemas import (
     InvoiceBundleInput,
     InvoiceInput,
     LagSegmentProposal,
+    SupplierContactProposal,
+    SupplierContactProposalEvent,
     LagSegmentProposalEvent,
     MasterChangeEvent,
     MasterChangeRequest,
@@ -1549,6 +1551,24 @@ class InvoiceService:
                 },
                 "excluded_segments": self.excluded_lag_segments(),
             },
+            # The unblocking pattern's governed follow-through:
+            # supplier-contact proposals by state, and the
+            # suppliers standing on the documents-up-front list
+            # under approved decisions — a checklist change
+            # nobody can see is a pattern nobody can check.
+            "supplier_contact_proposals": {
+                **{
+                    state: sum(
+                        1
+                        for p in self._get_store().list_supplier_contact_proposals()
+                        if p.status == state
+                    )
+                    for state in ("pending", "approved", "rejected")
+                },
+                "documents_upfront_suppliers": (
+                    self.documents_upfront_suppliers()
+                ),
+            },
             # The priced four-eyes wait against its monthly
             # budgets (FOUR_EYES_WAIT_BUDGETS): this month's
             # destroyed discounts per currency, the ceiling in
@@ -2759,6 +2779,7 @@ class InvoiceService:
                 records,
                 as_of=anchor or datetime.now(timezone.utc).date(),
                 aging_days=wait_aging,
+                documents_upfront=self._documents_upfront_suppliers(),
             ),
             information_wait_aging_days=wait_aging,
             group_receipt_waits=unanswered_group_items(
@@ -3581,6 +3602,257 @@ class InvoiceService:
             )
         )
         store.save_lag_segment_proposal(proposal)
+        return proposal
+
+    # --- Governed supplier-contact proposals (the unblocking
+    # pattern's onboarding decisions) ---------------------------
+
+    def _documents_upfront_suppliers(self) -> set[str]:
+        """The suppliers standing on the documents-up-front
+        list, derived from the supplier-contact proposal ledger
+        (the latest approved decision per supplier rules — see
+        ``supplier_contact_proposals.documents_upfront_suppliers``)."""
+        from .supplier_contact_proposals import documents_upfront_suppliers
+
+        return documents_upfront_suppliers(
+            self._get_store().list_supplier_contact_proposals()
+        )
+
+    def documents_upfront_suppliers(self) -> list[str]:
+        """The listed suppliers, sorted — the read the console
+        and /metrics name."""
+        return sorted(self._documents_upfront_suppliers())
+
+    def draft_supplier_contact_proposals(
+        self, *, actor: str
+    ) -> list[SupplierContactProposal]:
+        """Draft supplier-contact proposals from the re-analysis
+        analytics (see ``supplier_contact_proposals.py``).
+
+        The analytics name the suppliers re-analysis cannot
+        unblock; this sweep turns the pattern into governed
+        questions: each supplier repeatedly landing unchanged
+        gets a collect-documents-up-front proposal (their
+        onboarding checklist should have asked for the settling
+        documents first), and each listed supplier whose every
+        re-analysis since listing moved its case gets a release
+        proposal — each carrying the analytics' account as its
+        basis and its counts as evidence, pending a second
+        operator's decision. Drafting applies NOTHING: no
+        supplier joins or leaves the list until an approval
+        lands. One open question per supplier and kind — a
+        supplier with a pending proposal of the same kind is
+        not re-drafted, so re-running the sweep is a no-op until
+        the open questions are decided. Returns the proposals
+        this sweep drafted."""
+        from .clarify import supplier_reanalysis_counts
+        from .supplier_contact_proposals import (
+            documents_upfront_suppliers,
+            next_supplier_proposal_id,
+            proposals_from_analytics,
+        )
+
+        if not (actor or "").strip():
+            raise ValueError(
+                "Provide 'actor' — a supplier-contact proposal "
+                "is governed onboarding work; an unattributed "
+                "draft is refused"
+            )
+        store = self._get_store()
+        records = store.list_records()
+        existing = store.list_supplier_contact_proposals()
+        analytics = reanalysis_analytics(records)
+        # The analytics' worst list is capped at five; a listed
+        # supplier can be crowded off it by worse ones without
+        # their record changing. Their release question must
+        # not depend on the cap: merge their uncapped counts in.
+        listed = documents_upfront_suppliers(existing)
+        named = {
+            row["supplier_name"]
+            for row in analytics["suppliers_not_unblocked"]
+        }
+        merged = dict(analytics)
+        merged["suppliers_not_unblocked"] = list(
+            analytics["suppliers_not_unblocked"]
+        ) + [
+            {
+                "supplier_name": supplier,
+                **supplier_reanalysis_counts(records, supplier),
+            }
+            for supplier in sorted(listed - named)
+        ]
+        specs = proposals_from_analytics(merged, existing)
+        open_keys = {
+            (p.supplier_name, p.kind)
+            for p in existing
+            if p.status == "pending"
+        }
+        ids = [p.proposal_id for p in existing]
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        drafted: list[SupplierContactProposal] = []
+        for spec in specs:
+            if (spec["supplier_name"], spec["kind"]) in open_keys:
+                continue  # the question is already open — one per supplier+kind
+            proposal_id = next_supplier_proposal_id(ids)
+            ids.append(proposal_id)
+            proposal = SupplierContactProposal(
+                proposal_id=proposal_id,
+                supplier_name=spec["supplier_name"],
+                kind=spec["kind"],
+                basis=spec["basis"],
+                evidence=spec["evidence"],
+                proposed_by=actor,
+                proposed_at=stamp,
+                history=[
+                    SupplierContactProposalEvent(
+                        status="proposed",
+                        actor=actor,
+                        at=stamp,
+                        note="drafted from the re-analysis analytics",
+                    )
+                ],
+            )
+            store.save_supplier_contact_proposal(proposal)
+            drafted.append(proposal)
+        return drafted
+
+    def list_supplier_contact_proposals(
+        self, status: str = ""
+    ) -> list[SupplierContactProposal]:
+        """The supplier-contact proposals on file, oldest first
+        — or only those in one state (pending | approved |
+        rejected)."""
+        proposals = self._get_store().list_supplier_contact_proposals()
+        if status:
+            proposals = [p for p in proposals if p.status == status]
+        return proposals
+
+    def get_supplier_contact_proposal(
+        self, proposal_id: str
+    ) -> SupplierContactProposal | None:
+        return self._get_store().get_supplier_contact_proposal(proposal_id)
+
+    def decide_supplier_contact_proposal(
+        self,
+        proposal_id: str,
+        *,
+        actor: str,
+        approve: bool,
+        note: str = "",
+    ) -> SupplierContactProposal:
+        """Record the second operator's decision on a
+        supplier-contact proposal.
+
+        Four-eyes, as on the other proposals: the drafter
+        cannot decide their own proposal. Rejection leaves the
+        list exactly as it was. Approval applies the decision —
+        and because the list is DERIVED from this ledger,
+        applying is the recording itself: an approved collect
+        puts the supplier on the documents-up-front list, an
+        approved release takes them off. The application is
+        guarded against the record having moved since the
+        draft: a collect for a supplier who already stands
+        listed is moot, and a release whose supplier has landed
+        a re-analysis unchanged since the draft is refused —
+        the pattern the release says is over has recurred, so
+        it must be rejected and the listing left standing, not
+        applied on stale evidence."""
+        from .clarify import supplier_reanalysis_counts
+
+        store = self._get_store()
+        proposal = store.get_supplier_contact_proposal(proposal_id)
+        if proposal is None:
+            raise KeyError(
+                f"Unknown supplier-contact proposal: {proposal_id} "
+                "(draft it first)"
+            )
+        if proposal.status != "pending":
+            detail = (
+                f" (decided by {proposal.decided_by})"
+                if proposal.decided_by
+                else ""
+            )
+            raise ValueError(
+                f"Supplier-contact proposal {proposal_id} is "
+                f"already {proposal.status}{detail}"
+            )
+        if actor == proposal.proposed_by:
+            raise ValueError(
+                "four-eyes on governed onboarding decisions: "
+                f"{proposal.proposed_by} drafted this proposal "
+                "and cannot also decide it — a second operator "
+                "must approve or reject a checklist change"
+            )
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if not approve:
+            proposal.status = "rejected"
+            proposal.decided_by = actor
+            proposal.decided_at = stamp
+            proposal.decision_note = note
+            proposal.history.append(
+                SupplierContactProposalEvent(
+                    status="rejected", actor=actor, at=stamp, note=note
+                )
+            )
+            store.save_supplier_contact_proposal(proposal)
+            return proposal
+        listed = self._documents_upfront_suppliers()
+        if proposal.kind == "collect_documents_upfront":
+            if proposal.supplier_name in listed:
+                raise ValueError(
+                    f"{proposal.supplier_name} already stands on "
+                    "the documents-up-front list — this collect "
+                    "has nothing to apply to; reject it and let "
+                    "the ledger stand"
+                )
+            applied = (
+                "supplier added to the documents-up-front list — "
+                "their onboarding checklist collects the settling "
+                "documents up front"
+            )
+        elif proposal.kind == "release_documents_upfront":
+            if proposal.supplier_name not in listed:
+                raise ValueError(
+                    f"{proposal.supplier_name} does not stand on "
+                    "the documents-up-front list — a release "
+                    "unlists a listed supplier, and this one is "
+                    "not listed; reject the proposal as moot"
+                )
+            current = supplier_reanalysis_counts(
+                store.list_records(), proposal.supplier_name
+            )
+            if current["unchanged"] > int(
+                proposal.evidence.get("unchanged") or 0
+            ):
+                raise ValueError(
+                    f"{proposal.supplier_name} has landed a "
+                    "re-analysis unchanged since this release was "
+                    "drafted — the pattern it says is over has "
+                    "recurred; reject the proposal and leave the "
+                    "supplier listed, rather than releasing a "
+                    "checklist on stale evidence"
+                )
+            applied = (
+                "supplier released from the documents-up-front "
+                "list — their re-analyses since listing all moved "
+                "their cases"
+            )
+        else:  # a kind this build does not draft — refuse, never guess
+            raise ValueError(
+                f"Unknown supplier-contact proposal kind: {proposal.kind!r}"
+            )
+        proposal.status = "approved"
+        proposal.decided_by = actor
+        proposal.decided_at = stamp
+        proposal.decision_note = note
+        proposal.applied_at = stamp
+        proposal.history.append(
+            SupplierContactProposalEvent(
+                status="approved", actor=actor, at=stamp,
+                note=note or applied,
+            )
+        )
+        store.save_supplier_contact_proposal(proposal)
         return proposal
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:

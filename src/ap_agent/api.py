@@ -55,6 +55,9 @@ from .schemas import (
     HandoffGroupReceiptsRequest,
     InformationWaitItem,
     LagSegmentProposal,
+    SupplierContactProposal,
+    SupplierContactProposalDecisionRequest,
+    SupplierContactProposalDraftRequest,
     LagSegmentProposalDecisionRequest,
     LagSegmentProposalDraftRequest,
     MasterChangeReproposeRequest,
@@ -681,6 +684,62 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         as it was."""
         try:
             return svc.decide_lag_segment_proposal(
+                proposal_id,
+                actor=_decision_actor(request),
+                approve=request.approve,
+                note=request.note,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/suppliers/contact-proposals/draft", response_model=list[SupplierContactProposal], dependencies=_AUTH)
+    def draft_supplier_contact_proposals(request: SupplierContactProposalDraftRequest) -> list[SupplierContactProposal]:
+        """Drafting sweep: turn the re-analysis analytics' worst
+        list into governed supplier-contact proposals. A supplier
+        whose re-analyses repeatedly land unchanged drafts a
+        collect-documents-up-front proposal (their onboarding
+        checklist should have asked for the settling documents
+        first); a listed supplier whose every re-analysis since
+        listing moved its case drafts its release. One open
+        question per supplier and kind. Drafting applies nothing;
+        a supplier joins or leaves the documents-up-front list
+        only when a second operator approves the proposal that
+        asks."""
+        actor = _decision_actor(request)
+        if not (actor or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Provide 'actor' — a supplier-contact proposal is governed onboarding work; an unattributed draft is refused.",
+            )
+        try:
+            return svc.draft_supplier_contact_proposals(actor=actor)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/suppliers/contact-proposals", response_model=list[SupplierContactProposal], dependencies=_AUTH)
+    def list_supplier_contact_proposals(status: str = Query(default="")) -> list[SupplierContactProposal]:
+        return svc.list_supplier_contact_proposals(status=status)
+
+    @app.get("/suppliers/contact-proposals/{proposal_id}", response_model=SupplierContactProposal, dependencies=_AUTH)
+    def get_supplier_contact_proposal(proposal_id: str) -> SupplierContactProposal:
+        proposal = svc.get_supplier_contact_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Supplier-contact proposal not drafted yet.")
+        return proposal
+
+    @app.post("/suppliers/contact-proposals/{proposal_id}/decide", response_model=SupplierContactProposal, dependencies=_AUTH)
+    def decide_supplier_contact_proposal(proposal_id: str, request: SupplierContactProposalDecisionRequest) -> SupplierContactProposal:
+        """The second operator's decision: proposer ≠ decider.
+        Approval applies the decision — a collect puts the
+        supplier on the documents-up-front list, a release takes
+        them off — guarded against the record having moved since
+        the draft (a release whose supplier landed unchanged
+        again is refused). Rejection leaves the list exactly as
+        it was."""
+        try:
+            return svc.decide_supplier_contact_proposal(
                 proposal_id,
                 actor=_decision_actor(request),
                 approve=request.approve,

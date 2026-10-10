@@ -524,3 +524,24 @@ def reanalysis_analytics(records: list) -> dict:
         "overlays_per_case": dict(sorted(overlays_per_case.items())),
         "suppliers_not_unblocked": not_unblocked[:5],
     }
+
+
+def supplier_reanalysis_counts(records: list, supplier_name: str) -> dict:
+    """One supplier's re-analysis counts, uncapped: the same
+    counting :func:`reanalysis_analytics` aggregates, for a
+    single supplier. The analytics' worst list is capped at
+    five — a supplier can be crowded off it by worse ones
+    without their own record changing — so a decision guard
+    that must re-verify a named supplier's evidence reads the
+    counts here, never off the capped list. Pure."""
+    reanalyses = 0
+    unchanged = 0
+    for record in records:
+        result = record.result
+        if (result.supplier_name or "") != supplier_name:
+            continue
+        for entry in result.reanalysis_history:
+            reanalyses += 1
+            if entry.previous_outcome == entry.new_outcome:
+                unchanged += 1
+    return {"reanalyses": reanalyses, "unchanged": unchanged}

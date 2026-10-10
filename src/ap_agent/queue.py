@@ -385,6 +385,7 @@ def information_wait_items(
     *,
     as_of: date,
     aging_days: int = DEFAULT_INFORMATION_WAIT_AGING_DAYS,
+    documents_upfront: Iterable[str] = (),
 ) -> list[InformationWaitItem]:
     """The information requests that have outlasted their wait:
     invoices still at the gate whose request is unanswered — or
@@ -396,7 +397,15 @@ def information_wait_items(
     episode the escalation sweep has already fired for reads
     ``escalated`` — the chase was pushed, not just listed. Work
     order: the longest wait first.
+
+    ``documents_upfront`` names the suppliers standing on the
+    governed documents-up-front list (derived from the
+    supplier-contact proposal ledger by the service): a wait
+    for one of them reads ``documents_upfront`` — the documents
+    being chased are the ones their onboarding now collects
+    first, and the item names the pattern where it happens.
     """
+    documents_upfront = set(documents_upfront)
     items: list[InformationWaitItem] = []
     for record in records:
         result = record.result
@@ -433,6 +442,11 @@ def information_wait_items(
                     entry.episode_since == episode_since
                     for entry in result.information_escalations
                 ),
+                documents_upfront=(
+                    result.supplier_name
+                    or str(invoice.get("supplier_name", ""))
+                )
+                in documents_upfront,
             )
         )
     items.sort(key=lambda item: (-(item.waiting_days or 0), item.invoice_id))
