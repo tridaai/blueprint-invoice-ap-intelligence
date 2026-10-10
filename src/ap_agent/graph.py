@@ -52,6 +52,7 @@ from .clarify import build_information_request
 from .config import env_int, env_str, load_dotenv
 from .crosscheck import resolve_triage
 from .diagnosis import build_diagnosis, memory_evidence_lines
+from .discounts import evaluate_discount, format_discount_line
 from .errors import ProviderError
 from .events import NullSink, RunEvent
 from .extractor import extract_documents, extraction_discrepancies
@@ -67,6 +68,7 @@ from .schemas import (
     AgentResult,
     CrossCheck,
     Diagnosis,
+    DiscountEvaluation,
     DocumentExtraction,
     Drafts,
     MatchFacts,
@@ -205,6 +207,7 @@ class AgentState(TypedDict, total=False):
     history: Optional[dict[str, Any]]
     priors: list[dict[str, Any]]
     diagnosis: dict[str, Any]
+    discount: Optional[dict[str, Any]]
     options: list[dict[str, Any]]
     options_notes: str
     drafts: dict[str, Any]
@@ -270,6 +273,20 @@ def _facts_view(state: AgentState, sub: InvoiceInput) -> dict[str, Any]:
     for m in facts.line_matches:
         allowed.append(round(m.invoice_qty * m.invoice_price, 2))
         allowed.append(round(m.po_qty * m.po_price, 2))
+    discount = state.get("discount")
+    if discount:
+        # The discount computation is code too: its figures are
+        # grounded amounts the drafts may quote.
+        allowed += [
+            float(discount["gross_discount"]),
+            float(discount["capital_cost"]),
+            float(discount["net_saving"]),
+        ]
+    # Option scores are computed figures too, and the packet prints
+    # them — the grounding registry covers every number code produced
+    # for this invoice, so a draft quoting them is grounded by
+    # construction. (Options exist by the time drafts are verified.)
+    allowed += [float(o["score"]) for o in state.get("options", [])]
     return {
         "match_status": facts.match_status,
         "match_score": facts.match_score,
@@ -338,6 +355,13 @@ def _draft_context(
         supplier_text=_screen_text(sub),
         diagnosis_summary=diagnosis.summary,
         diagnosis_risk_factors=diagnosis.risk_factors,
+        discount_text=(
+            format_discount_line(
+                DiscountEvaluation.model_validate(state["discount"]), sub.currency
+            )
+            if state.get("discount")
+            else ""
+        ),
         policy_details=[g.model_dump() for g in policies],
         citations=[g.policy_id for g in policies],
         options=[o.model_dump() for o in options],
@@ -552,14 +576,31 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
     @node("options", "Next-step options, scored in code")
     def _options(state: AgentState) -> dict[str, Any]:
         sub = InvoiceInput.model_validate(state["invoice"])
+        # Early-payment discount: priced in code before scoring, so
+        # the approve option's score (and its wording) can carry the
+        # quantified saving. The evaluation rides on state to the
+        # drafts and the final result.
+        discount = evaluate_discount(sub)
+        facts = _facts_view(state, sub)
+        if discount is not None:
+            facts = {
+                **facts,
+                "discount": {
+                    **discount.model_dump(),
+                    "line": format_discount_line(discount, sub.currency),
+                },
+            }
         options, notes = build_options(
             invoice=sub,
             triage=state["triage"],
-            facts=_facts_view(state, sub),
+            facts=facts,
             diagnosis_summary=state["diagnosis"]["summary"],
             backend=backend,
         )
-        update: dict[str, Any] = {"options": [o.model_dump() for o in options]}
+        update: dict[str, Any] = {
+            "options": [o.model_dump() for o in options],
+            "discount": discount.model_dump() if discount is not None else None,
+        }
         if notes:
             update["options_notes"] = notes
         return update
@@ -1102,6 +1143,11 @@ def run_invoice(
         policies=[RetrievedPolicy.model_validate(g) for g in state.get("policies", [])],
         vector_store=state.get("retrieval_info", ""),
         diagnosis=Diagnosis.model_validate(state["diagnosis"]),
+        discount=(
+            DiscountEvaluation.model_validate(state["discount"])
+            if state.get("discount")
+            else None
+        ),
         options=[RecoveryOption.model_validate(o) for o in state.get("options", [])],
         drafts=Drafts.model_validate(state["drafts"]) if state.get("drafts") else None,
         verification=(

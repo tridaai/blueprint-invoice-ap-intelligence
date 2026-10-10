@@ -163,6 +163,7 @@ class InvoiceInput(BaseModel):
     invoice_number: str = ""
     invoice_date: str = ""
     due_date: str = ""
+    payment_terms: str = ""  # e.g. "2/10 net 30" — parsed in code (discounts.py)
     currency: str = "USD"
     tax_amount: Optional[float] = None
     total_amount: Optional[float] = None
@@ -269,6 +270,35 @@ class MatchFacts(BaseModel):
     discrepancy_count: int = 0
     discrepancies: list[str] = Field(default_factory=list)
     document_pair_warning: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Early-payment discount (computed in code — never by the model)
+# ---------------------------------------------------------------------------
+
+class DiscountEvaluation(BaseModel):
+    """The "2/10 net 30" comparison, priced deterministically.
+
+    ``gross_discount`` is what the supplier's terms offer for paying
+    by ``discount_deadline``; ``capital_cost`` is what paying early
+    costs (the invoice total tied up for ``days_early`` days at the
+    configured cost of capital); ``net_saving`` is the difference.
+    The evaluation exists whenever the terms parse and the dates are
+    known — ``worthwhile`` is the verdict the option scoring reads.
+    """
+
+    terms_text: str = ""  # normalised, e.g. "2/10 net 30"
+    discount_pct: float = 0.0
+    discount_days: int = 0
+    net_days: int = 0
+    discount_deadline: str = ""  # ISO date
+    days_early: int = 0  # due date minus the evaluation date
+    gross_discount: float = 0.0
+    capital_cost: float = 0.0
+    net_saving: float = 0.0
+    cost_of_capital_annual_pct: float = 0.0
+    worthwhile: bool = False
+    note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +444,7 @@ class AgentResult(BaseModel):
     policies: list[RetrievedPolicy] = Field(default_factory=list)
     vector_store: str = ""
     diagnosis: Diagnosis = Field(default_factory=Diagnosis)
+    discount: Optional[DiscountEvaluation] = None
     options: list[RecoveryOption] = Field(default_factory=list)
     drafts: Optional[Drafts] = None
     verification: Optional[VerifyResult] = None

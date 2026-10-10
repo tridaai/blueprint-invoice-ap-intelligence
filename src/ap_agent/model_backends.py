@@ -218,6 +218,8 @@ class MockModelBackend:
             ]
         else:
             packet_lines.append("- no line detail (see match summary)")
+        if context.get("discount_text"):
+            packet_lines.append(context["discount_text"])
         packet_lines += [
             f"Documents: {context.get('ocr_vision') or 'not recorded'}",
             f"Duplicate check: {context.get('duplicate_text') or 'no duplicate suspected'}",
@@ -397,6 +399,7 @@ class _BaseLLMBackend:
             "match_summary": context.get("match_summary") or "match not computed",
             "match_status": context.get("match_status") or "no_po",
             "discrepancies": "; ".join(context.get("discrepancies", [])) or "none",
+            "early_payment_discount": context.get("discount_text") or "none",
             "ocr_vision": context.get("ocr_vision") or "not recorded",
             "supplier_text": context.get("supplier_text") or "none recorded",
             "policies": self._policy_block(context),

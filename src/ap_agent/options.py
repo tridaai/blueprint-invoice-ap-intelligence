@@ -20,11 +20,17 @@ every mode their *kinds* are validated here and their scores are
 computed by deterministic code (the model never does this arithmetic):
 
     score = 60 * fit + 40 * match_fit - severity_penalty - amount_penalty
+            + discount_term
 
 where ``fit`` ∈ [0, 1] is how well the kind matches the triage
 outcome, ``match_fit`` how well it matches the computed match status,
 ``severity_penalty`` applies to proceeding when severity is high, and
 ``amount_penalty`` applies to proceeding above the approval threshold.
+``discount_term`` applies only to ``approve_for_payment_prep`` when
+the invoice's early-payment terms price out worthwhile (see
+``discounts.py``): the computed net saving in currency units, capped
+— real money in the score, so a discounted clean invoice outranks an
+identical undiscounted one.
 A bank-change fraud flag overrides the fit table for the two extreme
 kinds: proceeding scores zero, holding scores full — the fraud hold
 is not negotiable by arithmetic.
@@ -178,6 +184,20 @@ _MATCH_FIT: dict[str, dict[str, float]] = {
 
 _SEVERITY_PENALTY = {"low": 0.0, "moderate": 6.0, "high": 16.0}
 
+# The early-payment discount term: one score point per currency unit
+# of computed net saving, capped so money never swamps the fit terms.
+_DISCOUNT_SCORE_CAP = 25.0
+
+
+def _discount_term(kind: str, facts: dict) -> float:
+    if kind != "approve_for_payment_prep":
+        return 0.0
+    discount = facts.get("discount") or {}
+    if not discount.get("worthwhile"):
+        return 0.0
+    saving = float(discount.get("net_saving") or 0.0)
+    return round(min(_DISCOUNT_SCORE_CAP, max(0.0, saving)), 2)
+
 
 def template_proposals(triage: dict, facts: dict) -> list[dict]:
     """The deterministic proposal set for a triage (all five kinds are
@@ -213,7 +233,14 @@ def score_option(kind: str, triage: dict, facts: dict) -> float:
         total = facts.get("total_amount") or 0.0
         if total > HIGH_VALUE_THRESHOLD:
             amount_penalty = 10.0
-    return round(60.0 * fit + 40.0 * match_fit - severity_penalty - amount_penalty, 2)
+    return round(
+        60.0 * fit
+        + 40.0 * match_fit
+        - severity_penalty
+        - amount_penalty
+        + _discount_term(kind, facts),
+        2,
+    )
 
 
 def score_options(proposals: list[dict], triage: dict, facts: dict) -> list[RecoveryOption]:
@@ -233,6 +260,13 @@ def score_options(proposals: list[dict], triage: dict, facts: dict) -> list[Reco
         )
     if not scored:
         scored = score_options(template_proposals(triage, facts), triage, facts)
+    discount = facts.get("discount") or {}
+    if discount.get("worthwhile") and discount.get("line"):
+        # The recommendation carries the quantified saving, so the
+        # approver sees the money, not just the score bump.
+        for option in scored:
+            if option.kind == "approve_for_payment_prep":
+                option.description = f"{option.description} {discount['line']}"
     best = max(scored, key=lambda o: o.score)
     for option in scored:
         option.recommended = option is best
