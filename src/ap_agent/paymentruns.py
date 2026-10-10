@@ -26,6 +26,13 @@ confirms. The agent's part stops exactly where its authority stops:
   every discounted member as of the export date and itemises any
   drift on the run record — the exported file never promises a
   discount the bank run can no longer take.
+- At confirmation, that same leak is projected forward
+  (:func:`drift_forecast`): members whose discount deadlines fall
+  before the run's expected export date — its proposal date plus
+  the measured mean proposal→export lag — are flagged on the run
+  as a forecast, so the warning arrives while the confirmer can
+  still act on it. A forecast is labelled as one, in the data and
+  in the note; the export-time drift check stays the authority.
 """
 
 from __future__ import annotations
@@ -34,7 +41,13 @@ from datetime import date, datetime, timedelta
 
 from .discounts import evaluate_discount
 from .matching import _parse_date
-from .schemas import InvoiceInput, PaymentRun, PaymentRunDrift, PaymentRunLine
+from .schemas import (
+    InvoiceInput,
+    PaymentRun,
+    PaymentRunDrift,
+    PaymentRunForecast,
+    PaymentRunLine,
+)
 from .store import ApprovalRecord
 
 DEFAULT_WINDOW_DAYS = 7
@@ -177,6 +190,80 @@ def propose_payment_runs(
 
 def run_member_ids(run: PaymentRun) -> set[str]:
     return {line.invoice_id for line in run.lines}
+
+
+def drift_forecast(
+    run: PaymentRun,
+    *,
+    as_of: date,
+    lag_stats: dict | None,
+) -> tuple[list[PaymentRunForecast], str]:
+    """Forecast, at confirmation, which of a run's discounted
+    members will lapse before the run is likely to be exported.
+
+    The metrics have always shown the leak after the fact: runs
+    sit between proposal and export, and a member whose discount
+    deadline falls inside that sit loses its discount (the export
+    drift check then re-prices it at full gross). This projects
+    the same numbers forward while the confirmer can still act:
+    the expected export date is the run's proposal date plus the
+    measured mean proposal→export lag (``lag_stats`` — the
+    ``proposal_to_export`` entry of :func:`handoff_metrics`), and
+    a discounted member is flagged when its deadline falls before
+    that date.
+
+    Returns (forecast entries, basis). The basis always says what
+    the projection rests on — including the honest empty cases:
+    no exported runs yet means no measured lag, and no forecast is
+    dressed up without one. Pure: the run is not mutated; the
+    service stamps the result on the run record at confirmation.
+    """
+    if not lag_stats or lag_stats.get("mean_days") is None:
+        return [], (
+            "no forecast: no exported runs yet, so there is no "
+            "measured proposal→export lag to project from"
+        )
+    proposed = _parse_date(run.proposed_at)
+    if proposed is None:
+        return [], "no forecast: the run carries no proposal date"
+    lag_days = float(lag_stats["mean_days"])
+    count = int(lag_stats.get("count") or 0)
+    expected_export = proposed + timedelta(days=lag_days)
+    basis = (
+        f"forecast from the measured proposal→export lag: mean "
+        f"{lag_days:.2f} days over {count} exported run(s); this "
+        f"run proposed {proposed.isoformat()}, so its expected "
+        f"export date is {expected_export.isoformat()}"
+    )
+    entries: list[PaymentRunForecast] = []
+    for line in run.lines:
+        if line.discount_amount <= 0:
+            continue
+        deadline = _parse_date(line.discount_deadline)
+        if deadline is None or deadline >= expected_export:
+            continue
+        headroom = (deadline - as_of).days
+        entries.append(
+            PaymentRunForecast(
+                invoice_id=line.invoice_id,
+                supplier_name=line.supplier_name,
+                discount_amount=line.discount_amount,
+                discount_deadline=line.discount_deadline,
+                headroom_days=headroom,
+                expected_export_date=expected_export.isoformat(),
+                message=(
+                    f"discount of {run.currency} "
+                    f"{line.discount_amount:.2f} expires "
+                    f"{line.discount_deadline}, before this run's "
+                    f"expected export date "
+                    f"{expected_export.isoformat()} — export by "
+                    f"{line.discount_deadline} or the discount is "
+                    "projected to lapse (forecast from the measured "
+                    "proposal→export lag, not a promise)"
+                ),
+            )
+        )
+    return entries, basis
 
 
 def _lag_days(start: str | None, end: str | None) -> float | None:

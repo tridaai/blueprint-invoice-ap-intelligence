@@ -355,6 +355,7 @@ function renderRuns(runs) {
   $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
     <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b>${run.four_eyes_threshold ? ` · four-eyes threshold ${esc(run.currency)} ${run.four_eyes_threshold}` : ""} · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || "") + (run.second_confirmed_by ? " + " + run.second_confirmed_by : ""), "ok") : pill("proposed", "info")} ${runControls(run)}</p>
     ${(run.handoff_drift || []).map(d => `<p class="note" style="margin:2px 0">${pill("discount drift", "warn")} ${esc(d.invoice_id)} — ${esc(run.currency)} ${d.discount_lost} of discount lost: ${esc(d.reason)}</p>`).join("")}
+    ${(run.drift_forecast || []).map(f => `<p class="note" style="margin:2px 0">${pill("drift forecast", "warn")} ${esc(f.invoice_id)} — ${esc(f.message)}</p>`).join("")}
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
@@ -406,7 +407,8 @@ async function confirmRun(runId) {
   const res = await fetch(`/payment-runs/${runId}/confirm`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
   const body = await res.json();
   if (!res.ok) { $("paynote").textContent = `Confirm refused (${res.status}): ${body.detail || ""}`; return; }
-  $("paynote").textContent = `Run ${runId} confirmed by ${body.confirmed_by}. No payment was made — the run is the pay list for the AP system of record.`;
+  const forecast = (body.drift_forecast || []).length ? ` Drift forecast: ${body.drift_forecast.map(f => f.invoice_id + " projected to lapse by " + f.expected_export_date).join(", ")} — export before the deadline(s) or the discount(s) are projected to lapse.` : "";
+  $("paynote").textContent = `Run ${runId} confirmed by ${body.confirmed_by}. No payment was made — the run is the pay list for the AP system of record.${forecast}`;
   loadRuns();
 }
 function maskId(v) { const d = String(v || "").replace(/[^A-Za-z0-9]/g, ""); return d ? "••••" + d.slice(-4) : "—"; }

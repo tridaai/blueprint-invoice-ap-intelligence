@@ -41,6 +41,7 @@ from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
 from .paymentruns import discount_drift, handoff_metrics
+from .paymentruns import drift_forecast as _drift_forecast
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
 from .queue import build_queue, recovery_case_aging
@@ -1638,6 +1639,17 @@ class InvoiceService:
         Confirmation touches the run record only: no invoice changes
         state and no payment is executed — the confirmed run is the
         pay list the customer's AP system of record acts on.
+
+        Confirmation is also when the drift forecast is computed
+        (``paymentruns.drift_forecast``): each discounted member's
+        deadline is set against the run's expected export date —
+        its proposal date plus the measured mean proposal→export
+        lag over the runs already exported — and the members
+        projected to lapse are flagged on the run, with the basis
+        stated. A forecast, labelled as one: it warns the
+        confirmer while they can still hurry the export; it
+        changes no figures, and the export-time drift check
+        remains the authority on what actually lapsed.
         """
         store = self._get_store()
         run = store.get_payment_run(run_id)
@@ -1653,6 +1665,29 @@ class InvoiceService:
         run.confirmed_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
         )
+        lag_stats = handoff_metrics(store.list_payment_runs())["export_lag"][
+            "proposal_to_export"
+        ]
+        forecast, basis = _drift_forecast(
+            run,
+            as_of=datetime.now(timezone.utc).date(),
+            lag_stats=lag_stats,
+        )
+        run.drift_forecast = forecast
+        run.drift_forecast_basis = basis
+        if forecast:
+            flagged = "; ".join(
+                f"{entry.invoice_id} ({run.currency} "
+                f"{entry.discount_amount:.2f}, deadline "
+                f"{entry.discount_deadline})"
+                for entry in forecast
+            )
+            run.note += (
+                " Drift forecast at confirmation — a projection "
+                "from the measured proposal→export lag, not a "
+                f"measurement: {flagged} projected to lapse before "
+                "the expected export date; see drift_forecast."
+            )
         store.save_payment_run(run)
         return run
 

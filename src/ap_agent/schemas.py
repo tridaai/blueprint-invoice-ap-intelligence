@@ -831,6 +831,30 @@ class PaymentRunDrift(BaseModel):
     reason: str = ""
 
 
+class PaymentRunForecast(BaseModel):
+    """One discounted run member whose discount is *forecast* to
+    lapse before the run is likely to be exported.
+
+    A forecast, computed in code at confirmation — not a
+    measurement, and never a promise: the member's discount
+    deadline is set against the run's expected export date (its
+    proposal date plus the measured mean proposal→export lag over
+    the runs already exported — the same lag ``/metrics``
+    publishes), and the member is flagged when the deadline falls
+    before that date. It exists so the confirmer hears "export
+    within N days or this discount is projected to lapse" while
+    they can still act; the drift re-verification at export
+    remains the authority on what actually lapsed."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    discount_amount: float = 0.0  # the discount at risk
+    discount_deadline: str = ""  # the member's discount deadline
+    headroom_days: Optional[int] = None  # deadline − confirmation date
+    expected_export_date: str = ""  # proposal date + the observed lag
+    message: str = ""
+
+
 class HandoffCreditorEntry(BaseModel):
     """One run member's creditor-account completion in a hand-off
     export: where the file's creditor account came from.
@@ -915,6 +939,13 @@ class PaymentRun(BaseModel):
     handoff_creditor_entries: list[HandoffCreditorEntry] = Field(
         default_factory=list
     )
+    # Drift forecast, computed at confirmation: the discounted
+    # members whose deadlines fall before the run's expected
+    # export date (proposal date + the measured proposal→export
+    # lag). ``drift_forecast_basis`` states the lag the projection
+    # rests on — or why there is none (no exported runs yet).
+    drift_forecast: list[PaymentRunForecast] = Field(default_factory=list)
+    drift_forecast_basis: str = ""
 
 
 class PaymentRunRequest(BaseModel):
