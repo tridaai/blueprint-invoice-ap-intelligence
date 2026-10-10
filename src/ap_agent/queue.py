@@ -69,7 +69,12 @@ that wait used to be invisible: the case sat at the gate with
 nothing ageing it. Past ``INFORMATION_WAIT_AGING_DAYS`` an
 unanswered request (or one a partial reply restarted) joins
 the worklist with the still-missing items named, so the chase
-has an owner and an age like every other stall.
+has an owner and an age like every other stall. Past twice
+that, the wait stops being a list line: the service's sweep
+fires the signed ``information_wait_escalation`` webhook, once
+per wait episode (a partial reply starts a new episode; a
+complete reply is the reset), and the item here reads
+``escalated``.
 """
 
 from __future__ import annotations
@@ -331,6 +336,35 @@ def twin_escalation_items(
 DEFAULT_INFORMATION_WAIT_AGING_DAYS = 3
 
 
+def wait_episode(request, invoice: dict) -> tuple[date | None, list[str]]:
+    """A wait's current episode: (the anchor date its age runs
+    from, the items still missing in that episode).
+
+    With no reply recorded, the episode runs from the request's
+    own stamp (``requested_at``; requests stored before the stamp
+    existed fall back to the invoice's submission date). A partial
+    reply starts a NEW episode: the supplier answered, the ball
+    moved, and the remaining items have been owed only since that
+    answer landed (``reply_received_at``). The escalation ledger
+    dedupes against the episode — one firing per episode, and a
+    partial reply's new episode can escalate in its turn. Shared
+    by the queue read and the escalation sweep so the two can
+    never disagree about when a wait began."""
+    if request.reply_status == "partially_answered" and request.reply_received_at:
+        return _parse_date(request.reply_received_at), (
+            request.reply_still_missing or request.missing_items
+        )
+    anchor = _parse_date(request.requested_at) or _parse_date(
+        str(invoice.get("submitted_at", ""))
+    ) or _parse_date(str(invoice.get("invoice_date", "")))
+    still_missing = request.missing_items
+    if request.reply_received_at:
+        # A reply landed but resolved nothing the request asked
+        # for: the remaining items are everything.
+        still_missing = request.reply_still_missing or still_missing
+    return anchor, still_missing
+
+
 def information_wait_items(
     records: list[ApprovalRecord],
     *,
@@ -341,15 +375,12 @@ def information_wait_items(
     invoices still at the gate whose request is unanswered — or
     answered only in part — past the aging threshold.
 
-    The wait's clock depends on where the loop stands. With no
-    reply recorded, it runs from the request's own stamp
-    (``requested_at``; requests stored before the stamp existed
-    fall back to the invoice's submission date). A partial reply
-    restarts it: the supplier answered, the ball moved, and the
-    remaining items have been owed only since that answer landed
-    (``reply_received_at``). A fully answered request closes the
-    wait whatever its age, and a decided invoice is not waiting
-    at all. Work order: the longest wait first.
+    The wait's clock is its episode's (see :func:`wait_episode`).
+    A fully answered request closes the wait whatever its age,
+    and a decided invoice is not waiting at all. An item whose
+    episode the escalation sweep has already fired for reads
+    ``escalated`` — the chase was pushed, not just listed. Work
+    order: the longest wait first.
     """
     items: list[InformationWaitItem] = []
     for record in records:
@@ -362,23 +393,13 @@ def information_wait_items(
         if request.reply_status == "answered":
             continue
         invoice = record.invoice or {}
-        if request.reply_status == "partially_answered" and request.reply_received_at:
-            anchor = _parse_date(request.reply_received_at)
-            still_missing = request.reply_still_missing or request.missing_items
-        else:
-            anchor = _parse_date(request.requested_at) or _parse_date(
-                str(invoice.get("submitted_at", ""))
-            ) or _parse_date(str(invoice.get("invoice_date", "")))
-            still_missing = request.missing_items
-            if request.reply_received_at:
-                # A reply landed but resolved nothing the request
-                # asked for: the remaining items are everything.
-                still_missing = request.reply_still_missing or still_missing
+        anchor, still_missing = wait_episode(request, invoice)
         if anchor is None:
             continue
         waiting_days = (as_of - anchor).days
         if waiting_days <= aging_days:
             continue
+        episode_since = anchor.isoformat()
         items.append(
             InformationWaitItem(
                 invoice_id=result.invoice_id,
@@ -392,6 +413,11 @@ def information_wait_items(
                 waiting_days=waiting_days,
                 aging_threshold_days=aging_days,
                 still_missing=list(still_missing),
+                episode_since=episode_since,
+                escalated=any(
+                    entry.episode_since == episode_since
+                    for entry in result.information_escalations
+                ),
             )
         )
     items.sort(key=lambda item: (-(item.waiting_days or 0), item.invoice_id))

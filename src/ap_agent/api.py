@@ -52,6 +52,7 @@ from .schemas import (
     InvoiceInput,
     MasterChangeDecisionRequest,
     InformationReplyRequest,
+    InformationWaitItem,
     MasterChangeReproposeRequest,
     MasterChangeFromInvoiceRequest,
     MasterChangeProposeRequest,
@@ -710,6 +711,24 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         ``as_of`` (ISO date) anchors the aging; default today."""
         try:
             return svc.escalate_open_postings(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/information-waits/escalate", response_model=list[InformationWaitItem], dependencies=_AUTH)
+    def escalate_information_waits(as_of: str = Query(default="")) -> list[InformationWaitItem]:
+        """Sweep: fire the signed ``information_wait_escalation``
+        webhook for every information wait whose current episode
+        has run past twice the aging threshold with the gap still
+        open, and record each dispatch on the invoice record's own
+        escalation ledger (beside the request). One firing per
+        episode — a partial reply starts a new episode with an
+        escalation of its own once it crosses, a complete reply
+        closes the wait; re-running the sweep does not re-fire;
+        with no webhook configured nothing fires and nothing is
+        recorded. ``as_of`` (ISO date) anchors the aging; default
+        today."""
+        try:
+            return svc.escalate_information_waits(as_of=as_of)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

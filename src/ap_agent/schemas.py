@@ -557,6 +557,10 @@ class AgentResult(BaseModel):
     # PostingEscalation): the webhook ledger, deduped per open
     # episode. Empty until a sweep finds the posting crossed.
     posting_escalations: list["PostingEscalation"] = Field(default_factory=list)
+    # Information-wait escalations fired for this invoice (see
+    # InformationEscalation): the webhook ledger, deduped per wait
+    # episode. Empty until a sweep finds the wait crossed.
+    information_escalations: list["InformationEscalation"] = Field(default_factory=list)
     external_action_taken: bool = False
     error: Optional[str] = None
 
@@ -610,6 +614,30 @@ class PostingEscalation(BaseModel):
     escalation_days: int = 0  # the rung's threshold in force when it fired
     level: int = 1  # ladder rung: 1 = posting_escalation, 2 = posting_escalation_urgent
     age_days: Optional[int] = None  # the posting's age at the crossing
+    dispatched_at: str = ""  # ISO timestamp of the dispatch
+    dispatch_status: str = ""  # sent | failed
+
+
+class InformationEscalation(BaseModel):
+    """One escalation for an information wait: a signed webhook
+    fired when a case blocked on an information request crossed
+    twice the aging threshold with the gap still open — the
+    posting ladder's shape, one rung, for the wait that depends
+    on someone outside the building.
+
+    The ledger lives on the invoice record, beside the request
+    it escalates. Dedupe is per *episode*: an episode runs from
+    the request (or from a partial reply, which restarts the
+    wait — the remaining items have been owed only since that
+    answer landed), and each episode escalates at most once. A
+    complete reply closes the wait and ends the story; it is the
+    reset. An attempt is recorded whether the receiver answered
+    (``sent``) or not (``failed``): the ledger is the record that
+    the crossing was escalated, once."""
+
+    episode_since: str = ""  # ISO date the wait episode began — the crossing's identity
+    escalation_days: int = 0  # the threshold in force when it fired
+    waiting_days: Optional[int] = None  # the wait's age at the crossing
     dispatched_at: str = ""  # ISO timestamp of the dispatch
     dispatch_status: str = ""  # sent | failed
 
@@ -1477,6 +1505,12 @@ class InformationWaitItem(BaseModel):
     waiting_days: Optional[int] = None
     aging_threshold_days: int = 0
     still_missing: list[str] = Field(default_factory=list)
+    # The wait episode's start (ISO date) — the anchor the age
+    # runs from and the escalation ledger dedupes against.
+    episode_since: str = ""
+    # Whether this episode has already been escalated by the
+    # information-wait sweep (its ledger entry is on the record).
+    escalated: bool = False
 
 
 class QueueView(BaseModel):

@@ -77,6 +77,8 @@ from .schemas import (
     GoodsReceipt,
     HandoffProfile,
     HandoffProfileEvent,
+    InformationEscalation,
+    InformationWaitItem,
     MarkerWorklist,
     InvoiceBundleInput,
     InvoiceInput,
@@ -296,6 +298,15 @@ def information_wait_aging_days() -> int:
             INFORMATION_WAIT_AGING_DEFAULT_DAYS,
         ),
     )
+
+
+def information_wait_escalation_days() -> int:
+    """The information-wait escalation threshold: twice the aging
+    threshold — the ladder's second rung, in the posting
+    ladder's idiom (its urgent rung is likewise 2× its first).
+    A wait that has been on the worklist for as long again has
+    stopped being a list line: the sweep pushes it."""
+    return 2 * information_wait_aging_days()
 
 
 # Default decision window for a pending master change: a request
@@ -591,6 +602,42 @@ def dispatch_posting_escalation_webhook(
     if level >= 2:
         payload["level"] = level
         payload["urgent"] = True
+    return _post_signed_webhook(payload)
+
+
+def dispatch_information_wait_webhook(
+    item: InformationWaitItem,
+    *,
+    escalation_days: int,
+) -> str | None:
+    """POST the ``information_wait_escalation`` event for one
+    information wait (off by default — the same opt-in seam,
+    secret, and signature as the approval webhook).
+
+    The payload is the wait's snapshot at the crossing: which
+    invoice is blocked, on whom, what is still missing, how long
+    the current episode has run, and where the loop stands (no
+    reply yet, or a partial one that restarted the wait). It
+    carries no drafts and no bank details — it is a pointer at
+    the wait in the queue, for the customer's own paging/
+    ticketing system to chase. Returns ``None`` when
+    unconfigured, else ``"sent"`` / ``"failed"`` (see
+    :func:`_post_signed_webhook`)."""
+    payload = {
+        "event": "information_wait_escalation",
+        "invoice_id": item.invoice_id,
+        "supplier_name": item.supplier_name,
+        "invoice_number": item.invoice_number,
+        "outcome": item.outcome,
+        "requested_at": item.requested_at,
+        "reply_status": item.reply_status,
+        "reply_received_at": item.reply_received_at,
+        "still_missing": item.still_missing,
+        "waiting_days": item.waiting_days,
+        "episode_since": item.episode_since,
+        "escalation_days": escalation_days,
+        "escalated": True,
+    }
     return _post_signed_webhook(payload)
 
 
@@ -1402,6 +1449,18 @@ class InvoiceService:
                     if entry.level >= 2
                 ),
             },
+            # Information waits: the aging threshold that puts a
+            # wait on the worklist, the escalation threshold (2×)
+            # that pushes it, and the pushes actually recorded on
+            # the records — escalations fired, as opposed to waits
+            # merely old.
+            "information_waits": {
+                "aging_days": information_wait_aging_days(),
+                "escalation_days": information_wait_escalation_days(),
+                "escalations_recorded": sum(
+                    len(r.result.information_escalations) for r in records
+                ),
+            },
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
             "handoff_profiles": _handoff_profile_summary(
                 self._get_store().list_handoff_profiles()
@@ -2107,6 +2166,69 @@ class InvoiceService:
                     escalation_days=rung_days,
                     level=level,
                     age_days=item.age_days,
+                    dispatched_at=datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    dispatch_status=outcome,
+                )
+            )
+            store.save(record)
+            escalated.append(item)
+        return escalated
+
+    def escalate_information_waits(self, as_of: str = "") -> list[InformationWaitItem]:
+        """Sweep the information waits and escalate the crossed.
+
+        The queue has always *shown* a wait past its aging
+        threshold (``INFORMATION_WAIT_AGING_DAYS``); this is the
+        push counterpart — for each wait whose current episode
+        has run past twice that threshold with the gap still
+        open, fire the signed ``information_wait_escalation``
+        webhook (the opt-in ``ACTION_WEBHOOK_URL`` seam) with
+        the wait's snapshot, so the chase of purchasing or the
+        supplier does not depend on someone reading the worklist.
+
+        One escalation per episode: the dispatch is recorded in
+        the invoice record's own ledger
+        (``result.information_escalations``, beside the request),
+        deduped by the episode's start — re-running the sweep
+        does not re-fire, and a partial reply starts a new
+        episode (the remaining items have been owed only since
+        that answer landed) with an escalation of its own once IT
+        crosses. A complete reply closes the wait outright: the
+        reset. With no webhook configured the sweep is a no-op
+        that records nothing — there is nothing to dedupe
+        against a dispatch that never happened. Returns the waits
+        escalated by this sweep.
+        """
+        from .queue import information_wait_items
+
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        escalation_days = information_wait_escalation_days()
+        items = information_wait_items(
+            store.list_records(), as_of=anchor, aging_days=escalation_days
+        )
+        escalated: list[InformationWaitItem] = []
+        for item in items:
+            if item.escalated:
+                continue  # this episode already fired — once is the rule
+            record = store.get(item.invoice_id)
+            if record is None:
+                continue
+            outcome = dispatch_information_wait_webhook(
+                item, escalation_days=escalation_days
+            )
+            if outcome is None:
+                continue  # webhook off: nothing fired, nothing recorded
+            record.result.information_escalations.append(
+                InformationEscalation(
+                    episode_since=item.episode_since,
+                    escalation_days=escalation_days,
+                    waiting_days=item.waiting_days,
                     dispatched_at=datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
