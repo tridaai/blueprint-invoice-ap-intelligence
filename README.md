@@ -87,6 +87,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 37. **Per-currency four-eyes thresholds** — `PAYMENT_RUN_FOUR_EYES_THRESHOLDS` (`EUR=50000,JPY=3000000`) gives currencies their own gates, with the global threshold as fallback in both directions; the figure that applied is stamped on the run at proposal (`four_eyes_threshold`), named in its note and the console, and quoted in the second-confirmation and export refusals.
 38. **Creditor-account completion at export** — the hand-off's creditor account is completed from the governed supplier master where (and only where) it holds approved bank details for the member's supplier: the IBAN as the pain.001 `IBAN` element, else the account number with the sort code as creditor agent; every other member keeps the `SUPPLIER-MASTER-AT-IMPORT` marker, and the debtor side always keeps its. The export receipt (`handoff_creditor_entries`) records completed vs marked per member, masked labels only; the CSV carries the account plus its source (layout v2).
 39. **Drift forecasting at confirmation** — confirmation projects the drift leak forward: each discounted member's deadline is set against the run's expected export date (proposal date + the measured mean proposal→export lag, the same lag `/metrics` publishes), and members projected to lapse are flagged on the run (`drift_forecast`, with `drift_forecast_basis` stating the lag it rests on — or that no exported runs exist yet). Labelled a forecast everywhere; the export-time drift check remains the authority.
+40. **Forecast-accuracy tracking** — the forecast is now graded: `/metrics` sets every exported run's confirmation-time flags against its measured export drift (flagged & drifted, flagged & saved, the unflagged misses, and the quiet majority), with precision, recall, and the discount value on each side of the ledger, overall and per currency. Runs whose confirmation honestly made no forecast are unscored — their drift is reported separately, never counted against a forecast nobody made.
+41. **Creditor-completion coverage** — `/metrics` also prices the marker risk over *exports* (master coverage counts records): per currency and per hand-off format, the share of exported members — and of exported value — whose creditor account was completed from the governed master versus the share that still carried the `SUPPLIER-MASTER-AT-IMPORT` marker, read off each run's completion receipt. Receipt-less legacy exports are counted as such, so the denominator never quietly shrinks.
+42. **Four-eyes aging in the queue** — a four-eyes run confirmed once is locked out of export until its second confirmer arrives, and now that wait ages: past `PAYMENT_RUN_FOUR_EYES_AGING_DAYS` (default 2) the run joins the approver queue (`GET /queue`) as an action item with the first confirmer named — the person to nudge, and the one person who cannot be the second.
+43. **Escalation digest** — the day's escalations composed into one operator summary (`GET /digest`, console panel): recovery cases past their SLA, escalated open postings, invoices stuck at the gate, four-eyes stalls, plus the day's run news — discounts forecast to lapse on runs confirmed today, drift realised on runs exported today. Composed deterministically from the records, in the reconciliation summary's discipline; the agent sends nothing.
 
 ## Quickstart
 
@@ -117,7 +121,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 296 tests
+make test        # 318 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -188,7 +192,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            296 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            318 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -196,7 +200,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 296 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 318 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
