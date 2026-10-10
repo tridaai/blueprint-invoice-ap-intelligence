@@ -146,7 +146,7 @@ Two packs, both in-repo. The deterministic pack (`evals/run_evals.py`) runs 30 g
 
 ## 12. Testing posture
 
-The pytest suite (373 tests) is hermetic: in-memory doubles for the store, checkpointer, and object store; scripted fake backends for the provider seams; fake NIM engines for the OCR/vision ports. Test doubles are test design, not a runtime mode — the documented runtime stores are Postgres and S3. Postgres behaviour is covered by integration tests gated on `DATABASE_URL` (store round-trip, checkpointer pause/resume across instances, pgvector retrieval with a stubbed embeddings client) that skip cleanly when no database is configured.
+The pytest suite (401 tests) is hermetic: in-memory doubles for the store, checkpointer, and object store; scripted fake backends for the provider seams; fake NIM engines for the OCR/vision ports. Test doubles are test design, not a runtime mode — the documented runtime stores are Postgres and S3. Postgres behaviour is covered by integration tests gated on `DATABASE_URL` (store round-trip, checkpointer pause/resume across instances, pgvector retrieval with a stubbed embeddings client) that skip cleanly when no database is configured.
 
 ## 13. Follow-on AP work: discounts, credit notes, statements
 
