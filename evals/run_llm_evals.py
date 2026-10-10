@@ -15,6 +15,18 @@ The judge is the same backend (optionally a different model via
 ``--judge-model`` / ``REVIEWER_MODEL`` conventions do not apply here).
 Results land in ``evals/llm_results.json`` with token/cost totals.
 
+Cases run through ONE ``InvoiceService`` over a shared in-memory
+store, in file order — the same path as the API and the
+deterministic pack. Order and accumulation are the point: the
+duplicate outcome only exists against priors the earlier cases
+left in the store. An earlier version of this runner called
+``run_invoice`` directly per case, with no store at all: the
+deterministic duplicate screen never saw a prior, and a live
+slice scored the INV-1004 resend as a clean match (2026-10-10).
+The pipeline now computes the screen itself from whatever priors
+it is handed — but a harness that hands it none is grading a
+pipeline nobody runs.
+
 Exit codes: 0 = pack passed, 1 = pack ran and failed, 2 = NOT RUN —
 no real provider configured. The refusal is loud on purpose: an
 LLM-mode score produced by the offline fallback would be fiction.
@@ -31,7 +43,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ap_agent.graph import run_invoice  # noqa: E402
 from ap_agent.matching import format_match_summary  # noqa: E402
 from ap_agent.model_backends import (  # noqa: E402
     estimate_cost_usd,
@@ -42,6 +53,8 @@ from ap_agent.prompts import JUDGE_SYSTEM_PROMPT, JUDGE_USER_TEMPLATE  # noqa: E
 from ap_agent.retriever import get_retriever  # noqa: E402
 from ap_agent.samples import load_sample_invoices  # noqa: E402
 from ap_agent.schemas import InvoiceInput  # noqa: E402
+from ap_agent.service import InvoiceService  # noqa: E402
+from ap_agent.store import InMemoryStore  # noqa: E402
 
 GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
 RESULTS = Path(__file__).resolve().parent / "llm_results.json"
@@ -116,6 +129,15 @@ def main() -> int:
     samples = {s["invoice_id"]: s for s in load_sample_invoices()}
     cases = _load_cases(args.limit, args.outcomes)
     retriever = get_retriever()
+    # One service, one shared store, file order — the production
+    # path (see the module docstring). The store accumulating
+    # across cases is what makes the duplicate case a duplicate.
+    service = InvoiceService(
+        backend=backend,
+        retriever=retriever,
+        store=InMemoryStore(),
+        checkpointer=False,
+    )
     backend.reset_usage()
     started = time.perf_counter()
 
@@ -124,7 +146,7 @@ def main() -> int:
     for case in cases:
         payload = case.get("invoice") or samples[case["sample_id"]]
         invoice = InvoiceInput.model_validate(payload)
-        result = run_invoice(invoice, backend=backend, retriever=retriever)
+        result = service.analyze(invoice)
         verdict = judge_draft(backend, result, args.judge_model)
         outcome_ok = result.triage.outcome == case["expected_outcome"]
         outcome_hits += outcome_ok

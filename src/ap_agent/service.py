@@ -84,7 +84,7 @@ from .schemas import (
     SupplierMasterRecord,
     SupplierStatement,
 )
-from .store import ApprovalRecord, default_store, find_duplicate, supplier_summary
+from .store import ApprovalRecord, default_store, supplier_summary
 from .vision import get_vision_engine
 
 __all__ = [
@@ -652,9 +652,10 @@ class InvoiceService:
         if feedback:
             history = {**(history or {}), "feedback": feedback}
         # Duplicate detection (AP-DUP-01): same supplier + invoice
-        # number + total as a prior analysed invoice. Computed here,
-        # where the store lives; the match facts carry it from here.
-        duplicate_of = find_duplicate(priors, model)
+        # number + total as a prior analysed invoice. The pipeline
+        # computes the verdict itself from the priors handed over
+        # below — the screen lives in run_invoice, not here, so no
+        # run mode can reach the pipeline with priors and skip it.
         result = run_invoice(
             model,
             backend=backend,
@@ -668,7 +669,6 @@ class InvoiceService:
             vision_engine=self.vision_engine or get_vision_engine(),
             object_store=self.object_store,
             supplier_master=self._get_supplier_master(),
-            duplicate_of=duplicate_of,
         )
         self._get_store().save(
             ApprovalRecord(

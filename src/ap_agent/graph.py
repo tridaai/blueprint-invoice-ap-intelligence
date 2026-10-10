@@ -86,6 +86,7 @@ from .schemas import (
     VisionResult,
 )
 from .screening import fraud_flag_label, sanitized_notes, screen_fraud, screen_invoice
+from .store import find_duplicate
 from .supplier_master import compare_bank_details, mismatch_flag
 from .tools_agent import DiagnosisToolBox
 from .triage import classify_invoice
@@ -1147,8 +1148,20 @@ def run_invoice(
     supplier (the service layer supplies them); ``event_sink``
     receives structured run events; ``checkpointer`` + ``thread_id``
     pause the run at the gate for a later resume; ``ocr_engine`` /
-    ``vision_engine`` / ``object_store`` are the document ports;
-    ``duplicate_of`` is the store's duplicate verdict (AP-DUP-01).
+    ``vision_engine`` / ``object_store`` are the document ports.
+
+    The duplicate verdict (AP-DUP-01) is computed HERE, from the
+    priors themselves — never taken on a caller's word. When
+    ``priors`` are supplied, ``duplicate_of`` is recomputed from
+    them and any caller-supplied verdict is discarded; the
+    parameter is honoured only when no priors ride along (a caller
+    holding a verdict but not the evidence). Before this, the
+    screen existed only because the service computed the verdict
+    and passed it in: every direct ``run_invoice`` caller ran with
+    the screen silently off, and a live judged slice scored the
+    INV-1004 resend as a clean match because nobody had screened
+    it. A deterministic control that depends on the caller
+    remembering to invoke it is not a control.
     """
     from .model_backends import MockModelBackend, get_backend
 
@@ -1160,6 +1173,11 @@ def run_invoice(
     budget = _BudgetGuard(raw_backend, MockModelBackend(), _token_budget())
     wrapped = _wrap_backend(budget)
     retriever = retriever or get_retriever()
+    if priors:
+        # The screen, computed from the evidence (see the
+        # docstring): with priors in hand the verdict is derived,
+        # never inherited.
+        duplicate_of = find_duplicate(priors, invoice)
     graph = _build_graph(
         wrapped,
         retriever,
