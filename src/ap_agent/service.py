@@ -170,6 +170,23 @@ def posting_receipt_grace_days() -> int:
     )
 
 
+# Default escalation threshold for open postings: an approved
+# invoice still unposted this many days after its decision stops
+# being a report line and joins the approver queue as an action
+# item (POSTING_ESCALATION_DAYS overrides it). The effective
+# threshold is never below the grace window — an item cannot
+# escalate before it is even open.
+POSTING_ESCALATION_DEFAULT_DAYS = 21
+
+
+def posting_escalation_days() -> int:
+    """The configured open-posting escalation threshold, in days."""
+    load_dotenv()
+    return max(
+        1, env_int("POSTING_ESCALATION_DAYS", POSTING_ESCALATION_DEFAULT_DAYS)
+    )
+
+
 @dataclass
 class BatchItem:
     """One outcome of a batch analysis: a result, or the error that
@@ -722,6 +739,7 @@ class InvoiceService:
                 output_tokens += telemetry.output_tokens or 0
             if telemetry.estimated_cost_usd is not None:
                 costs.append(telemetry.estimated_cost_usd)
+        from .posting import approved_not_posted
         from .supplier_master import master_coverage
 
         coverage = master_coverage(
@@ -774,6 +792,19 @@ class InvoiceService:
             "posting_open_items": {
                 "count": self.approved_not_posted_report().count,
                 "grace_days": posting_receipt_grace_days(),
+                "escalated_count": len(
+                    approved_not_posted(
+                        records,
+                        as_of=datetime.now(timezone.utc).date(),
+                        grace_days=max(
+                            posting_escalation_days(),
+                            posting_receipt_grace_days(),
+                        ),
+                    ).items
+                ),
+                "escalation_days": max(
+                    posting_escalation_days(), posting_receipt_grace_days()
+                ),
             },
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
         }
@@ -1390,15 +1421,29 @@ class InvoiceService:
     def queue_view(self, as_of: str = "") -> QueueView:
         """The AP aging queue: invoices still at the gate, aged by
         due date, overdue first, with the triage mix — plus the open
-        recovery cases with their per-status aging and SLA flags. A
+        recovery cases with their per-status aging and SLA flags,
+        and the open postings that have outlasted the escalation
+        threshold (``POSTING_ESCALATION_DAYS``), so one worklist
+        shows everything the building still owes an answer for. A
         pure read over the store — it decides and writes nothing."""
+        from .posting import approved_not_posted
+
         anchor = _parse_date(as_of) if as_of else None
         store = self._get_store()
+        records = store.list_records()
+        escalation = max(posting_escalation_days(), posting_receipt_grace_days())
+        escalated = approved_not_posted(
+            records,
+            as_of=anchor or datetime.now(timezone.utc).date(),
+            grace_days=escalation,
+        )
         return build_queue(
-            store.list_records(),
+            records,
             as_of=anchor,
             recovery_packs=store.list_recovery_packs(),
             recovery_sla_days=recovery_case_sla_days(),
+            open_postings=escalated.items,
+            posting_escalation_days=escalation,
         )
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:

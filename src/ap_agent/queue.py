@@ -20,6 +20,16 @@ each open case carries its total age, the age of its current
 status, and an SLA flag (``RECOVERY_CASE_SLA_DAYS``) — the queue
 answers "what is stuck, and since when?" for cases as well as
 invoices.
+
+**Escalated open postings** join the same worklist: an approved
+invoice lives on the approved-not-posted report once it outlasts
+the grace window, but past a second, longer threshold
+(``POSTING_ESCALATION_DAYS``) it stops being a report line and
+becomes an action item here, carrying the ERP's failure reason
+when a receipt failed — one list for everything the building
+still owes an answer for. The service computes them through
+``posting.approved_not_posted`` at the escalation threshold; this
+module only seats them in the view.
 """
 
 from __future__ import annotations
@@ -28,7 +38,13 @@ from datetime import date
 from typing import Iterable
 
 from .matching import _parse_date
-from .schemas import QueueItem, QueueView, RecoveryCaseAgingItem, RecoveryPack
+from .schemas import (
+    OpenPostingItem,
+    QueueItem,
+    QueueView,
+    RecoveryCaseAgingItem,
+    RecoveryPack,
+)
 from .store import ApprovalRecord
 
 _SEVERITY_RANK = {"high": 0, "moderate": 1, "low": 2}
@@ -124,11 +140,16 @@ def build_queue(
     as_of: date | None = None,
     recovery_packs: Iterable[RecoveryPack] = (),
     recovery_sla_days: int = DEFAULT_RECOVERY_SLA_DAYS,
+    open_postings: Iterable[OpenPostingItem] = (),
+    posting_escalation_days: int = 0,
 ) -> QueueView:
     """The aging queue over the store's records, as of a date
     (today when not given — tests and API callers pass it
     explicitly for a stable view). Open recovery cases age
-    alongside the invoices (see :func:`recovery_case_aging`)."""
+    alongside the invoices (see :func:`recovery_case_aging`), and
+    open postings past the escalation threshold ride along as
+    action items, oldest first (``posting.approved_not_posted``
+    already orders them)."""
     as_of = as_of or date.today()
     items: list[QueueItem] = []
     triage_mix: dict[str, int] = {}
@@ -191,6 +212,7 @@ def build_queue(
     case_items, case_buckets, case_breaches = recovery_case_aging(
         recovery_packs, as_of=as_of, sla_days=recovery_sla_days
     )
+    posting_items = list(open_postings)
     return QueueView(
         as_of=as_of.isoformat(),
         count=len(items),
@@ -204,4 +226,7 @@ def build_queue(
         recovery_open_count=len(case_items),
         recovery_sla_breaches=case_breaches,
         recovery_sla_days=recovery_sla_days,
+        open_postings=posting_items,
+        open_posting_count=len(posting_items),
+        posting_escalation_days=posting_escalation_days,
     )

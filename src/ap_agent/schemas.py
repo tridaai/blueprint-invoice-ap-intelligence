@@ -947,6 +947,13 @@ class QueueView(BaseModel):
     recovery_open_count: int = 0
     recovery_sla_breaches: int = 0
     recovery_sla_days: int = 0
+    # Escalated open postings: approved invoices still unposted
+    # past the escalation threshold (POSTING_ESCALATION_DAYS) join
+    # the worklist as action items, each carrying its ERP failure
+    # reason when a receipt failed.
+    open_postings: list[OpenPostingItem] = Field(default_factory=list)
+    open_posting_count: int = 0
+    posting_escalation_days: int = 0
 
 
 # ---------------------------------------------------------------------------
