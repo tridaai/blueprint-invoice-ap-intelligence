@@ -544,6 +544,45 @@ class ApprovedNotPostedReport(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Marker-risk worklist (supplier onboarding, ranked by marked value)
+# ---------------------------------------------------------------------------
+
+class MarkerWorklistItem(BaseModel):
+    """One supplier's marked (uncompleted) export exposure, in one
+    currency: the value its hand-off exports carried the
+    ``SUPPLIER-MASTER-AT-IMPORT`` marker for, because the governed
+    master held no approved bank details for it. This is the
+    supplier-onboarding worklist's unit of work — onboard this
+    supplier through the governed master-change path and the
+    marker (and the import risk it prices) goes away."""
+
+    supplier_name: str = ""
+    currency: str = "USD"
+    marked_value: float = 0.0  # export-time net, summed over marked members
+    invoice_count: int = 0  # exported members that carried the marker
+    invoice_ids: list[str] = Field(default_factory=list)
+    export_count: int = 0  # runs those members exported in
+    last_export_date: str = ""  # ISO date of the latest marked export
+
+
+class MarkerWorklist(BaseModel):
+    """Suppliers ranked by marked export value — the
+    master-onboarding worklist, derived from the same export
+    receipts the completion-coverage metric prices. Ranked within
+    currency (values are never compared across currencies),
+    biggest exposure first. Suppliers the master now covers with
+    approved bank details are resolved: off the list, counted in
+    ``resolved_supplier_count`` with their formerly-marked value,
+    so the queue's shrinkage is visible."""
+
+    items: list[MarkerWorklistItem] = Field(default_factory=list)
+    supplier_count: int = 0
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    resolved_supplier_count: int = 0
+    resolved_value_by_currency: dict[str, float] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Credit notes (a supplier document that arrives after the invoice)
 # ---------------------------------------------------------------------------
 

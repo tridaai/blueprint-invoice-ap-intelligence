@@ -63,6 +63,7 @@ from .schemas import (
     CreditNoteMatch,
     DigestHistory,
     EscalationDigest,
+    MarkerWorklist,
     InvoiceBundleInput,
     InvoiceInput,
     MasterChangeEvent,
@@ -1730,6 +1731,41 @@ class InvoiceService:
         from .digest import build_digest_history
 
         return build_digest_history(self._get_store().list_digests())
+
+    def marker_worklist(self) -> MarkerWorklist:
+        """The supplier-onboarding worklist: suppliers ranked by
+        the export value that still carried the at-import marker,
+        from the stored runs' completion receipts (see
+        ``worklist.marker_worklist``).
+
+        A supplier drops off the list when the master now holds
+        approved bank details for them — checked here against the
+        live master with the same has-details rule the export
+        completion uses (a record exists AND carries an IBAN or an
+        account number): onboarding is the governed master-change
+        path, and the moment it lands, the marked exports become
+        history rather than work. A pure read — it onboards
+        nobody."""
+        from .supplier_master import _iban_norm
+        from .worklist import marker_worklist as _marker_worklist
+
+        runs = self._get_store().list_payment_runs()
+        master = self._get_supplier_master()
+        candidates = {
+            entry.supplier_name
+            for run in runs
+            for entry in run.handoff_creditor_entries
+            if entry.source != "supplier_master" and entry.supplier_name
+        }
+        onboarded = set()
+        for name in candidates:
+            record = master.get_supplier(name) if master else None
+            if record is not None and (
+                (record.iban and _iban_norm(record.iban))
+                or (record.account_number or "").strip()
+            ):
+                onboarded.add(name)
+        return _marker_worklist(runs, onboarded_suppliers=onboarded)
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)

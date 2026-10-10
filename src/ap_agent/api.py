@@ -51,6 +51,7 @@ from .schemas import (
     MasterChangeFromInvoiceRequest,
     MasterChangeProposeRequest,
     MasterChangeRequest,
+    MarkerWorklist,
     PaymentRun,
     PostingReceiptRequest,
     PaymentRunRequest,
@@ -591,6 +592,17 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             return svc.escalate_breached_recovery_cases(as_of=as_of)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/suppliers/marker-worklist", response_model=MarkerWorklist, dependencies=_AUTH)
+    def marker_worklist() -> MarkerWorklist:
+        """The supplier-onboarding worklist: suppliers ranked by
+        the export value that still carried the
+        ``SUPPLIER-MASTER-AT-IMPORT`` marker, from the stored
+        runs' completion receipts — each with its marked value,
+        invoice count, and last export date. Suppliers the master
+        now covers are resolved and counted, not listed. Read-only:
+        onboarding is the governed master-change path below."""
+        return svc.marker_worklist()
 
     @app.post("/suppliers/master-changes", response_model=MasterChangeRequest, dependencies=_AUTH)
     def propose_master_change(request: MasterChangeProposeRequest) -> MasterChangeRequest:

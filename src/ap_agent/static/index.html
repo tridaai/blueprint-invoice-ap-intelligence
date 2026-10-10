@@ -130,6 +130,14 @@
     </div>
     <div id="mcbody"></div>
   </section>
+  <section id="sec-worklist">
+    <h2>Supplier onboarding worklist (marker risk, ranked)</h2>
+    <div class="gate">
+      <button id="loadworklist" class="secondary">Load worklist</button>
+      <span class="note" id="worklistnote">Suppliers ranked by the export value that still carried the SUPPLIER-MASTER-AT-IMPORT marker — the fraud screen's blind spot as a work queue. Onboarding a supplier is the governed change above; the button prefills it. Suppliers the master now covers drop off and are counted as resolved.</span>
+    </div>
+    <div id="worklistbody"></div>
+  </section>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -504,6 +512,22 @@ async function loadOpenItems() {
   $("openbody").innerHTML = (r.items || []).length ? `<table><tr><th>Invoice</th><th>Supplier</th><th>Amount</th><th>Approved by</th><th>Age</th><th>Receipt</th></tr>${r.items.map(i => `<tr><td>${esc(i.invoice_id)}<br><span class="note">${esc(i.invoice_number || "")}</span></td><td>${esc(i.supplier_name)}</td><td>${esc(i.currency)} ${i.total_amount ?? "—"}</td><td>${esc(i.decided_by || "—")}</td><td>${pill((i.age_days ?? "—") + "d since " + i.age_basis, "warn")}</td><td>${i.receipt_state === "failed" ? pill("posting failed", "bad") + `<br><span class="note">${esc(i.receipt_detail)}</span>` : pill("no receipt", "warn")}</td></tr>`).join("")}</table>` : `<p class="kv">No open items — every approval past the grace window has its posted receipt.</p>`;
 }
 $("loadopen").onclick = loadOpenItems;
+
+async function loadWorklist() {
+  const res = await fetch("/suppliers/marker-worklist", {headers: headers()});
+  const w = await res.json();
+  if (!res.ok) { $("worklistnote").textContent = `Worklist failed to load (${res.status}): ${w.detail || ""}`; return; }
+  const totals = Object.entries(w.totals_by_currency || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
+  $("worklistnote").textContent = `${w.supplier_count} supplier(s) still exporting marked${totals ? " · marked value " + totals : ""}${w.resolved_supplier_count ? ` · ${w.resolved_supplier_count} supplier(s) onboarded since (resolved)` : ""}.`;
+  $("worklistbody").innerHTML = (w.items || []).length ? `<table><tr><th>Supplier</th><th>Currency</th><th>Marked value</th><th>Invoices</th><th>Exports</th><th>Last marked export</th><th></th></tr>${w.items.map(i => `<tr><td>${esc(i.supplier_name)}</td><td>${esc(i.currency)}</td><td><b>${i.marked_value}</b></td><td>${i.invoice_count}<br><span class="note">${(i.invoice_ids || []).map(esc).join(", ")}</span></td><td>${i.export_count}</td><td>${esc(i.last_export_date || "—")}</td><td><button class="secondary" data-onboard="${esc(i.supplier_name)}">Propose master change</button></td></tr>`).join("")}</table>` : `<p class="kv">No supplier is exporting marked — every exported member's creditor account was completed from the master, or nothing has exported yet.</p>`;
+  document.querySelectorAll("[data-onboard]").forEach(btn => btn.onclick = () => {
+    $("mc-supplier").value = btn.dataset.onboard;
+    $("sec-master").scrollIntoView({behavior: "smooth"});
+    $("mc-account").focus();
+    $("mcnote").textContent = `Onboarding ${btn.dataset.onboard}: enter the verified bank details, propose the change, and have a second operator approve it with the out-of-band verification reference. Nothing applies by proposing.`;
+  });
+}
+$("loadworklist").onclick = loadWorklist;
 
 $("propose").onclick = async () => {
   const res = await fetch("/payment-runs/propose", {method: "POST", headers: headers(), body: JSON.stringify({window_days: 7})});
