@@ -1075,11 +1075,89 @@ class PaymentRun(BaseModel):
     # Zero on runs that needed no second confirmer.
     four_eyes_wait_lapses: list[PaymentRunWaitLapse] = Field(default_factory=list)
     four_eyes_wait_cost: float = 0.0
+    # The hand-off profile that governed the latest export (see
+    # HandoffProfile below): the profile whose format was used
+    # when the export did not name one, and whose lead days set
+    # a pain.001 export's requested execution date. Empty when
+    # no profile governs the run. ``handoff_execution_date`` is
+    # the ReqExctnDt actually written into a pain.001 file (the
+    # CSV carries no execution date; the stamp is "" there).
+    handoff_profile_id: str = ""
+    handoff_execution_date: str = ""
+    # Proposal-time routing flags from the profiles: members
+    # whose supplier's bank rejects at-import markers while the
+    # master holds no approved bank details for them — flagged
+    # when the run is proposed, not discovered at import.
+    handoff_profile_flags: list[str] = Field(default_factory=list)
 
 
 class PaymentRunRequest(BaseModel):
     window_days: int = 7
     as_of: str = ""  # ISO date the windows are anchored on; "" = today
+
+
+class HandoffProfileEvent(BaseModel):
+    """One entry in a hand-off profile's audit trail: who set
+    the profile, when, and the values it carried. A profile is
+    routing configuration a bank acts on, so every change is
+    attributable — the trail is append-only and rides the
+    profile record itself."""
+
+    at: str = ""  # ISO timestamp
+    actor: str = ""
+    action: str = ""  # created | updated
+    detail: str = ""  # the effective values, in words
+
+
+class HandoffProfile(BaseModel):
+    """A governed hand-off routing profile: how one scope's
+    payment runs should leave the building.
+
+    A run is one file in one format, but the right format is a
+    property of the payee side, not of the run: one ERP ingests
+    the CSV, another bank wants pain.001, a third needs a few
+    days of lead before the requested execution date, and some
+    banks reject files whose creditor account is an at-import
+    marker instead of real details. The profile is where an
+    operator records that knowledge — scoped to one supplier
+    (``scope="supplier"``) or to a whole currency
+    (``scope="currency"``) — and the export resolves it
+    deterministically (``handoff_profiles.py``): an explicit
+    format on the export call still wins; below that, the
+    run's currency profile; below that, a supplier profile
+    every profiled member of the run agrees on; else the CSV
+    default. Setting a profile is a governed act: it names its
+    actor and appends to the profile's audit trail, and it
+    changes no run by itself — it is read at proposal time
+    (marker flags) and at export time (format, lead days)."""
+
+    profile_id: str  # HP-CUR-<CODE> | HP-SUP-<slug>
+    scope: str = "currency"  # supplier | currency
+    supplier_name: str = ""  # set when scope == "supplier"
+    currency: str = ""  # set when scope == "currency"
+    format: str = "csv"  # csv | pain001 — the scope's preferred hand-off format
+    lead_days: int = 0  # requested-execution lead for pain.001 (see handoff.py)
+    markers_rejected: bool = False  # the payee's bank rejects at-import markers
+    note: str = ""
+    updated_by: str = ""
+    updated_at: str = ""  # ISO timestamp of the latest set
+    history: list[HandoffProfileEvent] = Field(default_factory=list)
+
+
+class HandoffProfileRequest(BaseModel):
+    """Setting a hand-off profile: the scope key (a supplier
+    name or a currency code), the routing values, and the
+    operator setting them — a profile without an actor is not
+    governed, so the service refuses one."""
+
+    actor: Optional[str] = None
+    scope: str = "currency"  # supplier | currency
+    supplier_name: str = ""
+    currency: str = ""
+    format: str = "csv"
+    lead_days: int = 0
+    markers_rejected: bool = False
+    note: str = ""
 
 
 # ---------------------------------------------------------------------------

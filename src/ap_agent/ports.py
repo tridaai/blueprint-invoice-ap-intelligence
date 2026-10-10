@@ -64,6 +64,7 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
     )
     from .schemas import BundleResult, MasterChangeRequest, PaymentRun, RecoveryPack
     from .schemas import EscalationDigest, StatementReconciliation, SupplierMasterRecord
+    from .schemas import HandoffProfile
     from .store import ApprovalRecord
 
 
@@ -147,6 +148,12 @@ class Store(Protocol):
     def get_digest(self, digest_date: str) -> "EscalationDigest | None": ...
 
     def list_digests(self) -> list["EscalationDigest"]: ...
+
+    def save_handoff_profile(self, profile: "HandoffProfile") -> None: ...
+
+    def get_handoff_profile(self, profile_id: str) -> "HandoffProfile | None": ...
+
+    def list_handoff_profiles(self) -> list["HandoffProfile"]: ...
 
     def prior_invoices(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
 

@@ -252,7 +252,9 @@ def _el(parent: ET.Element, tag: str, text: str | None = None) -> ET.Element:
 
 
 def render_handoff_pain001(
-    run: PaymentRun, creditor_accounts: dict[str, dict] | None = None
+    run: PaymentRun,
+    creditor_accounts: dict[str, dict] | None = None,
+    requested_execution_date: str = "",
 ) -> bytes:
     """Render a confirmed run as an ISO 20022 pain.001.001.09
     customer credit-transfer initiation document.
@@ -262,7 +264,9 @@ def render_handoff_pain001(
     run's confirmation time as the creation time — deterministic
     for a given run, like the CSV. One ``PmtInf`` covers the whole
     run (single currency, single requested execution date: the
-    run's window end); each line becomes one ``CdtTrfTxInf`` at its
+    run's window end, or the caller's ``requested_execution_date``
+    when the governing hand-off profile's lead days push it
+    later); each line becomes one ``CdtTrfTxInf`` at its
     export-time *net* amount, with the supplier invoice number in
     the remittance information and the agent's invoice id as the
     end-to-end id.
@@ -295,7 +299,7 @@ def render_handoff_pain001(
     _el(payment, "PmtMtd", "TRF")
     _el(payment, "NbOfTxs", str(run.invoice_count))
     _el(payment, "CtrlSum", _money(run.total_net))
-    _el(payment, "ReqExctnDt", run.window_end)
+    _el(payment, "ReqExctnDt", requested_execution_date or run.window_end)
     debtor = _el(payment, "Dbtr")
     _el(debtor, "Nm", "Debtor account holder (completed at import)")
     account = _el(payment, "DbtrAcct")
@@ -350,11 +354,18 @@ def render_handoff(
     run: PaymentRun,
     format: str = HANDOFF_FORMAT_CSV,
     creditor_accounts: dict[str, dict] | None = None,
+    requested_execution_date: str = "",
 ) -> bytes:
     """Render a confirmed run in one of the hand-off formats —
-    the one seam both serializations sit behind."""
+    the one seam both serializations sit behind.
+    ``requested_execution_date`` reaches the pain.001 renderer
+    only (the CSV layout has no execution-date column); the
+    service computes it from the governing hand-off profile's
+    lead days (``handoff_profiles.requested_execution_date``)."""
     if format == HANDOFF_FORMAT_PAIN001:
-        return render_handoff_pain001(run, creditor_accounts)
+        return render_handoff_pain001(
+            run, creditor_accounts, requested_execution_date
+        )
     if format == HANDOFF_FORMAT_CSV:
         return render_handoff_csv(run, creditor_accounts)
     raise ValueError(

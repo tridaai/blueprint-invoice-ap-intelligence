@@ -66,6 +66,8 @@ from .schemas import (
     DigestStoreSweep,
     DigestStoreSweepEntry,
     EscalationDigest,
+    HandoffProfile,
+    HandoffProfileEvent,
     MarkerWorklist,
     InvoiceBundleInput,
     InvoiceInput,
@@ -272,6 +274,26 @@ def digest_store_lookback_days() -> int:
             "DIGEST_STORE_LOOKBACK_DAYS", DIGEST_STORE_LOOKBACK_DEFAULT_DAYS
         ),
     )
+
+
+def _handoff_profile_summary(profiles: list[HandoffProfile]) -> dict:
+    """The governed hand-off profiles in force, counted for
+    /metrics: how much routing is configured, where it points,
+    and how many payees' banks reject at-import markers (the
+    population the proposal-time flags watch)."""
+    by_scope: dict[str, int] = {}
+    by_format: dict[str, int] = {}
+    for profile in profiles:
+        by_scope[profile.scope] = by_scope.get(profile.scope, 0) + 1
+        by_format[profile.format] = by_format.get(profile.format, 0) + 1
+    return {
+        "count": len(profiles),
+        "by_scope": by_scope,
+        "by_format": by_format,
+        "markers_rejected": sum(
+            1 for profile in profiles if profile.markers_rejected
+        ),
+    }
 
 
 @dataclass
@@ -1029,6 +1051,9 @@ class InvoiceService:
                 ),
             },
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
+            "handoff_profiles": _handoff_profile_summary(
+                self._get_store().list_handoff_profiles()
+            ),
         }
 
     def audit_rows(self) -> list[dict]:
@@ -1150,11 +1175,36 @@ class InvoiceService:
             four_eyes_thresholds=payment_run_four_eyes_thresholds(),
         )
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # Hand-off profile flags, stamped at proposal: a member
+        # whose supplier's bank rejects at-import markers while
+        # the master holds no approved bank details for them
+        # would export a file its bank refuses — flag it now,
+        # while onboarding is cheap (handoff_profiles.py). The
+        # master check is the completion's own has-details rule.
+        from .handoff_profiles import marker_flags as _marker_flags
+        from .supplier_master import _iban_norm
+
+        profiles = store.list_handoff_profiles()
+        master_covered: set[str] = set()
+        if profiles:
+            master = self._get_supplier_master()
+            for name in {
+                line.supplier_name for run in runs for line in run.lines
+            }:
+                record = master.get_supplier(name) if master else None
+                if record is not None and (
+                    (record.iban and _iban_norm(record.iban))
+                    or (record.account_number or "").strip()
+                ):
+                    master_covered.add(name)
         saved: list[PaymentRun] = []
         for run in runs:
             if run.run_id in confirmed_ids:
                 continue  # a confirmed run is the record; never refreshed
             run.proposed_at = stamp
+            run.handoff_profile_flags = _marker_flags(
+                run, profiles, master_covered=master_covered
+            )
             store.save_payment_run(run)
             saved.append(run)
         return saved
@@ -2043,6 +2093,106 @@ class InvoiceService:
             expiry_days=master_change_expiry_days(),
         )
 
+    def set_handoff_profile(
+        self,
+        *,
+        actor: str,
+        scope: str = "currency",
+        supplier_name: str = "",
+        currency: str = "",
+        format: str = "csv",
+        lead_days: int = 0,
+        markers_rejected: bool = False,
+        note: str = "",
+    ) -> HandoffProfile:
+        """Set (create or update) a governed hand-off routing
+        profile — the payee side's say in how its runs are
+        exported (see ``handoff_profiles.py``).
+
+        Governed means attributable: the set names its actor,
+        and the profile record keeps an append-only audit trail
+        of every set with the values it carried. One profile
+        exists per scope key (supplier name or currency code);
+        setting it again updates the same record. The profile
+        changes no run by itself — it is read at proposal time
+        (marker-rejection flags) and at export time (format
+        resolution and the pain.001 lead days)."""
+        from .handoff import HANDOFF_FORMATS
+        from .handoff_profiles import profile_detail, profile_id_for
+
+        if not (actor or "").strip():
+            raise ValueError(
+                "Provide 'actor' — a hand-off profile is governed "
+                "configuration; an unattributed set is refused"
+            )
+        if scope not in ("supplier", "currency"):
+            raise ValueError(
+                f"Unknown profile scope {scope!r} — expected 'supplier' "
+                "or 'currency'"
+            )
+        if format not in HANDOFF_FORMATS:
+            raise ValueError(
+                f"Unknown hand-off format {format!r} — expected one of "
+                f"{HANDOFF_FORMATS}"
+            )
+        lead_days = int(lead_days)
+        if lead_days < 0 or lead_days > 30:
+            raise ValueError(
+                f"lead_days {lead_days} is outside 0–30 — a routing "
+                "profile buys processing days, not a month of float"
+            )
+        supplier_name = (supplier_name or "").strip()
+        currency = (currency or "").strip().upper()
+        if scope == "supplier":
+            if not supplier_name:
+                raise ValueError(
+                    "A supplier-scoped profile needs a supplier_name"
+                )
+            currency = ""
+        else:
+            if len(currency) != 3 or not currency.isalpha():
+                raise ValueError(
+                    f"A currency-scoped profile needs a 3-letter "
+                    f"currency code, got {currency!r}"
+                )
+            supplier_name = ""
+        profile_id = profile_id_for(
+            scope, supplier_name=supplier_name, currency=currency
+        )
+        store = self._get_store()
+        existing = store.get_handoff_profile(profile_id)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        profile = HandoffProfile(
+            profile_id=profile_id,
+            scope=scope,
+            supplier_name=supplier_name,
+            currency=currency,
+            format=format,
+            lead_days=lead_days,
+            markers_rejected=bool(markers_rejected),
+            note=(note or "").strip(),
+            updated_by=actor,
+            updated_at=stamp,
+            history=list(existing.history) if existing else [],
+        )
+        profile.history.append(
+            HandoffProfileEvent(
+                at=stamp,
+                actor=actor,
+                action="updated" if existing else "created",
+                detail=profile_detail(profile),
+            )
+        )
+        store.save_handoff_profile(profile)
+        return profile
+
+    def list_handoff_profiles(self) -> list[HandoffProfile]:
+        """The governed hand-off routing profiles in force."""
+        return self._get_store().list_handoff_profiles()
+
+    def get_handoff_profile(self, profile_id: str) -> HandoffProfile | None:
+        return self._get_store().get_handoff_profile(profile_id)
+
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)
 
@@ -2170,21 +2320,31 @@ class InvoiceService:
         return run
 
     def export_payment_run_handoff(
-        self, run_id: str, actor: str, as_of: str = "", format: str = "csv"
+        self, run_id: str, actor: str, as_of: str = "", format: str = ""
     ) -> PaymentRun:
         """Render a confirmed run's hand-off file and store it
         through the object-store port.
 
-        The file (``handoff.py`` — CSV layout v1, or ISO 20022
-        pain.001 when ``format="pain001"``; the mapping is in
-        ``docs/handoff-formats.md``) is the routing adapter to the
-        customer's banking/ERP system. Generating it changes
-        no payment state — the run stays confirmed, its invoices
-        stay approved; the run record gains only the export receipt
-        (object key + sha256 of the stored bytes, and the format).
-        Re-exporting renders the same bytes and refreshes the
-        receipt; exporting in the other format stores that format's
-        file alongside and moves the receipt to it.
+        The file (``handoff.py`` — CSV layout v2, or ISO 20022
+        pain.001; the mapping is in ``docs/handoff-formats.md``)
+        is the routing adapter to the customer's banking/ERP
+        system. Generating it changes no payment state — the run
+        stays confirmed, its invoices stay approved; the run
+        record gains only the export receipt (object key +
+        sha256 of the stored bytes, and the format). Re-exporting
+        renders the same bytes and refreshes the receipt;
+        exporting in the other format stores that format's file
+        alongside and moves the receipt to it.
+
+        The format is resolved, not assumed (``handoff_profiles.
+        resolve_export_format``): a format named on the call
+        wins; else the governing hand-off profile's format —
+        the run's currency profile, or a supplier profile the
+        run's profiled members agree on; else the CSV default.
+        The governing profile's lead days also set a pain.001
+        export's requested execution date. The run record
+        stamps which way it went (``handoff_profile_id``,
+        ``handoff_execution_date``).
 
         The gates are the same in either format: the run must be
         confirmed, and a four-eyes run must carry its second
@@ -2209,10 +2369,11 @@ class InvoiceService:
         """
         from .handoff import HANDOFF_FORMATS
 
-        if format not in HANDOFF_FORMATS:
+        if format and format not in HANDOFF_FORMATS:
             raise ValueError(
                 f"Unknown hand-off format {format!r} — expected one of "
-                f"{HANDOFF_FORMATS}"
+                f"{HANDOFF_FORMATS}, or no format to let the run's "
+                "hand-off profile decide"
             )
         store = self._get_store()
         run = store.get_payment_run(run_id)
@@ -2296,16 +2457,54 @@ class InvoiceService:
             run, self._get_supplier_master()
         )
         run.handoff_creditor_entries = creditor_entries
-        data = render_handoff(run, format, creditor_accounts=completions)
-        key = handoff_key(run.run_id, format)
-        object_store.put(key, data, content_type=handoff_content_type(format))
+        # The format resolves through the governed hand-off
+        # profiles: an explicit format on the call wins, else
+        # the governing profile's, else the CSV default. The
+        # governing profile's lead days set a pain.001 export's
+        # requested execution date — the payee's processing
+        # runway is a routing fact, whoever picked the format.
+        from .handoff_profiles import (
+            requested_execution_date,
+            resolve_export_format,
+        )
+
+        resolved_format, profile, basis = resolve_export_format(
+            run, store.list_handoff_profiles(), format
+        )
+        execution_date = (
+            requested_execution_date(run, profile, export_date=anchor)
+            if resolved_format == "pain001"
+            else ""
+        )
+        data = render_handoff(
+            run,
+            resolved_format,
+            creditor_accounts=completions,
+            requested_execution_date=execution_date,
+        )
+        key = handoff_key(run.run_id, resolved_format)
+        object_store.put(
+            key, data, content_type=handoff_content_type(resolved_format)
+        )
         run.handoff_key = key
         run.handoff_sha256 = hashlib.sha256(data).hexdigest()
         run.handoff_generated_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
         )
         run.handoff_generated_by = actor
-        run.handoff_format = format
+        run.handoff_format = resolved_format
+        run.handoff_profile_id = profile.profile_id if profile else ""
+        run.handoff_execution_date = execution_date
+        if profile is not None and basis.startswith("profile"):
+            run.note += (
+                f" Hand-off format {resolved_format} from {basis}"
+                + (
+                    f"; requested execution date {execution_date} "
+                    f"under the profile's {profile.lead_days}d lead."
+                    if execution_date and execution_date != run.window_end
+                    else "."
+                )
+            )
         store.save_payment_run(run)
         return run
 

@@ -46,6 +46,8 @@ from .schemas import (
     DigestHistory,
     DigestStoreSweep,
     EscalationDigest,
+    HandoffProfile,
+    HandoffProfileRequest,
     InvoiceBundleInput,
     InvoiceInput,
     MasterChangeDecisionRequest,
@@ -506,18 +508,58 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/handoff/profiles", response_model=list[HandoffProfile], dependencies=_AUTH)
+    def list_handoff_profiles() -> list[HandoffProfile]:
+        """The governed hand-off routing profiles in force: per
+        supplier or per currency — preferred format, pain.001
+        lead days, and whether the payee's bank rejects
+        at-import creditor markers — each with its audit trail."""
+        return svc.list_handoff_profiles()
+
+    @app.post("/handoff/profiles", response_model=HandoffProfile, dependencies=_AUTH)
+    def set_handoff_profile(request: HandoffProfileRequest) -> HandoffProfile:
+        """Set (create or update) a hand-off routing profile.
+        Governed configuration: the set names its actor and
+        appends to the profile's audit trail; one profile exists
+        per scope key, so re-setting updates the same record.
+        The profile is read at proposal time (marker-rejection
+        flags) and at export time (format + lead days)."""
+        if not (request.actor or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Provide 'actor' — a hand-off profile is governed configuration; an unattributed set is refused.",
+            )
+        try:
+            return svc.set_handoff_profile(
+                actor=request.actor,
+                scope=request.scope,
+                supplier_name=request.supplier_name,
+                currency=request.currency,
+                format=request.format,
+                lead_days=request.lead_days,
+                markers_rejected=request.markers_rejected,
+                note=request.note,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/payment-runs/{run_id}/handoff", response_model=PaymentRun, dependencies=_AUTH)
-    def export_payment_run_handoff(run_id: str, request: DecisionRequest, as_of: str = Query(default=""), format: str = Query(default="csv")) -> PaymentRun:
+    def export_payment_run_handoff(run_id: str, request: DecisionRequest, as_of: str = Query(default=""), format: str = Query(default="")) -> PaymentRun:
         """Generate the confirmed run's bank-ready hand-off file
-        into object storage — CSV layout v1 by default, or the
-        ISO 20022 pain.001 XML with ``?format=pain001`` (mapping
-        in docs/handoff-formats.md). The run gains the export
-        receipt (object key + content hash + format); generating
-        the file changes no payment state. Member discounts are
-        re-verified as of the export date (``as_of``, default
-        today): a member whose discount window closed since
-        confirmation is exported at full gross, with the drift
-        itemised on the run (``handoff_drift``)."""
+        into object storage. The format resolves through the
+        governed hand-off profiles (``GET /handoff/profiles``):
+        ``?format=csv|pain001`` named here wins; with no format,
+        the governing profile's format applies (the run's
+        currency profile, or a supplier profile its members
+        agree on), else the CSV default (mapping in
+        docs/handoff-formats.md). The run gains the export
+        receipt (object key + content hash + format + governing
+        profile); generating the file changes no payment state.
+        Member discounts are re-verified as of the export date
+        (``as_of``, default today): a member whose discount
+        window closed since confirmation is exported at full
+        gross, with the drift itemised on the run
+        (``handoff_drift``)."""
         try:
             return svc.export_payment_run_handoff(
                 run_id, actor=_decision_actor(request), as_of=as_of, format=format

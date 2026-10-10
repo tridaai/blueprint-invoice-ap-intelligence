@@ -29,6 +29,7 @@ from .schemas import (
     AgentResult,
     BundleResult,
     EscalationDigest,
+    HandoffProfile,
     MasterChangeRequest,
     PaymentRun,
     RecoveryPack,
@@ -198,6 +199,7 @@ class InMemoryStore:
         self._master_changes: dict[str, str] = {}
         self._bundles: dict[str, str] = {}
         self._digests: dict[str, str] = {}
+        self._handoff_profiles: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
@@ -287,6 +289,24 @@ class InMemoryStore:
         with self._lock:
             payloads = [self._digests[k] for k in sorted(self._digests)]
         return [EscalationDigest.model_validate_json(p) for p in payloads]
+
+    def save_handoff_profile(self, profile: HandoffProfile) -> None:
+        with self._lock:
+            self._handoff_profiles[profile.profile_id] = (
+                profile.model_dump_json()
+            )
+
+    def get_handoff_profile(self, profile_id: str) -> HandoffProfile | None:
+        with self._lock:
+            payload = self._handoff_profiles.get(profile_id)
+        return HandoffProfile.model_validate_json(payload) if payload else None
+
+    def list_handoff_profiles(self) -> list[HandoffProfile]:
+        with self._lock:
+            payloads = [
+                self._handoff_profiles[k] for k in sorted(self._handoff_profiles)
+            ]
+        return [HandoffProfile.model_validate_json(p) for p in payloads]
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -540,6 +560,29 @@ class PostgresStore:
             for d in self._all_blobs("digests")
         ]
         return sorted(digests, key=lambda d: d.as_of)
+
+    # --- Round-12 artefacts: governed hand-off routing profiles
+    # (migration 0011). Same blob pattern, keyed by profile id;
+    # the audit trail rides inside the payload, append-only.
+
+    def save_handoff_profile(self, profile: HandoffProfile) -> None:
+        self._save_blob(
+            "handoff_profiles",
+            "profile_id",
+            profile.profile_id,
+            profile.model_dump_json(),
+        )
+
+    def get_handoff_profile(self, profile_id: str) -> HandoffProfile | None:
+        data = self._get_blob("handoff_profiles", "profile_id", profile_id)
+        return HandoffProfile.model_validate(data) if data is not None else None
+
+    def list_handoff_profiles(self) -> list[HandoffProfile]:
+        profiles = [
+            HandoffProfile.model_validate(d)
+            for d in self._all_blobs("handoff_profiles")
+        ]
+        return sorted(profiles, key=lambda p: p.profile_id)
 
     def _all_payloads(self) -> list:
         with self._connect() as conn:
