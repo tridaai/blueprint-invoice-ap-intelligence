@@ -978,6 +978,29 @@ class RecoveryCaseEvent(BaseModel):
 RECOVERY_CASE_FLOW = ["opened", "supplier_contacted", "credit_received", "closed"]
 
 
+class RecoveryEscalation(BaseModel):
+    """One SLA-breach escalation for a recovery case: the signed
+    ``recovery_escalation`` webhook fired when the case's current
+    status outlasted the SLA (``RECOVERY_CASE_SLA_DAYS``).
+
+    The ledger lives on the pack, NOT in ``case_history``, on
+    purpose: the aging clock runs from the last history event, so
+    an escalation entry there would reset the very status age it
+    reports. Dedupe is by (case_status, status_since) — one
+    escalation per status crossing; a case that moves and stalls
+    again earns a new one. An attempt is recorded whether the
+    receiver answered (``sent``) or not (``failed``): the ledger is
+    the record that the crossing was escalated, once."""
+
+    case_status: str = ""  # the status that breached
+    status_since: str = ""  # ISO date the status began — the crossing's identity
+    sla_days: int = 0  # the SLA in force when the breach fired
+    status_age_days: Optional[int] = None  # the breached status age
+    age_days: Optional[int] = None  # the case's total age at the breach
+    dispatched_at: str = ""  # ISO timestamp of the dispatch
+    dispatch_status: str = ""  # sent | failed
+
+
 class RecoveryPack(BaseModel):
     """The recovery case for a duplicate whose original was already
     approved: the duplicate evidence (computed), a supplier recovery
@@ -1004,6 +1027,10 @@ class RecoveryPack(BaseModel):
     # ``case_history`` is the audit trail of those transitions.
     case_status: str = "opened"
     case_history: list[RecoveryCaseEvent] = Field(default_factory=list)
+    # SLA-breach escalations fired for this case (see
+    # RecoveryEscalation): the webhook ledger, deduped per status
+    # crossing. Empty until a sweep finds the case breached.
+    escalations: list[RecoveryEscalation] = Field(default_factory=list)
 
 
 class RecoveryTransitionRequest(BaseModel):

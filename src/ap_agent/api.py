@@ -517,6 +517,20 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/recovery-cases/escalate", response_model=list[RecoveryPack], dependencies=_AUTH)
+    def escalate_recovery_cases(as_of: str = Query(default="")) -> list[RecoveryPack]:
+        """Sweep: fire the signed ``recovery_escalation`` webhook
+        for every open recovery case whose current status has
+        breached the SLA, and record the dispatch on the case's
+        escalation ledger. One escalation per status crossing —
+        re-running the sweep does not re-fire; with no webhook
+        configured nothing fires and nothing is recorded.
+        ``as_of`` (ISO date) anchors the aging; default today."""
+        try:
+            return svc.escalate_breached_recovery_cases(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/suppliers/master-changes", response_model=MasterChangeRequest, dependencies=_AUTH)
     def propose_master_change(request: MasterChangeProposeRequest) -> MasterChangeRequest:
         """Propose a governed change to a supplier's master record.

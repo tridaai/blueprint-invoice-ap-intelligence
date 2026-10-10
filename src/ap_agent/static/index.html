@@ -258,6 +258,7 @@ function renderPack(pack) {
     <b class="note">SUPPLIER RECOVERY LETTER (draft — a human sends it)</b><pre>${esc((pack.drafts || {}).supplier_letter || "")}</pre>
     <p class="kv"><b>Case history</b></p>
     <ul>${(pack.case_history || []).map(h => `<li><b>${esc(h.status)}</b> — ${esc(h.actor)} · ${esc(h.at)}${h.note ? " · " + esc(h.note) : ""}</li>`).join("")}</ul>
+    ${(pack.escalations || []).length ? `<p class="kv"><b>SLA escalations</b> — the signed recovery_escalation webhook, once per status crossing</p><ul>${pack.escalations.map(e => `<li>${pill("escalated", "bad")} stuck on <b>${esc(e.case_status.replaceAll("_", " "))}</b> since ${esc(e.status_since)} — ${e.status_age_days}d in status vs the ${e.sla_days}d SLA · webhook ${esc(e.dispatch_status)} · ${esc(e.dispatched_at)}</li>`).join("")}</ul>` : ""}
     ${next ? `<div class="gate"><input type="text" id="recactor" placeholder="Your name (operator)" size="20"><input type="text" id="recnote2" placeholder="Note (optional)" size="30"><button id="recnext">Record: ${esc(next.replaceAll("_", " "))}</button></div>` : `<p class="kv">Case closed.</p>`}`;
   const btn = $("recnext");
   if (btn) btn.onclick = () => transitionCase(next);

@@ -67,6 +67,7 @@ from .schemas import (
     PaymentRun,
     PostingReceipt,
     QueueView,
+    RecoveryEscalation,
     RecoveryPack,
     StatementReconciliation,
     SupplierMasterRecord,
@@ -248,6 +249,78 @@ def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
             return "sent" if 200 <= response.status < 300 else "failed"
     except Exception:  # dispatch failure is recorded, never raised
         return "failed"
+
+
+def _post_signed_webhook(payload: dict) -> str | None:
+    """POST one JSON event payload to ``ACTION_WEBHOOK_URL`` — the
+    shared wire for the agent's event webhooks. Same contract as
+    the approval dispatch: ``None`` when no URL is configured (off
+    by default), HMAC-SHA256 signed (``X-Trida-Signature``) when
+    ``ACTION_WEBHOOK_SECRET`` is set, ``"sent"`` on 2xx, ``"failed"``
+    on any error or non-2xx — a failure is a return value, never an
+    exception, so a down receiver never breaks the caller's work.
+    """
+    load_dotenv()
+    url = env_str("ACTION_WEBHOOK_URL")
+    if not url:
+        return None
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    secret = env_str("ACTION_WEBHOOK_SECRET")
+    if secret:
+        signature = hmac.new(
+            secret.encode("utf-8"), body, hashlib.sha256
+        ).hexdigest()
+        headers["X-Trida-Signature"] = f"sha256={signature}"
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    timeout = env_float("ACTION_WEBHOOK_TIMEOUT_SECONDS", 5.0)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return "sent" if 200 <= response.status < 300 else "failed"
+    except Exception:  # dispatch failure is recorded, never raised
+        return "failed"
+
+
+def dispatch_recovery_escalation_webhook(
+    pack: RecoveryPack,
+    *,
+    sla_days: int,
+    status_age_days: int | None,
+    age_days: int | None,
+) -> str | None:
+    """POST the ``recovery_escalation`` event for one SLA-breached
+    recovery case (off by default — the same opt-in seam, secret,
+    and signature as the approval webhook).
+
+    The payload is the case's aging snapshot at the breach: which
+    case, which supplier, how much money is stuck, the status it is
+    stuck in, and how far past the SLA it has run. It carries no
+    drafts and no bank details — it is a pointer at the case in the
+    queue, for the customer's own paging/ticketing system to act
+    on. Returns ``None`` when unconfigured, else ``"sent"`` /
+    ``"failed"`` (see :func:`_post_signed_webhook`)."""
+    payload = {
+        "event": "recovery_escalation",
+        "pack_id": pack.pack_id,
+        "duplicate_invoice_id": pack.duplicate_invoice_id,
+        "original_invoice_id": pack.original_invoice_id,
+        "supplier_name": pack.supplier_name,
+        "invoice_number": pack.invoice_number,
+        "currency": pack.currency,
+        "amount": pack.amount,
+        "exposure_status": pack.exposure_status,
+        "case_status": pack.case_status,
+        "age_days": age_days,
+        "status_age_days": status_age_days,
+        "sla_days": sla_days,
+        "sla_breached": True,
+    }
+    return _post_signed_webhook(payload)
 
 
 @dataclass
@@ -1113,6 +1186,82 @@ class InvoiceService:
         )
         store.save_recovery_pack(pack)
         return pack
+
+    def escalate_breached_recovery_cases(
+        self, as_of: str = ""
+    ) -> list[RecoveryPack]:
+        """Sweep the open recovery cases and escalate the breached.
+
+        The queue has always *shown* a case whose current status
+        outlasted the SLA (``RECOVERY_CASE_SLA_DAYS``); this is the
+        push counterpart — for each breached case, fire the signed
+        ``recovery_escalation`` webhook (the opt-in
+        ``ACTION_WEBHOOK_URL`` seam) with the case's aging snapshot,
+        so the customer's paging/ticketing system hears about money
+        stuck in recovery without anyone watching the queue.
+
+        One escalation per crossing: the dispatch is recorded in
+        the pack's own escalation ledger, deduped by (case status,
+        the date that status began) — re-running the sweep does not
+        re-fire, and a case that moves and stalls in a later status
+        escalates again for that crossing. The ledger lives outside
+        ``case_history`` because the status-age clock runs from the
+        last history event. With no webhook configured the sweep is
+        a no-op that records nothing — there is nothing to dedupe
+        against a dispatch that never happened. Returns the packs
+        escalated by this sweep.
+        """
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        sla_days = recovery_case_sla_days()
+        packs = store.list_recovery_packs()
+        items, _, _ = recovery_case_aging(packs, as_of=anchor, sla_days=sla_days)
+        by_id = {pack.pack_id: pack for pack in packs}
+        escalated: list[RecoveryPack] = []
+        for item in items:
+            if not item.sla_breached:
+                continue
+            pack = by_id.get(item.pack_id)
+            if pack is None:
+                continue
+            last_at = (
+                pack.case_history[-1].at if pack.case_history else pack.created_at
+            )
+            since = _parse_date(last_at)
+            status_since = since.isoformat() if since is not None else ""
+            if any(
+                entry.case_status == pack.case_status
+                and entry.status_since == status_since
+                for entry in pack.escalations
+            ):
+                continue  # this crossing already escalated — once is the rule
+            outcome = dispatch_recovery_escalation_webhook(
+                pack,
+                sla_days=sla_days,
+                status_age_days=item.status_age_days,
+                age_days=item.age_days,
+            )
+            if outcome is None:
+                continue  # webhook off: nothing fired, nothing recorded
+            pack.escalations.append(
+                RecoveryEscalation(
+                    case_status=pack.case_status,
+                    status_since=status_since,
+                    sla_days=sla_days,
+                    status_age_days=item.status_age_days,
+                    age_days=item.age_days,
+                    dispatched_at=datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    dispatch_status=outcome,
+                )
+            )
+            store.save_recovery_pack(pack)
+            escalated.append(pack)
+        return escalated
 
     # --- Governed supplier-master changes ---------------------------
 
