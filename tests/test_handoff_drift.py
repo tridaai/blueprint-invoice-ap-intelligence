@@ -16,9 +16,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ap_agent.api import create_app
-from ap_agent.handoff import render_handoff_csv
+from ap_agent.handoff import creditor_completions, render_handoff_csv
 from ap_agent.paymentruns import discount_drift
 from ap_agent.samples import sample_invoice_models
+from ap_agent.supplier_master import get_supplier_master
 from ap_agent.service import InvoiceService
 from ap_agent.storage import InMemoryObjectStore
 from ap_agent.store import InMemoryStore
@@ -94,9 +95,11 @@ def test_export_after_the_window_flags_the_drift(service):
     assert rows[1][9] == "1180.00"  # net = gross
     totals = rows[2]
     assert totals[8] == "0.00" and totals[9] == "1180.00"
-    # The stored bytes are exactly the adjusted run rendered.
+    # The stored bytes are exactly the adjusted run rendered, with
+    # the creditor completion the export applied.
+    completions, _ = creditor_completions(exported, get_supplier_master())
     assert service.get_payment_run_handoff(run.run_id) == render_handoff_csv(
-        exported
+        exported, creditor_accounts=completions
     )
     # The confirmation itself is untouched by the adjustment.
     assert exported.status == "confirmed"

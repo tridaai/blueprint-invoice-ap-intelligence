@@ -378,7 +378,11 @@ async function exportHandoff(runId, format) {
   const body = await res.json();
   if (!res.ok) { $("paynote").textContent = `Hand-off refused (${res.status}): ${body.detail || ""}`; return; }
   const drift = (body.handoff_drift || []).length ? ` Discount drift flagged on the run: ${body.handoff_drift.map(d => d.invoice_id + " lost " + d.discount_lost).join(", ")} — drifted members are exported at full gross.` : "";
-  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.${drift}`;
+  const cred = body.handoff_creditor_entries || [];
+  const done = cred.filter(e => e.source === "supplier_master");
+  const marked = cred.filter(e => e.source !== "supplier_master");
+  const completion = cred.length ? ` Creditor accounts: ${done.length} completed from the supplier master${done.length ? " (" + done.map(e => e.invoice_id + " " + e.account_label).join(", ") + ")" : ""}${marked.length ? `; ${marked.length} still carry the at-import marker (${marked.map(e => e.invoice_id).join(", ")})` : ""}.` : "";
+  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.${drift}${completion}`;
   loadRuns();
 }
 async function downloadHandoff(runId, format) {

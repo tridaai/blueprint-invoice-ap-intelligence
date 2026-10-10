@@ -17,10 +17,12 @@ from fastapi.testclient import TestClient
 from ap_agent.api import create_app
 from ap_agent.handoff import (
     PAIN001_NAMESPACE,
+    creditor_completions,
     handoff_key,
     render_handoff,
     render_handoff_pain001,
 )
+from ap_agent.supplier_master import get_supplier_master
 from ap_agent.samples import sample_invoice_models
 from ap_agent.schemas import PaymentRun, PaymentRunLine
 from ap_agent.service import InvoiceService
@@ -137,7 +139,10 @@ def test_export_pain001_stores_xml_and_records_the_format(service):
     stored = service.get_payment_run_handoff(run.run_id)
     assert stored is not None
     assert exported.handoff_sha256 == hashlib.sha256(stored).hexdigest()
-    assert stored == render_handoff(exported, "pain001")
+    completions, _ = creditor_completions(exported, get_supplier_master())
+    assert stored == render_handoff(
+        exported, "pain001", creditor_accounts=completions
+    )
     root = ET.fromstring(stored)
     amount = root.find(".//p:InstdAmt", NS)
     assert amount.text == "1156.40"  # net of the capturable discount

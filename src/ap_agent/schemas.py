@@ -831,6 +831,27 @@ class PaymentRunDrift(BaseModel):
     reason: str = ""
 
 
+class HandoffCreditorEntry(BaseModel):
+    """One run member's creditor-account completion in a hand-off
+    export: where the file's creditor account came from.
+
+    ``supplier_master`` — the governed master record holds approved
+    bank details for the supplier, so the export emitted them (the
+    IBAN where recorded, else the account number) instead of the
+    completion marker. ``at_import`` — the master holds no approved
+    details for the supplier, so the member exported with the
+    documented ``SUPPLIER-MASTER-AT-IMPORT`` marker for the
+    importing system to complete. ``account_label`` is masked
+    (kind + last four): the full identifier lives in the master
+    record and in the exported file — never on the run record."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    source: str = "at_import"  # supplier_master | at_import
+    account_kind: str = ""  # iban | account | "" (nothing completed)
+    account_label: str = ""  # masked label, e.g. "iban ••••4471"
+
+
 class PaymentRun(BaseModel):
     """A proposed payment run: approved invoices grouped by currency
     and due window, totals computed in code. The run is a draft
@@ -887,6 +908,13 @@ class PaymentRun(BaseModel):
     # the itemised receipt of what drifted and how much was lost.
     handoff_drift: list[PaymentRunDrift] = Field(default_factory=list)
     handoff_drift_total: float = 0.0  # sum of the members' discount_lost
+    # Creditor-account completion receipt for the latest export:
+    # one entry per member — completed from the supplier master
+    # (the master holds approved bank details) or still carrying
+    # the at-import marker (it does not). Masked labels only.
+    handoff_creditor_entries: list[HandoffCreditorEntry] = Field(
+        default_factory=list
+    )
 
 
 class PaymentRunRequest(BaseModel):

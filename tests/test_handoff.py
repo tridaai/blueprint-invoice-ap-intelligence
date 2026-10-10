@@ -13,8 +13,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ap_agent.api import create_app
-from ap_agent.handoff import HANDOFF_COLUMNS, handoff_key, render_handoff_csv
+from ap_agent.handoff import (
+    HANDOFF_COLUMNS,
+    creditor_completions,
+    handoff_key,
+    render_handoff_csv,
+)
 from ap_agent.samples import sample_invoice_models
+from ap_agent.supplier_master import get_supplier_master
 from ap_agent.service import InvoiceService
 from ap_agent.storage import InMemoryObjectStore
 from ap_agent.store import InMemoryStore
@@ -68,7 +74,11 @@ def test_export_stores_the_file_and_records_the_receipt(service):
     stored = service.get_payment_run_handoff(run.run_id)
     assert stored is not None
     assert exported.handoff_sha256 == hashlib.sha256(stored).hexdigest()
-    assert stored == render_handoff_csv(exported)
+    # The export completed INV-1001's creditor account from the
+    # (seeded sample) supplier master; the stored bytes are the run
+    # rendered with those completions.
+    completions, _ = creditor_completions(exported, get_supplier_master())
+    assert stored == render_handoff_csv(exported, creditor_accounts=completions)
 
 
 def test_export_is_deterministic_and_changes_no_payment_state(service):

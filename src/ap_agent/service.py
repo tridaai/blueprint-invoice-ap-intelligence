@@ -1735,6 +1735,14 @@ class InvoiceService:
         The export proceeds for the clean members; drift is
         flagged, never silently exported and never a reason to
         short-pay.
+
+        Creditor accounts are completed at the same moment from
+        the supplier master: a member whose supplier has approved
+        bank details on file exports with them (IBAN where
+        recorded); every other member keeps the documented
+        at-import marker. Which way each member went is the
+        export's completion receipt (``handoff_creditor_entries``,
+        masked labels only).
         """
         from .handoff import HANDOFF_FORMATS
 
@@ -1778,7 +1786,12 @@ class InvoiceService:
                 "inject an object store): the hand-off file has nowhere "
                 "to live"
             )
-        from .handoff import handoff_content_type, handoff_key, render_handoff
+        from .handoff import (
+            creditor_completions,
+            handoff_content_type,
+            handoff_key,
+            render_handoff,
+        )
 
         anchor = _parse_date(as_of) if as_of else None
         if as_of and anchor is None:
@@ -1812,7 +1825,15 @@ class InvoiceService:
                 f"{lost} — the drifted member(s) are exported at "
                 "their full gross amounts; see handoff_drift."
             )
-        data = render_handoff(run, format)
+        # Creditor accounts complete from the supplier master where
+        # (and only where) it holds approved bank details for the
+        # member's supplier; the rest keep the at-import marker.
+        # The completion receipt lands on the run either way.
+        completions, creditor_entries = creditor_completions(
+            run, self._get_supplier_master()
+        )
+        run.handoff_creditor_entries = creditor_entries
+        data = render_handoff(run, format, creditor_accounts=completions)
         key = handoff_key(run.run_id, format)
         object_store.put(key, data, content_type=handoff_content_type(format))
         run.handoff_key = key
