@@ -415,8 +415,12 @@ async function loadQueue() {
   }
   const twins = q.twin_escalations || [];
   if (twins.length) {
-    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Escalated twin clusters</b> — the same invoice on file more than once, worked as one case: a cluster escalates at ${q.twin_cluster_min_size}+ records, at ${q.twin_cluster_value_threshold} combined in one currency, or the moment one twin is approved while another still waits.</p>
-    <table><tr><th>Cluster</th><th>Supplier invoice</th><th>Members</th><th>Combined</th><th>Why escalated</th></tr>${twins.map(t => `<tr><td>${esc(t.cluster_id)}<br><span class="note">${esc(t.supplier_name)}</span></td><td>${esc(t.invoice_number || "—")}<br><span class="note">arrived as: ${esc((t.arrival_shapes || []).join(", "))}</span></td><td>${t.members.map(m => `${esc(m.invoice_id)}<br><span class="note">${esc(m.status)}${m.duplicate_of ? " · dup of " + esc(m.duplicate_of) : ""}</span>`).join("<br>")}</td><td>${Object.entries(t.totals_by_currency || {}).map(([c, v]) => `${esc(c)} ${v}`).join("<br>")}</td><td>${t.triggers.map(x => pill(x.replaceAll("_", " "), x === "approved_and_awaiting" ? "bad" : "warn")).join(" ")}</td></tr>`).join("")}</table>`;
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Escalated twin clusters</b> — the same invoice on file more than once, worked as one case: a cluster escalates at ${q.twin_cluster_min_size}+ records, at ${q.twin_cluster_value_threshold} combined in one currency, or the moment one twin is approved while another still waits. Hand the case off whole: approve every waiting member through the cluster, or split it (not the same invoice after all) — either act is stamped on every member's record with its reason. <input type="text" id="twin-actor" placeholder="Your name (approver)" size="20"> <span class="note" id="twinnote"></span></p>
+    <table><tr><th>Cluster</th><th>Supplier invoice</th><th>Members</th><th>Combined</th><th>Why escalated</th><th>Hand-off</th></tr>${twins.map(t => `<tr><td>${esc(t.cluster_id)}<br><span class="note">${esc(t.supplier_name)}</span></td><td>${esc(t.invoice_number || "—")}<br><span class="note">arrived as: ${esc((t.arrival_shapes || []).join(", "))}</span></td><td>${t.members.map(m => `${esc(m.invoice_id)}<br><span class="note">${esc(m.status)}${m.duplicate_of ? " · dup of " + esc(m.duplicate_of) : ""}</span>`).join("<br>")}</td><td>${Object.entries(t.totals_by_currency || {}).map(([c, v]) => `${esc(c)} ${v}`).join("<br>")}</td><td>${t.triggers.map(x => pill(x.replaceAll("_", " "), x === "approved_and_awaiting" ? "bad" : "warn")).join(" ")}</td><td><button class="secondary" data-twin-approve="${esc(t.cluster_id)}">Approve all</button><br><button class="secondary" data-twin-split="${esc(t.cluster_id)}" style="margin-top:4px">Split cluster</button></td></tr>`).join("")}</table>`;
+    $("queuebody").querySelectorAll("button[data-twin-approve]").forEach(btn =>
+      btn.addEventListener("click", () => decideTwin(btn.dataset.twinApprove, "approve_all")));
+    $("queuebody").querySelectorAll("button[data-twin-split]").forEach(btn =>
+      btn.addEventListener("click", () => decideTwin(btn.dataset.twinSplit, "split")));
   }
   const waits = q.information_waits || [];
   if (waits.length) {
@@ -525,6 +529,21 @@ function renderChanges(changes) {
   document.querySelectorAll("[data-mc-reject]").forEach(btn => btn.onclick = () => decideChange(btn.dataset.mcReject, false));
   document.querySelectorAll("[data-mc-repropose]").forEach(btn => btn.onclick = () => reproposeChange(btn.dataset.mcRepropose));
 }
+async function decideTwin(clusterId, action) {
+  const actor = ($("twin-actor") || {}).value?.trim() || "";
+  if (!actor) { $("twinnote").textContent = "Enter your name first — a cluster hand-off is stamped on every member's record."; return; }
+  const reason = prompt(action === "split"
+    ? "Why is this cluster not one invoice? (stamped on every member's record):"
+    : "Reason for approving every waiting member of this cluster (stamped on every member's record):");
+  if (!reason) return;
+  const res = await fetch(`/queue/twin-clusters/${encodeURIComponent(clusterId)}/decide`, {method: "POST", headers: headers(), body: JSON.stringify({actor, action, reason})});
+  const body = await res.json();
+  if (!res.ok) { $("twinnote").textContent = `Hand-off refused (${res.status}): ${body.detail || ""}`; return; }
+  $("twinnote").textContent = `Cluster ${body.cluster_id} ${body.action === "split" ? "split" : "approved through"} by ${body.actor}: ` +
+    (body.members || []).map(m => `${m.invoice_id} — ${m.outcome}`).join("; ");
+  loadQueue();
+}
+
 async function decideChange(requestId, approve) {
   const actor = $("mc-actor").value.trim();
   if (!actor) { $("mcnote").textContent = "Enter your name first — master-change decisions are attributable, and the proposer cannot decide their own change."; return; }

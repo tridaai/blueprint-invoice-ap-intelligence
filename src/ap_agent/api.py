@@ -66,6 +66,8 @@ from .schemas import (
     RecoveryTransitionRequest,
     StatementReconciliation,
     SupplierStatement,
+    TwinClusterDecision,
+    TwinClusterDecisionRequest,
 )
 from .service import AUDIT_COLUMNS, InvoiceService
 from .wiring import build_service_from_env
@@ -382,6 +384,29 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         by due date (overdue first), with the triage mix. Read-only.
         ``as_of`` (ISO date) anchors the aging; default today."""
         return svc.queue_view(as_of=as_of)
+
+    @app.post("/queue/twin-clusters/{cluster_id}/decide", response_model=TwinClusterDecision, dependencies=_AUTH)
+    def decide_twin_cluster(cluster_id: str, request: TwinClusterDecisionRequest) -> TwinClusterDecision:
+        """Hand an escalated twin cluster off as one case:
+        ``approve_all`` approves every member still at the gate
+        through the cluster (each via the standard approval path,
+        guardrails included), ``split`` dissolves the grouping
+        with a named reason and the members are worked
+        individually. The act and each member's outcome are
+        recorded on every member's record."""
+        try:
+            return TwinClusterDecision.model_validate(
+                svc.decide_twin_cluster(
+                    cluster_id,
+                    actor=_decision_actor(request),
+                    action=request.action,
+                    reason=request.reason,
+                )
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/digest", response_model=EscalationDigest, dependencies=_AUTH)
     def escalation_digest(as_of: str = Query(default="")) -> EscalationDigest:

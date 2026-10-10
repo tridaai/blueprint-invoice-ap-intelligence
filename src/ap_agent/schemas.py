@@ -959,6 +959,37 @@ class MasterChangeReproposeRequest(BaseModel):
         return self.actor or self.approver or self.reviewer
 
 
+class TwinClusterDecisionRequest(BaseModel):
+    """Hand an escalated twin cluster off as one case:
+    ``approve_all`` approves every member still at the gate
+    through the cluster, ``split`` dissolves the grouping (the
+    members are not the same invoice after all). A reason is
+    required either way — it is stamped on every member's
+    record beside the act."""
+
+    action: str  # approve_all | split
+    reason: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class TwinClusterDecision(BaseModel):
+    """The record of one cluster hand-off act: the cluster, the
+    act, its actor and reason, and each member's outcome under
+    it — the same account stamped per member on the records."""
+
+    cluster_id: str
+    action: str  # approve_all | split
+    actor: str = ""
+    reason: str = ""
+    decided_at: str = ""
+    members: list[dict] = Field(default_factory=list)
+
+
 class InformationReplyRequest(BaseModel):
     """Record a supplier's reply to an open information request:
     which of the missing items it supplied (canonical keys —

@@ -55,6 +55,14 @@ class ApprovalRecord:
     # analysis time; records saved before the stamp existed load
     # as "single" (see _load_record).
     arrival_shape: str = "single"
+    # Twin-cluster hand-off decisions recorded on this member
+    # (service.decide_twin_cluster): one entry per cluster act
+    # that covered this record — cluster id, action
+    # (approve_all | split), actor, reason, when, and THIS
+    # member's outcome under the act. The cluster is worked as
+    # one case, but the decision lands per member, on the
+    # member's own record.
+    cluster_decisions: list[dict] = field(default_factory=list)
 
 
 def history_entry(record: ApprovalRecord) -> dict:
@@ -176,6 +184,7 @@ def _dump_record(record: ApprovalRecord) -> str:
             "reject_reason": record.reject_reason,
             "dispatch_status": record.dispatch_status,
             "arrival_shape": record.arrival_shape,
+            "cluster_decisions": record.cluster_decisions,
         }
     )
 
@@ -192,6 +201,7 @@ def _load_record(payload: str | dict) -> ApprovalRecord:
         reject_reason=data.get("reject_reason", ""),
         dispatch_status=data.get("dispatch_status"),
         arrival_shape=data.get("arrival_shape") or "single",
+        cluster_decisions=data.get("cluster_decisions") or [],
     )
 
 

@@ -54,7 +54,13 @@ cluster becomes a work item when it is big enough
 (``TWIN_CLUSTER_VALUE_THRESHOLD``), or spans an approved twin
 and a waiting one — the double-payment shape itself, at any
 size. The item carries the graph (members + screened edges),
-so the case is worked whole, not record by record.
+so the case is worked whole, not record by record — and it
+can be handed off whole (``service.decide_twin_cluster``):
+approved through the cluster in one act, each member's
+decision recorded on its own record, or split with a named
+reason when the grouping itself is wrong, after which the
+members are worked individually and the cluster leaves the
+queue.
 
 **Information waits** age here too. An invoice blocked on an
 information request waits on someone outside the building —
@@ -256,11 +262,32 @@ def twin_escalation_items(
 
     Work order: an approved+awaiting span first (money already
     committed on one copy is the live risk), then the largest
-    combined value, then the largest cluster."""
+    combined value, then the largest cluster.
+
+    Two kinds of cluster never escalate. A cluster with no
+    member left at the gate is decided — there is nothing to
+    hand off, whatever its size. And a cluster the approver
+    split (a ``split`` hand-off decision stamped on every
+    member, service.decide_twin_cluster) is no longer one case:
+    its members are worked individually, and a later arrival
+    that twins with them — unstamped — re-opens the cluster as
+    a case in its own right."""
     from .twins import twin_clusters
 
     items: list[TwinEscalationItem] = []
     for cluster in twin_clusters(records):
+        statuses = {str(member["status"]) for member in cluster["members"]}
+        if "awaiting_approver" not in statuses:
+            continue
+        if all(
+            any(
+                decision.get("cluster_id") == cluster["cluster_id"]
+                and decision.get("action") == "split"
+                for decision in member["cluster_decisions"]
+            )
+            for member in cluster["members"]
+        ):
+            continue
         totals: dict[str, float] = {}
         for member in cluster["members"]:
             if member["total_amount"] is not None:
@@ -268,7 +295,6 @@ def twin_escalation_items(
                 totals[currency] = round(
                     totals.get(currency, 0.0) + float(member["total_amount"]), 2
                 )
-        statuses = {str(member["status"]) for member in cluster["members"]}
         triggers: list[str] = []
         if cluster["size"] >= min_size:
             triggers.append("cluster_size")

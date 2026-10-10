@@ -52,6 +52,12 @@ def _node(record: ApprovalRecord) -> dict:
         "outcome": result.triage.outcome,
         "status": result.status,
         "duplicate_of": result.facts.duplicate_of or "",
+        # Cluster hand-off decisions recorded on this member
+        # (approve_all / split acts) — the cluster's history
+        # reads member by member, here as everywhere else.
+        "cluster_decisions": list(
+            getattr(record, "cluster_decisions", None) or []
+        ),
     }
 
 

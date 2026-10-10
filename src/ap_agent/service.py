@@ -1595,6 +1595,133 @@ class InvoiceService:
         store.save_recovery_pack(pack)
         return pack
 
+    def decide_twin_cluster(
+        self,
+        cluster_id: str,
+        *,
+        actor: str,
+        action: str,
+        reason: str = "",
+    ) -> dict:
+        """Hand an escalated twin cluster off as one case.
+
+        The queue works the cluster whole — its graph, its
+        combined exposure — and the hand-off is one act with two
+        shapes:
+
+        - ``approve_all``: every member still at the gate is
+          approved THROUGH the cluster, each through the standard
+          approval path (the guardrail gate included: a member
+          whose drafts failed validation is refused by name in
+          the report, never waved through by the bulk act).
+          Members already decided keep their decision; the
+          report says so per member.
+        - ``split``: the grouping itself is judged wrong — these
+          are not the same invoice — and the cluster dissolves
+          as a case: no status changes, and the queue stops
+          escalating it; the members are worked individually.
+
+        Either way the act is recorded PER MEMBER: every member's
+        record carries the cluster id, the action, the actor, the
+        reason, the time, and that member's own outcome under the
+        act. A reason is required for both shapes — approving
+        suspected duplicates in bulk is the double-payment shape
+        itself, and a split that cannot say why is a shrug, not a
+        judgement. A cluster already split refuses further
+        cluster acts (its members are individual cases now); a
+        cluster that no longer exists over the stored records is
+        unknown. Approving a duplicate whose twin is approved
+        leaves the recovery path (draft_duplicate_recovery)
+        exactly as available as before — the act records the
+        approver's call, it does not relitigate it.
+        """
+        if action not in ("approve_all", "split"):
+            raise ValueError(
+                f"Unknown cluster action: {action!r} — a cluster "
+                "is handed off as 'approve_all' or 'split'"
+            )
+        if not reason.strip():
+            raise ValueError(
+                "a cluster hand-off carries its reason: it is "
+                "stamped on every member's record beside the act"
+            )
+        from .twins import twin_clusters
+
+        store = self._get_store()
+        records = store.list_records()
+        cluster = next(
+            (c for c in twin_clusters(records) if c["cluster_id"] == cluster_id),
+            None,
+        )
+        if cluster is None:
+            raise KeyError(
+                f"Unknown twin cluster: {cluster_id} (no cluster "
+                "over the stored records carries that id)"
+            )
+        members = cluster["members"]
+        already_split = all(
+            any(
+                decision.get("cluster_id") == cluster_id
+                and decision.get("action") == "split"
+                for decision in member["cluster_decisions"]
+            )
+            for member in members
+        )
+        if already_split:
+            stamp = next(
+                decision
+                for member in members
+                for decision in member["cluster_decisions"]
+                if decision.get("cluster_id") == cluster_id
+                and decision.get("action") == "split"
+            )
+            raise ValueError(
+                f"Cluster {cluster_id} was already split by "
+                f"{stamp.get('actor') or 'an approver'} "
+                f"({stamp.get('decided_at', '')}) — its members "
+                "are worked individually now"
+            )
+        decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        outcomes: list[dict] = []
+        for member in members:
+            invoice_id = member["invoice_id"]
+            record = store.get(invoice_id)
+            if record is None:
+                outcomes.append({"invoice_id": invoice_id, "outcome": "not_on_record"})
+                continue
+            if action == "split":
+                outcome = "split"
+            elif record.result.status == "awaiting_approver":
+                try:
+                    self.approve(invoice_id, approver=actor, reason=reason)
+                    outcome = "approved"
+                except ValueError as exc:
+                    outcome = f"blocked: {exc}"
+                record = store.get(invoice_id) or record
+            else:
+                outcome = f"already_{record.result.status}"
+            record.cluster_decisions = [
+                *record.cluster_decisions,
+                {
+                    "cluster_id": cluster_id,
+                    "action": action,
+                    "actor": actor,
+                    "reason": reason.strip(),
+                    "decided_at": decided_at,
+                    "outcome": outcome,
+                },
+            ]
+            store.save(record)
+            outcomes.append({"invoice_id": invoice_id, "outcome": outcome})
+        return {
+            "cluster_id": cluster_id,
+            "action": action,
+            "actor": actor,
+            "reason": reason.strip(),
+            "decided_at": decided_at,
+            "members": outcomes,
+        }
+
     def get_recovery_pack(self, invoice_id: str) -> RecoveryPack | None:
         return self._get_store().get_recovery_pack(invoice_id)
 
