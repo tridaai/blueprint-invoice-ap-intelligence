@@ -1029,6 +1029,7 @@ class InvoiceService:
             if telemetry.estimated_cost_usd is not None:
                 costs.append(telemetry.estimated_cost_usd)
         from .digest import digest_store_coverage
+        from .handoff_profiles import profile_effectiveness
         from .posting import approved_not_posted
         from .supplier_master import master_coverage
 
@@ -1113,6 +1114,15 @@ class InvoiceService:
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
             "handoff_profiles": _handoff_profile_summary(
                 self._get_store().list_handoff_profiles()
+            ),
+            # The profiles, graded: exports routed, marker
+            # incidents against the ungoverned population,
+            # proposal-flag follow-through, and lead promises
+            # kept — configuration that governs nothing, or
+            # governs no safer than nothing, says so here.
+            "handoff_profile_effectiveness": profile_effectiveness(
+                self._get_store().list_handoff_profiles(),
+                self._get_store().list_payment_runs(),
             ),
             # The priced four-eyes wait against its monthly
             # budgets (FOUR_EYES_WAIT_BUDGETS): this month's

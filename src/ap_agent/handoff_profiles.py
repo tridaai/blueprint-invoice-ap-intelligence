@@ -38,7 +38,11 @@ at the bank.
 Profiles are governed configuration: setting one names its
 actor and appends to the profile's audit trail (the service
 owns that write; this module is the pure read side — ids,
-resolution, flags). Nothing here writes, exports, or pays.
+resolution, flags). ``profile_effectiveness`` is the grading
+read over the exports the profiles governed: routed exports,
+marker incidents against the ungoverned population, flag
+follow-through, and lead promises kept. Nothing here writes,
+exports, or pays.
 """
 
 from __future__ import annotations
@@ -154,6 +158,214 @@ def requested_execution_date(
     if window_date is not None and lead_date <= window_date:
         return window_end
     return lead_date.isoformat()
+
+
+def profile_effectiveness(
+    profiles: Iterable[HandoffProfile], runs: Iterable[PaymentRun]
+) -> list[dict]:
+    """Grade the profiles against the exports they governed.
+
+    Round 12 made profiles govern exports and stamped the
+    governing profile on every exported run; this is the read
+    back. Per profile, over the stored runs:
+
+    - **exports routed** — the exports stamped with this
+      profile, and their format mix. A profile that governs
+      nothing is configuration theatre, and the grade says so.
+    - **marker incidents** — of the members those exports
+      carried, how many (and how much value) still exported
+      with the at-import creditor marker, beside the same rate
+      over the *ungoverned* exports: a profile whose marker
+      rate matches the ungoverned population is not routing
+      anything safer.
+    - **flag follow-through** — the suppliers this profile's
+      marker-rejection stance flagged at proposal time: did
+      they stop exporting marked? A supplier flagged and still
+      marked on a later export is the flag failing in public.
+    - **lead promises kept** — for pain.001 exports under a
+      profile with lead days, the written execution date(s)
+      against the promise (export date + lead days, read from
+      the export's own stamp). A written date inside the lead
+      is a regression in the resolution path, counted here as
+      a breach — the alarm the export itself never raises.
+
+    Pure over the runs given; profiles keep the input order.
+    Rates are member shares (marked / members), ``None`` when
+    the population is empty — never a dressed-up zero.
+    """
+    runs = list(runs)
+    exported = [run for run in runs if run.handoff_generated_at]
+
+    def marker_stats(population: list[PaymentRun]) -> dict:
+        members = 0
+        marked = 0
+        value_total = 0.0
+        value_marked = 0.0
+        for run in population:
+            nets = {line.invoice_id: line.net_amount for line in run.lines}
+            for entry in run.handoff_creditor_entries:
+                members += 1
+                value = round(nets.get(entry.invoice_id, 0.0), 2)
+                value_total = round(value_total + value, 2)
+                if entry.source != "supplier_master":
+                    marked += 1
+                    value_marked = round(value_marked + value, 2)
+        return {
+            "members": members,
+            "members_marked": marked,
+            "value_total": value_total,
+            "value_marked": value_marked,
+            "marker_rate": round(marked / members, 4) if members else None,
+        }
+
+    ungoverned = marker_stats(
+        [run for run in exported if not run.handoff_profile_id]
+    )
+
+    grades: list[dict] = []
+    for profile in profiles:
+        governed = [
+            run for run in exported if run.handoff_profile_id == profile.profile_id
+        ]
+        stats = marker_stats(governed)
+        format_mix: dict[str, int] = {}
+        for run in governed:
+            format_mix[run.handoff_format or "unknown"] = (
+                format_mix.get(run.handoff_format or "unknown", 0) + 1
+            )
+
+        # Flag follow-through: the suppliers this profile's
+        # stance flagged at proposal time (the flag text names
+        # the profile — marker_flags writes it), and whether a
+        # later export still carried them marked.
+        flagged: dict[str, dict] = {}
+        marker = f": profile {profile.profile_id} records"
+        for run in runs:
+            for flag in run.handoff_profile_flags:
+                if marker not in flag:
+                    continue
+                supplier = flag.split(marker, 1)[0]
+                slot = flagged.setdefault(
+                    supplier,
+                    {
+                        "supplier": supplier,
+                        "first_flagged_at": run.proposed_at,
+                        "later_exports": 0,
+                        "still_marked_exports": 0,
+                        "still_marked_value": 0.0,
+                    },
+                )
+                if run.proposed_at and (
+                    not slot["first_flagged_at"]
+                    or run.proposed_at < slot["first_flagged_at"]
+                ):
+                    slot["first_flagged_at"] = run.proposed_at
+        for slot in flagged.values():
+            for run in exported:
+                if slot["first_flagged_at"] and (
+                    run.handoff_generated_at or ""
+                ) <= slot["first_flagged_at"]:
+                    continue
+                nets = {line.invoice_id: line.net_amount for line in run.lines}
+                for entry in run.handoff_creditor_entries:
+                    if entry.supplier_name != slot["supplier"]:
+                        continue
+                    slot["later_exports"] += 1
+                    if entry.source != "supplier_master":
+                        slot["still_marked_exports"] += 1
+                        slot["still_marked_value"] = round(
+                            slot["still_marked_value"]
+                            + nets.get(entry.invoice_id, 0.0),
+                            2,
+                        )
+            slot["stopped_exporting_marked"] = (
+                (slot["still_marked_exports"] == 0)
+                if slot["later_exports"]
+                else None
+            )
+
+        # Lead promises: the written execution date(s) against
+        # export date + the profile's lead, per governed
+        # pain.001 export. The profile's CURRENT lead days are
+        # the promise read here — a profile edited since the
+        # export grades against its present values, stated in
+        # the module docstring's spirit: this is a read of the
+        # configuration in force, not an audit of its history.
+        lead_checked = lead_kept = 0
+        if profile.lead_days > 0:
+            for run in governed:
+                if run.handoff_format != "pain001" or not run.handoff_execution_date:
+                    continue
+                generated = _parse_date(run.handoff_generated_at or "")
+                if generated is None:
+                    continue
+                floor = generated + timedelta(days=profile.lead_days)
+                written = [
+                    _parse_date(part.strip())
+                    for part in run.handoff_execution_date.split(",")
+                ]
+                if any(day is None for day in written):
+                    continue
+                lead_checked += 1
+                if all(day >= floor for day in written):
+                    lead_kept += 1
+
+        notes: list[str] = []
+        if not governed:
+            notes.append(
+                "governs no exports yet — configuration on paper only"
+            )
+        elif (
+            stats["marker_rate"] is not None
+            and ungoverned["marker_rate"] is not None
+            and stats["marker_rate"] >= ungoverned["marker_rate"]
+            and stats["members_marked"] > 0
+        ):
+            notes.append(
+                "its exports carry the at-import marker at the same "
+                "rate as ungoverned exports "
+                f"({stats['marker_rate']:.0%} vs "
+                f"{ungoverned['marker_rate']:.0%}) — the routing is "
+                "not landing safer files"
+            )
+        for slot in flagged.values():
+            if slot["still_marked_exports"]:
+                notes.append(
+                    f"{slot['supplier']} was flagged at proposal time "
+                    "and still exported marked on "
+                    f"{slot['still_marked_exports']} later export(s) "
+                    f"({slot['still_marked_value']:.2f} of value) — "
+                    "the flag did not stop the marker"
+                )
+        if lead_checked and lead_kept < lead_checked:
+            notes.append(
+                f"the lead promise was breached on "
+                f"{lead_checked - lead_kept} of {lead_checked} checked "
+                f"export(s): a written execution date gave the bank "
+                f"less than the profile's {profile.lead_days}d lead"
+            )
+
+        grades.append(
+            {
+                "profile_id": profile.profile_id,
+                "scope": profile.scope,
+                "supplier_name": profile.supplier_name,
+                "currency": profile.currency,
+                "exports_governed": len(governed),
+                "format_mix": format_mix,
+                **stats,
+                "ungoverned_marker_rate": ungoverned["marker_rate"],
+                "flagged_suppliers": [
+                    flagged[name] for name in sorted(flagged)
+                ],
+                "lead_days": profile.lead_days,
+                "lead_checked": lead_checked,
+                "lead_kept": lead_kept,
+                "lead_breached": lead_checked - lead_kept,
+                "notes": notes,
+            }
+        )
+    return grades
 
 
 def marker_flags(
