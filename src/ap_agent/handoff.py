@@ -52,6 +52,23 @@ separators; dates ISO; v2 appends the two creditor columns to v1):
 | ``creditor_account`` | the master's IBAN/account for the supplier, else the completion marker |
 | ``creditor_account_source`` | ``supplier_master`` when completed, else ``at_import`` |
 
+**Batch booking** (a governing hand-off profile's say, never a
+renderer default): some banks book per value date, so when the
+profile calls for it the pain.001 document groups the run's
+lines into one ``PmtInf`` per requested execution date with
+``BtchBookg`` true, instead of one ``PmtInf`` for the whole run.
+Each line's group date is the later of its own due date (the
+run's window end when it carries none) and the profile's
+lead-days floor (export date + lead days) — the lead buys the
+bank its processing time per group, and no group executes
+before its lines fall due. Which date governs is therefore
+stated per group, not per file. The CSV stays the flat list —
+batch booking is a pain.001 shape. The creditor completion and
+the export-time drift re-verification are computed per member
+before rendering, so every gate that holds for the file holds
+inside each ``PmtInf``: a line lands in exactly one group,
+carrying its own completion (or marker), at its export-time net.
+
 The renderers are pure — same run in, same bytes out — so the
 sha256 recorded on the run is a stable content hash of the file
 the bank receives.
@@ -70,7 +87,8 @@ import csv
 import io
 import xml.etree.ElementTree as ET
 
-from .schemas import HandoffCreditorEntry, PaymentRun
+from .matching import _parse_date
+from .schemas import HandoffCreditorEntry, PaymentRun, PaymentRunLine
 from .supplier_master import _iban_norm, _masked
 
 HANDOFF_COLUMNS = [
@@ -251,10 +269,43 @@ def _el(parent: ET.Element, tag: str, text: str | None = None) -> ET.Element:
     return element
 
 
+def batch_groups(
+    run: PaymentRun, floor_date: str = ""
+) -> list[tuple[str, list[PaymentRunLine]]]:
+    """Group a run's lines by requested execution date for batch
+    booking: (execution date, lines) pairs, dates ascending, lines
+    in run order within a group.
+
+    A line's group date is the later of its own due date — the
+    run's window end when the line carries none (or an
+    unparseable one) — and ``floor_date``, the governing
+    profile's lead-days floor (export date + lead days). The
+    interaction with the profile's lead days is stated, not
+    implied: **the floor wins whenever it is later** — the bank
+    gets its processing lead on every group — and the due date
+    wins whenever IT is later, so no group executes before its
+    lines fall due. With no floor, groups are simply the lines'
+    due dates. Pure over the run."""
+    floor = _parse_date(floor_date) if floor_date else None
+    groups: dict[str, list[PaymentRunLine]] = {}
+    for line in run.lines:
+        due = _parse_date(line.due_date) if line.due_date else None
+        if due is None:
+            due = _parse_date(run.window_end)
+        chosen = due
+        if floor is not None and (chosen is None or floor > chosen):
+            chosen = floor
+        key = chosen.isoformat() if chosen is not None else (run.window_end or "")
+        groups.setdefault(key, []).append(line)
+    return sorted(groups.items())
+
+
 def render_handoff_pain001(
     run: PaymentRun,
     creditor_accounts: dict[str, dict] | None = None,
     requested_execution_date: str = "",
+    batch_booking: bool = False,
+    batch_floor_date: str = "",
 ) -> bytes:
     """Render a confirmed run as an ISO 20022 pain.001.001.09
     customer credit-transfer initiation document.
@@ -281,6 +332,17 @@ def render_handoff_pain001(
     file, else the account number with the sort code as the
     creditor agent — and carries the ``SUPPLIER-MASTER-AT-IMPORT``
     marker everywhere else.
+
+    With ``batch_booking`` (a governing profile's call — see
+    :func:`batch_groups`), the one ``PmtInf`` becomes one per
+    execution-date group, each with ``BtchBookg`` true, its own
+    ``NbOfTxs``/``CtrlSum`` over its own lines, and the group's
+    date as its ``ReqExctnDt``; ``batch_floor_date`` is the
+    profile's lead-days floor every group date respects. The
+    group header keeps the run's totals — the file is still one
+    message about one run. The default single-``PmtInf`` output
+    is byte-identical to before batch booking existed (a golden
+    file pins it).
     """
     completions = creditor_accounts or {}
     ET.register_namespace("", PAIN001_NAMESPACE)
@@ -294,12 +356,62 @@ def render_handoff_pain001(
     party = _el(header, "InitgPty")
     _el(party, "Nm", "Trida AI Blueprint - AP Agent")
 
+    if batch_booking:
+        for group_date, group_lines in batch_groups(run, batch_floor_date):
+            _payment_info(
+                initiation,
+                run,
+                group_lines,
+                pmt_inf_id=f"{run.run_id}-{group_date}",
+                execution_date=group_date,
+                ctrl_sum=round(sum(line.net_amount for line in group_lines), 2),
+                completions=completions,
+                batch=True,
+            )
+    else:
+        _payment_info(
+            initiation,
+            run,
+            list(run.lines),
+            pmt_inf_id=run.run_id,
+            execution_date=requested_execution_date or run.window_end,
+            ctrl_sum=run.total_net,
+            completions=completions,
+            batch=False,
+        )
+
+    tree = ET.ElementTree(document)
+    ET.indent(tree, space="  ")
+    buffer = io.BytesIO()
+    tree.write(buffer, encoding="utf-8", xml_declaration=True)
+    return buffer.getvalue()
+
+
+def _payment_info(
+    initiation: ET.Element,
+    run: PaymentRun,
+    lines: list[PaymentRunLine],
+    *,
+    pmt_inf_id: str,
+    execution_date: str,
+    ctrl_sum: float,
+    completions: dict[str, dict],
+    batch: bool,
+) -> None:
+    """One ``PmtInf`` block: the whole run (the default) or one
+    batch-booking group. The debtor block repeats per ``PmtInf``
+    because pain.001 scopes it there; the per-line transaction
+    rendering — creditor completion or marker included — is the
+    same code either way, so the completion gate holds inside
+    every group exactly as it holds for the whole file."""
     payment = _el(initiation, "PmtInf")
-    _el(payment, "PmtInfId", run.run_id)
+    _el(payment, "PmtInfId", pmt_inf_id)
     _el(payment, "PmtMtd", "TRF")
-    _el(payment, "NbOfTxs", str(run.invoice_count))
-    _el(payment, "CtrlSum", _money(run.total_net))
-    _el(payment, "ReqExctnDt", requested_execution_date or run.window_end)
+    if batch:
+        _el(payment, "BtchBookg", "true")
+    _el(payment, "NbOfTxs", str(len(lines)))
+    _el(payment, "CtrlSum", _money(ctrl_sum))
+    _el(payment, "ReqExctnDt", execution_date)
     debtor = _el(payment, "Dbtr")
     _el(debtor, "Nm", "Debtor account holder (completed at import)")
     account = _el(payment, "DbtrAcct")
@@ -310,7 +422,7 @@ def render_handoff_pain001(
     other.text = DEBTOR_AGENT_MARKER
     _el(payment, "ChrgBr", "SLEV")
 
-    for line in run.lines:
+    for line in lines:
         tx = _el(payment, "CdtTrfTxInf")
         pmt_id = _el(tx, "PmtId")
         _el(pmt_id, "EndToEndId", line.invoice_id)
@@ -343,28 +455,31 @@ def render_handoff_pain001(
             f"Invoice {line.invoice_number} ({line.invoice_id})"[:140],
         )
 
-    tree = ET.ElementTree(document)
-    ET.indent(tree, space="  ")
-    buffer = io.BytesIO()
-    tree.write(buffer, encoding="utf-8", xml_declaration=True)
-    return buffer.getvalue()
-
 
 def render_handoff(
     run: PaymentRun,
     format: str = HANDOFF_FORMAT_CSV,
     creditor_accounts: dict[str, dict] | None = None,
     requested_execution_date: str = "",
+    batch_booking: bool = False,
+    batch_floor_date: str = "",
 ) -> bytes:
     """Render a confirmed run in one of the hand-off formats —
     the one seam both serializations sit behind.
     ``requested_execution_date`` reaches the pain.001 renderer
     only (the CSV layout has no execution-date column); the
     service computes it from the governing hand-off profile's
-    lead days (``handoff_profiles.requested_execution_date``)."""
+    lead days (``handoff_profiles.requested_execution_date``).
+    ``batch_booking`` + ``batch_floor_date`` reach it the same
+    way when the governing profile books per value date; the
+    CSV ignores both — it stays the flat list."""
     if format == HANDOFF_FORMAT_PAIN001:
         return render_handoff_pain001(
-            run, creditor_accounts, requested_execution_date
+            run,
+            creditor_accounts,
+            requested_execution_date,
+            batch_booking=batch_booking,
+            batch_floor_date=batch_floor_date,
         )
     if format == HANDOFF_FORMAT_CSV:
         return render_handoff_csv(run, creditor_accounts)

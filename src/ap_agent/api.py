@@ -546,6 +546,7 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 format=request.format,
                 lead_days=request.lead_days,
                 markers_rejected=request.markers_rejected,
+                batch_booking=request.batch_booking,
                 note=request.note,
             )
         except ValueError as exc:

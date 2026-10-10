@@ -2263,6 +2263,7 @@ class InvoiceService:
         format: str = "csv",
         lead_days: int = 0,
         markers_rejected: bool = False,
+        batch_booking: bool = False,
         note: str = "",
     ) -> HandoffProfile:
         """Set (create or update) a governed hand-off routing
@@ -2330,6 +2331,7 @@ class InvoiceService:
             format=format,
             lead_days=lead_days,
             markers_rejected=bool(markers_rejected),
+            batch_booking=bool(batch_booking),
             note=(note or "").strip(),
             updated_by=actor,
             updated_at=stamp,
@@ -2504,7 +2506,12 @@ class InvoiceService:
         The governing profile's lead days also set a pain.001
         export's requested execution date. The run record
         stamps which way it went (``handoff_profile_id``,
-        ``handoff_execution_date``).
+        ``handoff_execution_date``). A governing profile with
+        batch booking groups the pain.001 into one ``PmtInf``
+        per requested execution date (its lead days flooring
+        every group's date), and each completion entry is
+        stamped with the execution date its member exported
+        under.
 
         The gates are the same in either format: the run must be
         confirmed, and a four-eyes run must carry its second
@@ -2631,17 +2638,59 @@ class InvoiceService:
         resolved_format, profile, basis = resolve_export_format(
             run, store.list_handoff_profiles(), format
         )
-        execution_date = (
-            requested_execution_date(run, profile, export_date=anchor)
-            if resolved_format == "pain001"
-            else ""
+        # Batch booking is the governing profile's call, and it
+        # is a pain.001 shape: the file groups the run's lines
+        # into one PmtInf per requested execution date. The
+        # profile's lead days become the floor every group's date
+        # respects (batch_groups states which date wins per
+        # group); the run stamps every group's date.
+        batch_booking = bool(
+            profile is not None
+            and profile.batch_booking
+            and resolved_format == "pain001"
         )
+        batch_floor = ""
+        groups: list = []
+        if batch_booking:
+            from .handoff import batch_groups
+
+            if profile.lead_days > 0:
+                batch_floor = (
+                    anchor + timedelta(days=profile.lead_days)
+                ).isoformat()
+            groups = batch_groups(run, batch_floor)
+            execution_date = ", ".join(date for date, _ in groups)
+        else:
+            execution_date = (
+                requested_execution_date(run, profile, export_date=anchor)
+                if resolved_format == "pain001"
+                else ""
+            )
         data = render_handoff(
             run,
             resolved_format,
             creditor_accounts=completions,
-            requested_execution_date=execution_date,
+            requested_execution_date=execution_date if not batch_booking else "",
+            batch_booking=batch_booking,
+            batch_floor_date=batch_floor,
         )
+        if resolved_format == "pain001":
+            # Each completion entry records the execution date its
+            # member was exported under — the file's single
+            # ReqExctnDt, or its own PmtInf group's date under
+            # batch booking — so completion coverage can split by
+            # PmtInf grouping (paymentruns.creditor_completion_metrics).
+            if batch_booking:
+                group_of = {
+                    line.invoice_id: date
+                    for date, group_lines in groups
+                    for line in group_lines
+                }
+                for entry in run.handoff_creditor_entries:
+                    entry.execution_date = group_of.get(entry.invoice_id, "")
+            else:
+                for entry in run.handoff_creditor_entries:
+                    entry.execution_date = execution_date
         key = handoff_key(run.run_id, resolved_format)
         object_store.put(
             key, data, content_type=handoff_content_type(resolved_format)
@@ -2655,7 +2704,19 @@ class InvoiceService:
         run.handoff_format = resolved_format
         run.handoff_profile_id = profile.profile_id if profile else ""
         run.handoff_execution_date = execution_date
-        if profile is not None and basis.startswith("profile"):
+        if batch_booking:
+            run.note += (
+                f" Hand-off pain.001 batch-booked under profile "
+                f"{profile.profile_id}: {len(groups)} PmtInf group(s) "
+                f"by requested execution date ({execution_date})"
+                + (
+                    f"; the profile's {profile.lead_days}d lead floors "
+                    "every group date."
+                    if profile.lead_days > 0
+                    else "."
+                )
+            )
+        if profile is not None and basis.startswith("profile") and not batch_booking:
             run.note += (
                 f" Hand-off format {resolved_format} from {basis}"
                 + (

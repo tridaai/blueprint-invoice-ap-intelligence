@@ -1003,6 +1003,13 @@ class HandoffCreditorEntry(BaseModel):
     source: str = "at_import"  # supplier_master | at_import
     account_kind: str = ""  # iban | account | "" (nothing completed)
     account_label: str = ""  # masked label, e.g. "iban ••••4471"
+    # The requested execution date the member was exported under
+    # (pain.001 only): the file's single ReqExctnDt, or — under a
+    # batch-booking profile — the member's own PmtInf group's
+    # date, so completion coverage can split by PmtInf grouping.
+    # "" for CSV exports (the layout carries no execution date)
+    # and for exports from before the stamp existed.
+    execution_date: str = ""
 
 
 class PaymentRun(BaseModel):
@@ -1149,6 +1156,12 @@ class HandoffProfile(BaseModel):
     format: str = "csv"  # csv | pain001 — the scope's preferred hand-off format
     lead_days: int = 0  # requested-execution lead for pain.001 (see handoff.py)
     markers_rejected: bool = False  # the payee's bank rejects at-import markers
+    # Batch booking: the payee's bank books per value date, so a
+    # pain.001 export groups the run's lines into one PmtInf per
+    # requested execution date (BtchBookg true) instead of one
+    # PmtInf for the whole run (see handoff.batch_groups — the
+    # profile's lead days floor every group's date).
+    batch_booking: bool = False
     note: str = ""
     updated_by: str = ""
     updated_at: str = ""  # ISO timestamp of the latest set
@@ -1168,6 +1181,7 @@ class HandoffProfileRequest(BaseModel):
     format: str = "csv"
     lead_days: int = 0
     markers_rejected: bool = False
+    batch_booking: bool = False
     note: str = ""
 
 

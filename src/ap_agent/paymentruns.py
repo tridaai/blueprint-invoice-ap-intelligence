@@ -501,12 +501,33 @@ def creditor_completion_metrics(runs: list[PaymentRun]) -> dict:
     receipts existed export-count but receipt-less: they are
     reported as ``exports_without_receipt`` so the coverage
     denominator is never quietly smaller than the export count.
+
+    ``by_execution_group`` splits the same coverage by the
+    PmtInf grouping the member was exported under: each entry's
+    stamped execution date — its batch-booking group's date, or
+    the single-PmtInf file's date — so the marker risk is priced
+    per value date, not just per file. Entries from before the
+    stamp (and CSV exports, which carry no execution date) are
+    absent from the split, never silently grouped.
     Pure over the runs given.
     """
     overall = _new_completion_cell()
     groups: dict[tuple[str, str], dict] = {}
+    execution_groups: dict[str, dict] = {}
+    execution_group_runs: dict[str, set] = {}
     exports_total = 0
     exports_without_receipt = 0
+
+    def accumulate(cell: dict, *, completed: bool, value: float) -> None:
+        cell["members"] += 1
+        cell["value_total"] = round(cell["value_total"] + value, 2)
+        if completed:
+            cell["members_completed"] += 1
+            cell["value_completed"] = round(cell["value_completed"] + value, 2)
+        else:
+            cell["members_marked"] += 1
+            cell["value_marked"] = round(cell["value_marked"] + value, 2)
+
     for run in runs:
         if not run.handoff_generated_at:
             continue
@@ -525,18 +546,21 @@ def creditor_completion_metrics(runs: list[PaymentRun]) -> dict:
             value = round(nets.get(entry.invoice_id, 0.0), 2)
             completed = entry.source == "supplier_master"
             for target in (overall, cell):
-                target["members"] += 1
-                target["value_total"] = round(target["value_total"] + value, 2)
-                if completed:
-                    target["members_completed"] += 1
-                    target["value_completed"] = round(
-                        target["value_completed"] + value, 2
-                    )
-                else:
-                    target["members_marked"] += 1
-                    target["value_marked"] = round(
-                        target["value_marked"] + value, 2
-                    )
+                accumulate(target, completed=completed, value=value)
+            if entry.execution_date:
+                # The PmtInf grouping split: under batch booking a
+                # member's group is its own execution date; under a
+                # single-PmtInf file it is the file's date. Either
+                # way the marker risk is priced per value date.
+                ecell = execution_groups.setdefault(
+                    entry.execution_date, _new_completion_cell()
+                )
+                execution_group_runs.setdefault(entry.execution_date, set()).add(
+                    run.run_id
+                )
+                accumulate(ecell, completed=completed, value=value)
+    for date_key, cell in execution_groups.items():
+        cell["exports"] = len(execution_group_runs[date_key])
     return {
         "exports_total": exports_total,
         "exports_with_receipt": overall["exports"],
@@ -549,6 +573,14 @@ def creditor_completion_metrics(runs: list[PaymentRun]) -> dict:
                 **_completion_shares(cell),
             }
             for (currency, format_name), cell in sorted(groups.items())
+        ],
+        "by_execution_group": [
+            {
+                "execution_date": date_key,
+                "runs": len(execution_group_runs[date_key]),
+                **_completion_shares(cell),
+            }
+            for date_key, cell in sorted(execution_groups.items())
         ],
     }
 

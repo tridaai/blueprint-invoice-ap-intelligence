@@ -71,6 +71,8 @@ def profile_detail(profile: HandoffProfile) -> str:
     parts = [f"format {profile.format}", f"lead {profile.lead_days}d"]
     if profile.markers_rejected:
         parts.append("markers rejected by the payee's bank")
+    if profile.batch_booking:
+        parts.append("batch booking (one PmtInf per execution date)")
     if profile.note:
         parts.append(profile.note)
     return "; ".join(parts)
@@ -107,7 +109,8 @@ def governing_profile(
     if not member_profiles:
         return None
     voices = {
-        (p.format, p.lead_days, p.markers_rejected) for p in member_profiles
+        (p.format, p.lead_days, p.markers_rejected, p.batch_booking)
+        for p in member_profiles
     }
     if len(voices) != 1:
         return None  # split voices: no profile governs this run
