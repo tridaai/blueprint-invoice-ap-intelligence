@@ -20,13 +20,30 @@ Both formats sit behind the one hand-off seam
   is exported at full gross and the drift is itemised on the run
   record (`handoff_drift`), never silently netted off.
 
-Choose the format per export: `POST /payment-runs/{run_id}/handoff`
-defaults to `?format=csv`; `?format=pain001` selects the XML. The
+Choose the format per export — or let the run's governed
+**hand-off profile** choose it. A profile (`GET/POST
+/handoff/profiles`, migration 0011) records the payee side's
+routing facts per supplier or per currency: preferred format,
+a lead-days figure for the pain.001 requested execution date,
+and whether the payee's bank rejects at-import creditor
+markers. Resolution is deterministic: `?format=csv|pain001`
+named on the export call wins; with no format named, the
+governing profile's format applies — the run's currency
+profile first, then a supplier profile the run's profiled
+members agree on — and with neither, the CSV default. The
+governing profile's lead days push `ReqExctnDt` later (never
+earlier than the window end), whoever picked the format. The
 run record's export receipt (`handoff_key`, `handoff_sha256`,
 `handoff_generated_at/by`, `handoff_format`) always names the
-format of the file it points at, and `handoff_creditor_entries`
-records how each member's creditor account was completed
-(see "Bank-account elements" below). Confirmation also computes
+format of the file it points at, joined now by
+`handoff_profile_id` (the profile that governed, if any) and
+`handoff_execution_date` (the `ReqExctnDt` written);
+`handoff_creditor_entries` records how each member's creditor
+account was completed (see "Bank-account elements" below). A
+profile whose bank rejects markers also flags the run at
+*proposal* time (`handoff_profile_flags`) for any member the
+master holds no bank details for — the import refusal is
+prevented at the desk, not discovered at the bank. Confirmation also computes
 the run's drift forecast (`drift_forecast`): members whose
 discount deadlines fall before the expected export date are
 flagged while the confirmer can still act — a projection from
@@ -74,7 +91,7 @@ transaction per run line. The mapping:
 | `GrpHdr/InitgPty/Nm` | `Trida AI Blueprint - AP Agent` |
 | `PmtInf/PmtInfId` | the run id |
 | `PmtInf/PmtMtd` | `TRF` (credit transfer) |
-| `PmtInf/ReqExctnDt` | the run's window end — pay on or before this date |
+| `PmtInf/ReqExctnDt` | the run's window end — pay on or before this date; pushed later to export date + the governing hand-off profile's lead days when that is later (the run stamps the date written as `handoff_execution_date`) |
 | `PmtInf/ChrgBr` | `SLEV` (charges follow the service-level agreement) |
 | `CdtTrfTxInf/PmtId/EndToEndId` | the agent's invoice id |
 | `CdtTrfTxInf/Amt/InstdAmt` (+ `Ccy`) | the line's export-time **net** amount, in the run's currency |
