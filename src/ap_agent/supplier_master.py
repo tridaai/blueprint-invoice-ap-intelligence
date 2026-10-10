@@ -161,6 +161,77 @@ def compare_bank_details(
     )
 
 
+def master_coverage(
+    records: list,
+    master,
+    *,
+    pending_changes: int = 0,
+) -> dict:
+    """How much of the processed flow the bank screen can actually
+    check: the coverage behind AP-BANK-01's master comparison.
+
+    The screen's verdict is only meaningful where master data
+    exists — everywhere else it falls back to pattern-only
+    detection, and that blind spot should be a number, not a
+    feeling. Computed over the store's processed invoices:
+
+    - ``invoices_with_master`` / ``coverage_pct``: the share of
+      processed invoices whose supplier has a master record.
+    - ``spend_coverage_pct``: the same share weighted by invoice
+      totals — coverage where the money is.
+    - ``by_check_status``: the recorded verdict mix (match /
+      mismatch / no master record / no details stated / not
+      checked), so the gap and the screen's findings sit side by
+      side.
+    - ``pending_changes``: governed master changes already in
+      flight to close the gap (supplied by the caller).
+
+    Percentages are ``None`` over an empty base rather than a
+    dressed-up zero.
+    """
+    by_check_status: dict[str, int] = {}
+    suppliers: set[str] = set()
+    covered_suppliers: set[str] = set()
+    with_master = 0
+    spend_total = 0.0
+    spend_with_master = 0.0
+    for record in records:
+        result = record.result
+        invoice = record.invoice or {}
+        supplier = result.supplier_name or str(invoice.get("supplier_name", ""))
+        check = result.bank_master_check
+        status = check.status if check is not None else "not_checked"
+        by_check_status[status] = by_check_status.get(status, 0) + 1
+        total = invoice.get("total_amount")
+        amount = float(total) if total is not None else 0.0
+        spend_total += amount
+        if supplier:
+            suppliers.add(supplier)
+        if supplier and master.get_supplier(supplier) is not None:
+            with_master += 1
+            spend_with_master += amount
+            covered_suppliers.add(supplier)
+    total_records = len(records)
+    return {
+        "invoices_total": total_records,
+        "invoices_with_master": with_master,
+        "coverage_pct": (
+            round(100.0 * with_master / total_records, 1) if total_records else None
+        ),
+        "spend_total": round(spend_total, 2),
+        "spend_with_master": round(spend_with_master, 2),
+        "spend_coverage_pct": (
+            round(100.0 * spend_with_master / spend_total, 1)
+            if spend_total
+            else None
+        ),
+        "suppliers_total": len(suppliers),
+        "suppliers_with_master": len(covered_suppliers),
+        "by_check_status": by_check_status,
+        "pending_changes": pending_changes,
+    }
+
+
 def mismatch_flag(check: BankMasterCheck) -> str:
     """The fraud flag for a master mismatch. Masked labels only —
     the full identifiers stay in the master record and the case file."""

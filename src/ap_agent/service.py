@@ -656,6 +656,17 @@ class InvoiceService:
                 output_tokens += telemetry.output_tokens or 0
             if telemetry.estimated_cost_usd is not None:
                 costs.append(telemetry.estimated_cost_usd)
+        from .supplier_master import master_coverage
+
+        coverage = master_coverage(
+            records,
+            self._get_supplier_master(),
+            pending_changes=sum(
+                1
+                for change in self._get_store().list_master_changes()
+                if change.status == "pending"
+            ),
+        )
         packs = self._get_store().list_recovery_packs()
         sla_days = recovery_case_sla_days()
         case_items, case_buckets, case_breaches = recovery_case_aging(
@@ -693,6 +704,7 @@ class InvoiceService:
                 "sla_breaches": case_breaches,
                 "age_buckets": case_buckets,
             },
+            "supplier_master": coverage,
         }
 
     def audit_rows(self) -> list[dict]:
