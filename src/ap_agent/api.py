@@ -526,6 +526,19 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"applied": [c.request_id for c in applied]}
 
+    @app.post("/suppliers/master-changes/expire-stale", dependencies=_AUTH)
+    def expire_stale_master_changes(as_of: str = Query(default="")) -> dict:
+        """Expiry sweep: close pending changes that sat undecided
+        past the MASTER_CHANGE_EXPIRY_DAYS window. An expired change
+        can no longer be approved or rejected — it must be
+        re-proposed. (Analyses run the same sweep automatically;
+        this is the operator's explicit handle.)"""
+        try:
+            expired = svc.expire_stale_master_changes(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"expired": [c.request_id for c in expired]}
+
     @app.get("/suppliers/master-changes/{request_id}", response_model=MasterChangeRequest, dependencies=_AUTH)
     def get_master_change(request_id: str) -> MasterChangeRequest:
         change = svc.get_master_change(request_id)

@@ -47,6 +47,7 @@ from .queue import build_queue, recovery_case_aging
 from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
+from .master_changes import change_age_days, is_change_expired
 from .master_changes import next_request_id, proposed_from_invoice
 from .model_backends import ModelBackend, get_backend
 from .ocr import get_ocr_engine
@@ -134,6 +135,21 @@ def recovery_case_sla_days() -> int:
     """The configured recovery-case SLA, in days per status."""
     load_dotenv()
     return max(1, env_int("RECOVERY_CASE_SLA_DAYS", RECOVERY_CASE_SLA_DEFAULT_DAYS))
+
+
+# Default decision window for a pending master change: a request
+# nobody has decided within this many days expires (MASTER_CHANGE_
+# EXPIRY_DAYS overrides it) — a live bank-detail change must not
+# sit undecided, waiting for a careless approval.
+MASTER_CHANGE_EXPIRY_DEFAULT_DAYS = 30
+
+
+def master_change_expiry_days() -> int:
+    """The configured expiry window for pending master changes."""
+    load_dotenv()
+    return max(
+        1, env_int("MASTER_CHANGE_EXPIRY_DAYS", MASTER_CHANGE_EXPIRY_DEFAULT_DAYS)
+    )
 
 
 @dataclass
@@ -296,6 +312,10 @@ class InvoiceService:
         # bank check below compares against the record in force
         # today — never against a merely-proposed one.
         self.apply_due_master_changes()
+        # Pending changes past their decision window expire here
+        # too, so a stale bank-detail request never lingers
+        # decidable between operator visits.
+        self.expire_stale_master_changes()
         # Memory: what the store already knows about this supplier and
         # this supplier becomes diagnosis evidence for the new analysis.
         # The raw entries ride along too — the diagnosis tool loop
@@ -1132,7 +1152,9 @@ class InvoiceService:
         approved change applies immediately when its effective date
         has arrived; a future-dated one waits for
         :meth:`apply_due_master_changes`. Rejection leaves the
-        master exactly as it was.
+        master exactly as it was. A request that sat pending past
+        the expiry window (``MASTER_CHANGE_EXPIRY_DAYS``) is expired
+        by the attempt itself and refused — it must be re-proposed.
         """
         store = self._get_store()
         change = store.get_master_change(request_id)
@@ -1140,10 +1162,30 @@ class InvoiceService:
             raise KeyError(
                 f"Unknown master change: {request_id} (propose it first)"
             )
-        if change.status != "pending":
+        if change.status == "pending" and is_change_expired(
+            change,
+            datetime.now(timezone.utc).date(),
+            master_change_expiry_days(),
+        ):
+            # The apply-time check: a decision attempted after the
+            # window expires the request on the spot (audited) and
+            # is refused — the change must be re-proposed, which
+            # restarts the governed path with fresh eyes.
+            self._expire_master_change(change)
             raise ValueError(
-                f"Master change {request_id} is already {change.status} "
-                f"(decided by {change.decided_by})"
+                f"Master change {request_id} sat pending past the "
+                f"{master_change_expiry_days()}-day decision window "
+                "and has expired — it can no longer be decided; "
+                "re-propose the change to restart it"
+            )
+        if change.status != "pending":
+            detail = (
+                f" (decided by {change.decided_by})"
+                if change.decided_by
+                else " — it can no longer be decided; re-propose to restart it"
+            )
+            raise ValueError(
+                f"Master change {request_id} is already {change.status}{detail}"
             )
         if actor == change.proposed_by:
             raise ValueError(
@@ -1194,6 +1236,58 @@ class InvoiceService:
                 note="applied on approval — the effective date has arrived",
             )
         return change
+
+    def _expire_master_change(
+        self, change: MasterChangeRequest, *, as_of=None
+    ) -> MasterChangeRequest:
+        """Close a pending change that outlived its decision window.
+
+        Expiry is an audit event, not a decision: the request keeps
+        its proposer, its proposal, and its history, gains an
+        ``expired`` entry, and can never be decided — the change
+        must be re-proposed, restarting the governed path. The
+        master record is untouched, exactly as a rejection leaves
+        it."""
+        window = master_change_expiry_days()
+        anchor = as_of or datetime.now(timezone.utc).date()
+        age = change_age_days(change, anchor)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        change.status = "expired"
+        change.history.append(
+            MasterChangeEvent(
+                status="expired",
+                actor="system",
+                at=stamp,
+                note=(
+                    f"pending {age} days without a decision — expired "
+                    f"after the {window}-day window "
+                    "(MASTER_CHANGE_EXPIRY_DAYS); re-propose the "
+                    "change to restart it"
+                ),
+            )
+        )
+        self._get_store().save_master_change(change)
+        return change
+
+    def expire_stale_master_changes(self, as_of: str = "") -> list[MasterChangeRequest]:
+        """Expire every pending master change past its decision
+        window (expiry sweep). Called at the top of each analysis,
+        so a stale request never lingers decidable, and exposed as
+        an endpoint for operators. Returns the changes this call
+        expired."""
+        anchor = (
+            _parse_date(as_of)
+            if as_of
+            else datetime.now(timezone.utc).date()
+        )
+        if anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        window = master_change_expiry_days()
+        expired: list[MasterChangeRequest] = []
+        for change in self._get_store().list_master_changes():
+            if is_change_expired(change, anchor, window):
+                expired.append(self._expire_master_change(change, as_of=anchor))
+        return expired
 
     def _apply_master_change(
         self, change: MasterChangeRequest, *, actor: str, note: str

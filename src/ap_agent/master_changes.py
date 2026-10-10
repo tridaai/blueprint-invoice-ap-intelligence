@@ -19,17 +19,48 @@ the workflow (propose → second-operator decision → apply):
   like every other master comparison in the codebase — full
   identifiers live in the master record and the change request,
   never in prose.
+- A pending request does not wait forever: past the configured
+  expiry window (``MASTER_CHANGE_EXPIRY_DAYS``, default 30) it is
+  expired — undecidable, with the expiry in its audit history —
+  because a live credential change must not sit around waiting
+  for a careless approval. :func:`is_change_expired` is the pure
+  predicate; the service layer runs the sweep.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import date
 
-from .schemas import InvoiceInput, SupplierMasterRecord
+from .matching import _parse_date
+from .schemas import InvoiceInput, MasterChangeRequest, SupplierMasterRecord
 from .screening import _all_text_sources
 from .supplier_master import _masked, extract_bank_identifiers, master_identifiers
 
 _ID_SUFFIX = re.compile(r"(\d+)$")
+
+
+def change_age_days(change: MasterChangeRequest, as_of: date) -> int | None:
+    """How many days a change has been waiting, from its proposal
+    timestamp; None when the timestamp cannot be read."""
+    proposed = _parse_date(change.proposed_at)
+    if proposed is None:
+        return None
+    return (as_of - proposed).days
+
+
+def is_change_expired(
+    change: MasterChangeRequest, as_of: date, expiry_days: int
+) -> bool:
+    """Whether a *pending* change has outlived its decision window.
+
+    A pending request older than the window is expired: on the
+    window's last day it is still decidable; one day later it is
+    not. Decided requests never expire — their outcome stands."""
+    if change.status != "pending":
+        return False
+    age = change_age_days(change, as_of)
+    return age is not None and age > expiry_days
 
 
 def next_request_id(existing_ids: list[str]) -> str:

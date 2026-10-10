@@ -663,7 +663,7 @@ class MasterChangeEvent(BaseModel):
     the decision, and the application to the master, each with its
     actor and timestamp."""
 
-    status: str  # proposed | approved | rejected | applied
+    status: str  # proposed | approved | rejected | applied | expired
     actor: str = ""
     at: str = ""  # ISO timestamp
     note: str = ""
@@ -682,7 +682,11 @@ class MasterChangeRequest(BaseModel):
     it is applied, the fraud screen keeps comparing documents
     against the previous record, so the new details still read as a
     mismatch. ``current`` snapshots the master record the proposal
-    was made against, so the approver sees old vs new."""
+    was made against, so the approver sees old vs new. A request
+    nobody decides within the expiry window (``MASTER_CHANGE_
+    EXPIRY_DAYS``, default 30) expires instead: undecidable,
+    audited, and re-proposable — a live credential change never
+    sits around waiting for a careless approval."""
 
     request_id: str
     supplier_name: str
@@ -693,7 +697,7 @@ class MasterChangeRequest(BaseModel):
     reason: str = ""
     proposed_by: str = ""
     proposed_at: str = ""
-    status: str = "pending"  # pending | approved | rejected
+    status: str = "pending"  # pending | approved | rejected | expired
     decided_by: Optional[str] = None
     decided_at: Optional[str] = None
     decision_note: str = ""
