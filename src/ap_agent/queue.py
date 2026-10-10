@@ -43,6 +43,18 @@ the expected export has no slack — every day of the wait is a
 day the projected lapse gets closer — so its threshold
 tightens to 0 days and it is chased from the first day of the
 wait, carrying the projected lapse value the wait puts at risk.
+
+**Twin clusters** escalate here too. The twin graph
+(``twins.twin_clusters``) was an audit read: it named the
+clusters, but the approver working this queue never saw one as
+a case — a twin could arrive while its sibling waited, or one
+copy could be approved while another sat at the gate. A
+cluster becomes a work item when it is big enough
+(``TWIN_CLUSTER_MIN_SIZE``), valuable enough in one currency
+(``TWIN_CLUSTER_VALUE_THRESHOLD``), or spans an approved twin
+and a waiting one — the double-payment shape itself, at any
+size. The item carries the graph (members + screened edges),
+so the case is worked whole, not record by record.
 """
 
 from __future__ import annotations
@@ -59,6 +71,7 @@ from .schemas import (
     QueueView,
     RecoveryCaseAgingItem,
     RecoveryPack,
+    TwinEscalationItem,
 )
 from .store import ApprovalRecord
 
@@ -213,6 +226,72 @@ def four_eyes_aging(
     return items
 
 
+DEFAULT_TWIN_CLUSTER_MIN_SIZE = 3
+DEFAULT_TWIN_CLUSTER_VALUE_THRESHOLD = 10000.0
+
+
+def twin_escalation_items(
+    records: list[ApprovalRecord],
+    *,
+    min_size: int = DEFAULT_TWIN_CLUSTER_MIN_SIZE,
+    value_threshold: float = DEFAULT_TWIN_CLUSTER_VALUE_THRESHOLD,
+) -> list[TwinEscalationItem]:
+    """The twin clusters that belong on the worklist, with their
+    graphs attached. A cluster escalates on ANY trigger (see
+    ``TwinEscalationItem``): size, combined per-currency value,
+    or an approved twin spanning a waiting one. Clusters under
+    every trigger stay audit-only — the graph endpoint still
+    reads them; the queue is for work, and a small, cheap,
+    undecided pair is a glance, not a case.
+
+    Work order: an approved+awaiting span first (money already
+    committed on one copy is the live risk), then the largest
+    combined value, then the largest cluster."""
+    from .twins import twin_clusters
+
+    items: list[TwinEscalationItem] = []
+    for cluster in twin_clusters(records):
+        totals: dict[str, float] = {}
+        for member in cluster["members"]:
+            if member["total_amount"] is not None:
+                currency = str(member["currency"] or "USD")
+                totals[currency] = round(
+                    totals.get(currency, 0.0) + float(member["total_amount"]), 2
+                )
+        statuses = {str(member["status"]) for member in cluster["members"]}
+        triggers: list[str] = []
+        if cluster["size"] >= min_size:
+            triggers.append("cluster_size")
+        if any(value >= value_threshold for value in totals.values()):
+            triggers.append("combined_value")
+        if "approved" in statuses and "awaiting_approver" in statuses:
+            triggers.append("approved_and_awaiting")
+        if not triggers:
+            continue
+        items.append(
+            TwinEscalationItem(
+                cluster_id=cluster["cluster_id"],
+                supplier_name=cluster["canonical_supplier"],
+                invoice_number=cluster["canonical_invoice_number"],
+                size=cluster["size"],
+                totals_by_currency=totals,
+                triggers=triggers,
+                arrival_shapes=cluster["arrival_shapes"],
+                members=cluster["members"],
+                edges=cluster["edges"],
+            )
+        )
+    items.sort(
+        key=lambda item: (
+            0 if "approved_and_awaiting" in item.triggers else 1,
+            -max(item.totals_by_currency.values(), default=0.0),
+            -item.size,
+            item.cluster_id,
+        )
+    )
+    return items
+
+
 def _bucket(days_overdue: int | None, due: date | None, as_of: date) -> str:
     if due is None or days_overdue is None:
         return "no_due_date"
@@ -239,6 +318,9 @@ def build_queue(
     posting_escalation_days: int = 0,
     payment_runs: Iterable[PaymentRun] = (),
     four_eyes_aging_days: int = DEFAULT_FOUR_EYES_AGING_DAYS,
+    twin_items: Iterable[TwinEscalationItem] = (),
+    twin_min_size: int = DEFAULT_TWIN_CLUSTER_MIN_SIZE,
+    twin_value_threshold: float = DEFAULT_TWIN_CLUSTER_VALUE_THRESHOLD,
 ) -> QueueView:
     """The aging queue over the store's records, as of a date
     (today when not given — tests and API callers pass it
@@ -248,7 +330,9 @@ def build_queue(
     action items, oldest first (``posting.approved_not_posted``
     already orders them). Four-eyes runs whose second
     confirmation has outlasted the aging threshold join them
-    (see :func:`four_eyes_aging`)."""
+    (see :func:`four_eyes_aging`), and twin clusters past their
+    escalation triggers join as cases with their graphs (see
+    :func:`twin_escalation_items`)."""
     as_of = as_of or date.today()
     items: list[QueueItem] = []
     triage_mix: dict[str, int] = {}
@@ -315,6 +399,7 @@ def build_queue(
     four_eyes_items = four_eyes_aging(
         payment_runs, as_of=as_of, aging_days=four_eyes_aging_days
     )
+    twin_list = list(twin_items)
     return QueueView(
         as_of=as_of.isoformat(),
         count=len(items),
@@ -334,4 +419,8 @@ def build_queue(
         four_eyes_pending=four_eyes_items,
         four_eyes_pending_count=len(four_eyes_items),
         four_eyes_aging_days=four_eyes_aging_days,
+        twin_escalations=twin_list,
+        twin_escalation_count=len(twin_list),
+        twin_cluster_min_size=twin_min_size,
+        twin_cluster_value_threshold=twin_value_threshold,
     )

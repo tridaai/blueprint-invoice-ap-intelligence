@@ -226,6 +226,35 @@ def four_eyes_aging_days() -> int:
     )
 
 
+# Default twin-cluster escalation size: the same invoice on file
+# this many times stops reading as a resend and starts reading
+# as a pattern the approver works as one case (TWIN_CLUSTER_MIN_
+# SIZE overrides it; never below 2 — a cluster is at least a pair).
+TWIN_CLUSTER_MIN_SIZE_DEFAULT = 3
+
+
+def twin_cluster_min_size() -> int:
+    """The configured twin-cluster escalation size."""
+    load_dotenv()
+    return max(2, env_int("TWIN_CLUSTER_MIN_SIZE", TWIN_CLUSTER_MIN_SIZE_DEFAULT))
+
+
+# Default twin-cluster value threshold: a cluster whose members
+# total this much in one currency is material double-payment
+# exposure even as a pair (TWIN_CLUSTER_VALUE_THRESHOLD overrides
+# it). Totals are summed per currency — currencies never mix.
+TWIN_CLUSTER_VALUE_THRESHOLD_DEFAULT = 10000.0
+
+
+def twin_cluster_value_threshold() -> float:
+    """The configured twin-cluster combined-value threshold."""
+    load_dotenv()
+    return max(
+        0.0,
+        env_float("TWIN_CLUSTER_VALUE_THRESHOLD", TWIN_CLUSTER_VALUE_THRESHOLD_DEFAULT),
+    )
+
+
 # Default recovery-case SLA: a case may sit in one status this many
 # days before the queue flags it as stuck (RECOVERY_CASE_SLA_DAYS
 # overrides it).
@@ -2008,13 +2037,16 @@ class InvoiceService:
         due date, overdue first, with the triage mix — plus the open
         recovery cases with their per-status aging and SLA flags,
         the open postings that have outlasted the escalation
-        threshold (``POSTING_ESCALATION_DAYS``), and the four-eyes
+        threshold (``POSTING_ESCALATION_DAYS``), the four-eyes
         payment runs whose second confirmation has outlasted its
-        aging threshold (``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``), so
-        one worklist shows everything the building still owes an
-        answer for. A pure read over the store — it decides and
-        writes nothing."""
+        aging threshold (``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``), and
+        the twin clusters past their escalation triggers
+        (``TWIN_CLUSTER_MIN_SIZE`` / ``TWIN_CLUSTER_VALUE_THRESHOLD``,
+        or any approved+awaiting span), so one worklist shows
+        everything the building still owes an answer for. A pure
+        read over the store — it decides and writes nothing."""
         from .posting import approved_not_posted
+        from .queue import twin_escalation_items
 
         anchor = _parse_date(as_of) if as_of else None
         store = self._get_store()
@@ -2025,6 +2057,8 @@ class InvoiceService:
             as_of=anchor or datetime.now(timezone.utc).date(),
             grace_days=escalation,
         )
+        min_size = twin_cluster_min_size()
+        value_threshold = twin_cluster_value_threshold()
         return build_queue(
             records,
             as_of=anchor,
@@ -2034,6 +2068,11 @@ class InvoiceService:
             posting_escalation_days=escalation,
             payment_runs=store.list_payment_runs(),
             four_eyes_aging_days=four_eyes_aging_days(),
+            twin_items=twin_escalation_items(
+                records, min_size=min_size, value_threshold=value_threshold
+            ),
+            twin_min_size=min_size,
+            twin_value_threshold=value_threshold,
         )
 
     def escalation_digest(self, as_of: str = "") -> EscalationDigest:

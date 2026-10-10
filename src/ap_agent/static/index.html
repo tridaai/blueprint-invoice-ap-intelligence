@@ -387,6 +387,11 @@ async function loadQueue() {
     $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Four-eyes runs waiting</b> — confirmed once, hand-off locked, second confirmation past the ${q.four_eyes_aging_days}-day aging threshold. The second confirmer must be someone other than the first. A run whose drift forecast flags lapses is chased from day one: its threshold tightens to 0, and the projected lapse value rides on the item.</p>
     <table><tr><th>Run</th><th>Net</th><th>First confirmer</th><th>Confirmed</th><th>Waiting</th></tr>${foureyes.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.currency)} ${r.total_net}</td><td>${esc(r.confirmed_by || "—")}</td><td>${esc((r.confirmed_at || "").slice(0, 10))}</td><td>${pill((r.age_days ?? "—") + "d waiting", "bad")}${r.forecast_tightened ? `<br>${pill("forecast: " + r.forecast_lapse_count + " lapse(s) · " + esc(r.currency) + " " + r.forecast_value_at_risk + " at risk", "warn")}` : ""}</td></tr>`).join("")}</table>`;
   }
+  const twins = q.twin_escalations || [];
+  if (twins.length) {
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Escalated twin clusters</b> — the same invoice on file more than once, worked as one case: a cluster escalates at ${q.twin_cluster_min_size}+ records, at ${q.twin_cluster_value_threshold} combined in one currency, or the moment one twin is approved while another still waits.</p>
+    <table><tr><th>Cluster</th><th>Supplier invoice</th><th>Members</th><th>Combined</th><th>Why escalated</th></tr>${twins.map(t => `<tr><td>${esc(t.cluster_id)}<br><span class="note">${esc(t.supplier_name)}</span></td><td>${esc(t.invoice_number || "—")}<br><span class="note">arrived as: ${esc((t.arrival_shapes || []).join(", "))}</span></td><td>${t.members.map(m => `${esc(m.invoice_id)}<br><span class="note">${esc(m.status)}${m.duplicate_of ? " · dup of " + esc(m.duplicate_of) : ""}</span>`).join("<br>")}</td><td>${Object.entries(t.totals_by_currency || {}).map(([c, v]) => `${esc(c)} ${v}`).join("<br>")}</td><td>${t.triggers.map(x => pill(x.replaceAll("_", " "), x === "approved_and_awaiting" ? "bad" : "warn")).join(" ")}</td></tr>`).join("")}</table>`;
+  }
 }
 
 function runControls(run) {

@@ -1258,6 +1258,39 @@ class FourEyesAgingItem(BaseModel):
     forecast_value_at_risk: float = 0.0  # their discounts, summed
 
 
+class TwinEscalationItem(BaseModel):
+    """One duplicate-twin cluster escalated onto the approver's
+    worklist, with its twin graph attached (members + the
+    screened edges between them, as ``GET /audit/twins`` reads
+    them). The graph alone was audit-only: a third copy could
+    arrive, or one twin could be approved, while its sibling
+    waited — and the approver working the queue never saw the
+    cluster as a case. A cluster escalates when ANY trigger
+    fires:
+
+    * ``cluster_size`` — at least ``TWIN_CLUSTER_MIN_SIZE``
+      records (default 3): the same invoice arriving three ways
+      is a pattern to work, not a coincidence to file;
+    * ``combined_value`` — the members' totals in a single
+      currency reach ``TWIN_CLUSTER_VALUE_THRESHOLD`` (default
+      10000): the double-payment exposure is material even in a
+      pair (totals are summed per currency, never across);
+    * ``approved_and_awaiting`` — one twin is already approved
+      while another still waits at the gate: the exact shape of
+      a double payment in flight, at any size or value.
+    """
+
+    cluster_id: str
+    supplier_name: str = ""  # canonical (the screen's normalised form)
+    invoice_number: str = ""  # canonical invoice number (the screen's key)
+    size: int = 0
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    triggers: list[str] = Field(default_factory=list)
+    arrival_shapes: list[str] = Field(default_factory=list)
+    members: list[dict] = Field(default_factory=list)  # twin-graph nodes
+    edges: list[dict] = Field(default_factory=list)  # screened duplicate_of edges
+
+
 class QueueView(BaseModel):
     """The aging queue: awaiting invoices, overdue first, with the
     triage mix — a pure read model over the store's records. Open
@@ -1291,6 +1324,14 @@ class QueueView(BaseModel):
     four_eyes_pending: list[FourEyesAgingItem] = Field(default_factory=list)
     four_eyes_pending_count: int = 0
     four_eyes_aging_days: int = 0
+    # Twin clusters escalated as work items (TWIN_CLUSTER_MIN_SIZE /
+    # TWIN_CLUSTER_VALUE_THRESHOLD, or any approved+awaiting span):
+    # the cluster and its graph join the worklist, so a twin
+    # arriving while its sibling waits is worked as one case.
+    twin_escalations: list[TwinEscalationItem] = Field(default_factory=list)
+    twin_escalation_count: int = 0
+    twin_cluster_min_size: int = 0
+    twin_cluster_value_threshold: float = 0.0
 
 
 # ---------------------------------------------------------------------------
