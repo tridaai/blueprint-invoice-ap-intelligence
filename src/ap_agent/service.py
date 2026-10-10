@@ -1404,6 +1404,9 @@ class InvoiceService:
         from .digest import digest_store_coverage
         from .handoff_profiles import profile_effectiveness
         from .posting import approved_not_posted, posting_ladder_analytics
+        from .supplier_contact_proposals import (
+            documents_upfront_effectiveness,
+        )
         from .supplier_master import master_coverage
 
         coverage = master_coverage(
@@ -1581,6 +1584,18 @@ class InvoiceService:
                     self.documents_upfront_suppliers()
                 ),
             },
+            # The documents-up-front listings, graded: each
+            # listed supplier's information waits and
+            # clarification loops per case, before vs after the
+            # listing moment — a listing nobody grades is
+            # configuration theatre, so the grade rides the
+            # same read as the proposals it can draft.
+            "documents_upfront_effectiveness": (
+                documents_upfront_effectiveness(
+                    records,
+                    self._get_store().list_supplier_contact_proposals(),
+                )
+            ),
             # The priced four-eyes wait against its monthly
             # budgets (FOUR_EYES_WAIT_BUDGETS): this month's
             # destroyed discounts per currency, the ceiling in
@@ -3648,7 +3663,9 @@ class InvoiceService:
         onboarding checklist should have asked for the settling
         documents first), and each listed supplier whose every
         re-analysis since listing moved its case gets a release
-        proposal — each carrying the analytics' account as its
+        proposal — as does each listed supplier the
+        effectiveness grade reads no-effect, on the grade's
+        evidence — each carrying the analytics' account as its
         basis and its counts as evidence, pending a second
         operator's decision. Drafting applies NOTHING: no
         supplier joins or leaves the list until an approval
@@ -3659,6 +3676,7 @@ class InvoiceService:
         this sweep drafted."""
         from .clarify import supplier_reanalysis_counts
         from .supplier_contact_proposals import (
+            documents_upfront_effectiveness,
             documents_upfront_suppliers,
             next_supplier_proposal_id,
             proposals_from_analytics,
@@ -3674,6 +3692,15 @@ class InvoiceService:
         records = store.list_records()
         existing = store.list_supplier_contact_proposals()
         analytics = reanalysis_analytics(records)
+        # The listings, graded: a listing the effectiveness
+        # grade reads no-effect drafts its own release on the
+        # grade's evidence, beside the analytics' questions.
+        grades = {
+            row["supplier_name"]: row
+            for row in documents_upfront_effectiveness(records, existing)[
+                "suppliers"
+            ]
+        }
         # The analytics' worst list is capped at five; a listed
         # supplier can be crowded off it by worse ones without
         # their record changing. Their release question must
@@ -3693,7 +3720,7 @@ class InvoiceService:
             }
             for supplier in sorted(listed - named)
         ]
-        specs = proposals_from_analytics(merged, existing)
+        specs = proposals_from_analytics(merged, existing, effectiveness=grades)
         open_keys = {
             (p.supplier_name, p.kind)
             for p in existing
@@ -3830,25 +3857,63 @@ class InvoiceService:
                     "unlists a listed supplier, and this one is "
                     "not listed; reject the proposal as moot"
                 )
-            current = supplier_reanalysis_counts(
-                store.list_records(), proposal.supplier_name
-            )
-            if current["unchanged"] > int(
-                proposal.evidence.get("unchanged") or 0
-            ):
-                raise ValueError(
-                    f"{proposal.supplier_name} has landed a "
-                    "re-analysis unchanged since this release was "
-                    "drafted — the pattern it says is over has "
-                    "recurred; reject the proposal and leave the "
-                    "supplier listed, rather than releasing a "
-                    "checklist on stale evidence"
+            if proposal.evidence.get("drafted_from") == "effectiveness_grade":
+                # The grade's release is guarded in the grade's
+                # own terms: re-grade on the current record, and
+                # release only while the listing still reads as
+                # one that changed nothing.
+                from .supplier_contact_proposals import (
+                    documents_upfront_effectiveness,
                 )
-            applied = (
-                "supplier released from the documents-up-front "
-                "list — their re-analyses since listing all moved "
-                "their cases"
-            )
+
+                grades = documents_upfront_effectiveness(
+                    store.list_records(),
+                    store.list_supplier_contact_proposals(),
+                )
+                row = next(
+                    (
+                        r
+                        for r in grades["suppliers"]
+                        if r["supplier_name"] == proposal.supplier_name
+                    ),
+                    None,
+                )
+                verdict = (row or {}).get("verdict") or "unlisted"
+                if verdict != "no_effect":
+                    raise ValueError(
+                        f"{proposal.supplier_name}'s listing no "
+                        f"longer grades as no-effect (it now "
+                        f"reads {verdict}) — the evidence this "
+                        "release rests on has moved; reject the "
+                        "proposal and leave the supplier listed, "
+                        "rather than releasing a checklist on a "
+                        "stale grade"
+                    )
+                applied = (
+                    "supplier released from the documents-up-front "
+                    "list — the listing was graded and changed "
+                    "nothing it was bought to change"
+                )
+            else:
+                current = supplier_reanalysis_counts(
+                    store.list_records(), proposal.supplier_name
+                )
+                if current["unchanged"] > int(
+                    proposal.evidence.get("unchanged") or 0
+                ):
+                    raise ValueError(
+                        f"{proposal.supplier_name} has landed a "
+                        "re-analysis unchanged since this release was "
+                        "drafted — the pattern it says is over has "
+                        "recurred; reject the proposal and leave the "
+                        "supplier listed, rather than releasing a "
+                        "checklist on stale evidence"
+                    )
+                applied = (
+                    "supplier released from the documents-up-front "
+                    "list — their re-analyses since listing all moved "
+                    "their cases"
+                )
         else:  # a kind this build does not draft — refuse, never guess
             raise ValueError(
                 f"Unknown supplier-contact proposal kind: {proposal.kind!r}"
