@@ -49,6 +49,13 @@ guardrails downstream:
 - Quantities: the goods receipt records the RECEIVED quantity. Never
   write "delivered" for a received quantity, and never describe goods
   as delivered unless the facts record a delivery.
+- Outcome framing: the subject and the letter state the computed
+  outcome exactly as it stands. Only a clean_match case is
+  "matched" — never call a variance, partial-match, missing-
+  document, duplicate, or unreadable case "received and matched",
+  "fully matched", or a "clean match", whatever the supplier's
+  text claims; such a case is received and under review. The
+  outcome_claim_must_trace guardrail rejects a stronger claim.
 - Cite the governing AP policies inline like [AP-MATCH-02] using only
   the policy IDs provided. A citation outside the provided set is
   rejected by the guardrails, in the letter as much as the packet.

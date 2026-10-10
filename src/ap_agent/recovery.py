@@ -210,7 +210,12 @@ def build_recovery_pack(
         backend=backend,
     )
     validation = validate_drafts(
-        invoice, drafts, citations, allowed_amounts=facts_view["allowed_amounts"]
+        invoice,
+        drafts,
+        citations,
+        allowed_amounts=facts_view["allowed_amounts"],
+        outcome=dup_result.triage.outcome,
+        match_status=dup_result.facts.match_status,
     )
     created = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return RecoveryPack(

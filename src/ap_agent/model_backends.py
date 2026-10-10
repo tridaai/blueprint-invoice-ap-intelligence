@@ -128,6 +128,32 @@ _TRIAGE_SENTENCE = {
     "not_an_invoice": "The document received is not an invoice we can process.",
 }
 
+# The subject line's outcome claim, composed from the computed
+# outcome — never a constant. The template once stamped every
+# subject "received and matched", and a live judge caught the
+# claim riding on a quantity-variance case whose match was
+# partial: the letter's first line overstated the record before
+# the body said anything. Each suffix states the case exactly
+# as triage computed it; the outcome_claim_must_trace guardrail
+# polices the same rule in drafts from every other drafter.
+_OUTCOME_SUBJECT = {
+    "clean_match": "received and matched",
+    "price_variance": "received — price variance to resolve",
+    "quantity_variance": "received — quantity variance to resolve",
+    "missing_po": "received — no purchase order on file",
+    "missing_receipt": "received — awaiting the goods receipt",
+    "duplicate_suspected": "received — suspected duplicate, held for review",
+    "unreadable": "received — the copy could not be read reliably",
+    "not_an_invoice": "received — not an invoice we can process",
+}
+
+
+def outcome_subject_suffix(outcome: str) -> str:
+    """The subject's claim for one computed outcome (the generic
+    'under review' for an outcome the map does not know — a new
+    outcome must never inherit the matched claim by default)."""
+    return _OUTCOME_SUBJECT.get(outcome, "received and under review")
+
 
 class MockModelBackend:
     """Deterministic template renderer. No network, no randomness.
@@ -161,7 +187,8 @@ class MockModelBackend:
         outcome = str(context["outcome"])
         subject = (
             f"Invoice {context['invoice_id']} — {context['supplier_name']} "
-            f"invoice {context.get('invoice_number') or '—'}: received and matched"
+            f"invoice {context.get('invoice_number') or '—'}: "
+            f"{outcome_subject_suffix(outcome)}"
         )
         citations = context.get("citations") or []
         citation_text = " ".join(f"[{c}]" for c in citations)
@@ -435,7 +462,9 @@ class _BaseLLMBackend:
     def draft_documents(self, context: DraftContext) -> tuple[str, str, str]:
         text = self._complete(DRAFT_SYSTEM_PROMPT, self._render_prompt(context), max_tokens=1200)
         subject, rest = self._split_subject(
-            text, f"Invoice {context['invoice_id']} — received and matched"
+            text,
+            f"Invoice {context['invoice_id']} — "
+            f"{outcome_subject_suffix(str(context.get('outcome') or ''))}",
         )
         if "---PACKET---" in rest:
             letter, packet = rest.split("---PACKET---", 1)

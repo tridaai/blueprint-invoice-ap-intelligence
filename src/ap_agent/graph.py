@@ -731,7 +731,19 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
         citations = [g["policy_id"] for g in state.get("policies", [])]
         drafts = Drafts.model_validate(state["drafts"])
         allowed = _facts_view(state, sub)["allowed_amounts"]
-        validation = validate_drafts(sub, drafts, citations, allowed_amounts=allowed)
+        # The computed outcome the drafts' claims are traced
+        # against (outcome_claim_must_trace) — from this run's own
+        # triage + facts, never from the drafts under judgement.
+        outcome = str((state.get("triage") or {}).get("outcome") or "")
+        match_status = str((state.get("facts") or {}).get("match_status") or "")
+        validation = validate_drafts(
+            sub,
+            drafts,
+            citations,
+            allowed_amounts=allowed,
+            outcome=outcome,
+            match_status=match_status,
+        )
         update: dict[str, Any] = {
             "validation": validation.model_dump(),
             "repair_attempted": False,
@@ -759,7 +771,12 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
                 ap_packet=_carry_policy_citations(packet, citations),
             )
             candidate_validation = validate_drafts(
-                sub, candidate, citations, allowed_amounts=allowed
+                sub,
+                candidate,
+                citations,
+                allowed_amounts=allowed,
+                outcome=outcome,
+                match_status=match_status,
             )
             if candidate_validation.passed or _failed_count(candidate_validation) < _failed_count(validation):
                 drafts, validation = candidate, candidate_validation

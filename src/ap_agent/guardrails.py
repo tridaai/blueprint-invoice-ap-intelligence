@@ -141,6 +141,35 @@ def _invoice_amounts(invoice: InvoiceInput) -> list[float]:
     return amounts
 
 
+# Outcome claims: the letter framing the case as matched. Two
+# levels, judged against two different computed facts:
+#
+# * outcome claims ("received and matched", "a clean match") say
+#   what HAPPENED to the case — they are true only when triage
+#   computed clean_match. A live judge caught a letter claiming
+#   "received and matched" over a partial, quantity-variance
+#   match: the figures traced, the promises were clean, and the
+#   framing still overstated the record.
+# * the match claim ("full match") says what the three-way match
+#   computed — true whenever match_status is full_match, even
+#   when the outcome is a hold (a duplicate's match IS full; the
+#   case is held for duplication, not for mismatch).
+#
+# Both are checked affirmatively (a negation window exempts
+# "not fully matched"), over the subject + letter — the
+# supplier-facing claim surfaces. The packet is exempt: it prints
+# the computed facts themselves, labels and all.
+_OUTCOME_CLAIM_PATTERNS = [
+    r"received and matched",
+    r"\bfully matched\b",
+    r"\bmatched in full\b",
+    r"\bmatches the purchase order\b",
+    r"\bhas been (fully )?matched\b",
+    r"\bclean match\b",
+]
+_FULL_MATCH_CLAIM_PATTERN = r"\bfull match\b"
+
+
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _PASSPORT = re.compile(r"\b[A-Z]\d{8}\b")
 
@@ -203,6 +232,13 @@ CHECK_REPAIR_DIRECTIVES = {
         "the packet's tables; the letter refers to them, it does "
         "not restate arithmetic in prose"
     ),
+    "outcome_claim_must_trace": (
+        "state the outcome exactly as computed — take the "
+        "full-match claim ('received and matched', 'fully matched', "
+        "'clean match') out of the subject and letter unless the "
+        "computed outcome is a clean match; a variance, partial, "
+        "or held case is received and under review, never 'matched'"
+    ),
     "states_next_step": (
         'add a line beginning "Next step:" to the supplier letter, '
         "saying what happens now and what (if anything) AP still "
@@ -224,12 +260,18 @@ def validate_drafts(
     drafts: Drafts,
     citations: list[str],
     allowed_amounts: list[float] | None = None,
+    outcome: str | None = None,
+    match_status: str | None = None,
 ) -> Validation:
     """Run all guardrail checks over the drafts. ``passed`` is the
     conjunction — every check here is blocking. ``allowed_amounts``
     is the verified figure registry the letter's amounts must trace
     to (the computed match facts); when omitted it is derived from
-    the invoice itself."""
+    the invoice itself. ``outcome`` / ``match_status`` are the
+    computed triage outcome and match status the drafts' outcome
+    claims are traced against; the production paths (graph,
+    recovery) always supply them — a caller that cannot is told
+    in the check's detail that the claims went unevaluated."""
     letter = drafts.supplier_letter or ""
     packet = drafts.ap_packet or ""
     combined = f"{drafts.subject}\n{letter}\n{packet}"
@@ -380,6 +422,67 @@ def validate_drafts(
             ),
         )
     )
+
+    # Outcome claims must trace to the computed outcome, the way
+    # figures trace to the fact block. A letter that frames a
+    # partial or variance case as "received and matched" overstates
+    # the record even when every figure in it is exact — the live
+    # judge's catch on the quantity-variance case. Scoped to the
+    # subject + letter (the supplier-facing claims); the packet
+    # prints the computed facts and is exempt.
+    claim_text = f"{drafts.subject}\n{letter}"
+    if outcome is None:
+        checks.append(
+            GuardrailCheck(
+                name="outcome_claim_must_trace",
+                passed=True,
+                detail=(
+                    "no computed outcome supplied — outcome claims "
+                    "not evaluated (the pipeline and recovery paths "
+                    "always supply it)"
+                ),
+            )
+        )
+    else:
+        outcome_hit = next(
+            (
+                hit
+                for hit in (
+                    _affirmative(p, claim_text) for p in _OUTCOME_CLAIM_PATTERNS
+                )
+                if hit
+            ),
+            None,
+        )
+        full_hit = _affirmative(_FULL_MATCH_CLAIM_PATTERN, claim_text)
+        outcome_bad = outcome_hit is not None and outcome != "clean_match"
+        match_bad = full_hit is not None and (match_status or "") != "full_match"
+        if outcome_bad:
+            claim_detail = (
+                f"draft claims '{outcome_hit}' but the computed outcome "
+                f"is {outcome} (match {match_status or 'not computed'}) — "
+                "the letter states the outcome exactly as computed; a "
+                "case short of a clean match is received and under "
+                "review, never 'matched'"
+            )
+        elif match_bad:
+            claim_detail = (
+                f"draft claims '{full_hit}' but the computed match "
+                f"status is {match_status or 'not computed'} — the "
+                "match is stated as computed, never rounded up to full"
+            )
+        else:
+            claim_detail = (
+                f"no outcome claim exceeds the computed outcome "
+                f"({outcome} · match {match_status or 'not computed'})"
+            )
+        checks.append(
+            GuardrailCheck(
+                name="outcome_claim_must_trace",
+                passed=not (outcome_bad or match_bad),
+                detail=claim_detail,
+            )
+        )
 
     next_step = "next step" in combined.lower()
     checks.append(
