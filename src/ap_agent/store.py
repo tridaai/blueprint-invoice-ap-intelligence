@@ -28,6 +28,7 @@ from .config import env_str, load_dotenv
 from .schemas import (
     AgentResult,
     BundleResult,
+    MasterChangeRequest,
     PaymentRun,
     RecoveryPack,
     StatementReconciliation,
@@ -155,6 +156,7 @@ class InMemoryStore:
         self._reconciliations: dict[str, str] = {}
         self._payment_runs: dict[str, str] = {}
         self._recovery_packs: dict[str, str] = {}
+        self._master_changes: dict[str, str] = {}
         self._bundles: dict[str, str] = {}
         self._lock = threading.Lock()
 
@@ -199,6 +201,29 @@ class InMemoryStore:
         with self._lock:
             payload = self._recovery_packs.get(invoice_id)
         return RecoveryPack.model_validate_json(payload) if payload else None
+
+    def list_recovery_packs(self) -> list[RecoveryPack]:
+        with self._lock:
+            payloads = [
+                self._recovery_packs[k] for k in sorted(self._recovery_packs)
+            ]
+        return [RecoveryPack.model_validate_json(p) for p in payloads]
+
+    def save_master_change(self, change: MasterChangeRequest) -> None:
+        with self._lock:
+            self._master_changes[change.request_id] = change.model_dump_json()
+
+    def get_master_change(self, request_id: str) -> MasterChangeRequest | None:
+        with self._lock:
+            payload = self._master_changes.get(request_id)
+        return MasterChangeRequest.model_validate_json(payload) if payload else None
+
+    def list_master_changes(self) -> list[MasterChangeRequest]:
+        with self._lock:
+            payloads = [
+                self._master_changes[k] for k in sorted(self._master_changes)
+            ]
+        return [MasterChangeRequest.model_validate_json(p) for p in payloads]
 
     def save_bundle(self, bundle: BundleResult) -> None:
         with self._lock:
@@ -408,6 +433,30 @@ class PostgresStore:
     def get_recovery_pack(self, invoice_id: str) -> RecoveryPack | None:
         data = self._get_blob("recovery_packs", "invoice_id", invoice_id)
         return RecoveryPack.model_validate(data) if data is not None else None
+
+    def list_recovery_packs(self) -> list[RecoveryPack]:
+        packs = [
+            RecoveryPack.model_validate(d)
+            for d in self._all_blobs("recovery_packs")
+        ]
+        return sorted(packs, key=lambda p: p.duplicate_invoice_id)
+
+    def save_master_change(self, change: MasterChangeRequest) -> None:
+        self._save_blob(
+            "master_change_requests", "request_id", change.request_id,
+            change.model_dump_json(),
+        )
+
+    def get_master_change(self, request_id: str) -> MasterChangeRequest | None:
+        data = self._get_blob("master_change_requests", "request_id", request_id)
+        return MasterChangeRequest.model_validate(data) if data is not None else None
+
+    def list_master_changes(self) -> list[MasterChangeRequest]:
+        changes = [
+            MasterChangeRequest.model_validate(d)
+            for d in self._all_blobs("master_change_requests")
+        ]
+        return sorted(changes, key=lambda c: c.request_id)
 
     def save_bundle(self, bundle: BundleResult) -> None:
         self._save_blob(

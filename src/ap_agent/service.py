@@ -46,6 +46,7 @@ from .queue import build_queue
 from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
+from .master_changes import next_request_id, proposed_from_invoice
 from .model_backends import ModelBackend, get_backend
 from .ocr import get_ocr_engine
 from .ports import Checkpointer, DocVision, EventSink, OcrEngine
@@ -58,10 +59,13 @@ from .schemas import (
     CreditNoteMatch,
     InvoiceBundleInput,
     InvoiceInput,
+    MasterChangeEvent,
+    MasterChangeRequest,
     PaymentRun,
     QueueView,
     RecoveryPack,
     StatementReconciliation,
+    SupplierMasterRecord,
     SupplierStatement,
 )
 from .store import ApprovalRecord, default_store, find_duplicate, supplier_summary
@@ -256,6 +260,11 @@ class InvoiceService:
         retriever: Retriever,
         event_sink: EventSink | None = None,
     ) -> AgentResult:
+        # Governed master changes whose effective date has arrived
+        # land in the supplier master before screening runs, so the
+        # bank check below compares against the record in force
+        # today — never against a merely-proposed one.
+        self.apply_due_master_changes()
         # Memory: what the store already knows about this supplier and
         # this supplier becomes diagnosis evidence for the new analysis.
         # The raw entries ride along too — the diagnosis tool loop
@@ -846,6 +855,236 @@ class InvoiceService:
         )
         store.save_recovery_pack(pack)
         return pack
+
+    # --- Governed supplier-master changes ---------------------------
+
+    def propose_master_change(
+        self,
+        proposed: SupplierMasterRecord,
+        *,
+        actor: str,
+        source: str = "operator",
+        source_invoice_id: str = "",
+        reason: str = "",
+        effective_from: str = "",
+    ) -> MasterChangeRequest:
+        """Propose a change to a supplier's master record.
+
+        The proposal changes nothing the fraud screen reads: the
+        request is stored as ``pending``, snapshotting the record it
+        was made against, and the master keeps returning the old
+        record — so documents stating the new details keep reading
+        as a mismatch — until a second operator approves the change
+        and its effective date arrives.
+        """
+        if source not in ("operator", "document"):
+            raise ValueError(
+                f"Unknown change source: {source!r} — a change is "
+                "proposed by an operator or from a document"
+            )
+        if source == "document" and not source_invoice_id:
+            raise ValueError(
+                "a document-sourced change must name the invoice it "
+                "came from (source_invoice_id)"
+            )
+        if not proposed.supplier_name.strip():
+            raise ValueError("the proposed record names no supplier")
+        if not (proposed.account_number or proposed.iban or proposed.sort_code):
+            raise ValueError(
+                "a master change must state at least one bank "
+                "identifier (account number, sort code, or IBAN)"
+            )
+        if effective_from and _parse_date(effective_from) is None:
+            raise ValueError(
+                f"effective_from {effective_from!r} is not an ISO date"
+            )
+        store = self._get_store()
+        current = self._get_supplier_master().get_supplier(proposed.supplier_name)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        change = MasterChangeRequest(
+            request_id=next_request_id(
+                [c.request_id for c in store.list_master_changes()]
+            ),
+            supplier_name=proposed.supplier_name,
+            proposed=proposed,
+            current=current,
+            source=source,
+            source_invoice_id=source_invoice_id,
+            reason=reason,
+            proposed_by=actor,
+            proposed_at=stamp,
+            effective_from=effective_from,
+            history=[
+                MasterChangeEvent(
+                    status="proposed", actor=actor, at=stamp, note=reason
+                )
+            ],
+        )
+        store.save_master_change(change)
+        return change
+
+    def propose_master_change_from_invoice(
+        self, invoice_id: str, *, actor: str, reason: str = ""
+    ) -> MasterChangeRequest:
+        """Propose a master change from a processed invoice: the bank
+        details its documents state become the proposal (overlaid on
+        the current record by ``master_changes.proposed_from_invoice``).
+
+        This is the governed path for the fraud case itself — a
+        supplier's "our bank has changed" note becomes a pending
+        request for out-of-band verification, not an update."""
+        store = self._get_store()
+        record = store.get(invoice_id)
+        if record is None:
+            raise KeyError(f"Unknown invoice_id: {invoice_id} (analyze it first)")
+        invoice = InvoiceInput.model_validate(record.invoice or {})
+        current = self._get_supplier_master().get_supplier(invoice.supplier_name)
+        proposed, notes = proposed_from_invoice(invoice, current)
+        full_reason = reason or "bank details stated in the supplier's document"
+        if notes:
+            full_reason = f"{full_reason} — {'; '.join(notes)}"
+        return self.propose_master_change(
+            proposed,
+            actor=actor,
+            source="document",
+            source_invoice_id=invoice_id,
+            reason=full_reason,
+        )
+
+    def list_master_changes(self, status: str = "") -> list[MasterChangeRequest]:
+        changes = self._get_store().list_master_changes()
+        return [c for c in changes if not status or c.status == status]
+
+    def get_master_change(self, request_id: str) -> MasterChangeRequest | None:
+        return self._get_store().get_master_change(request_id)
+
+    def decide_master_change(
+        self,
+        request_id: str,
+        *,
+        actor: str,
+        approve: bool,
+        verification_ref: str = "",
+        note: str = "",
+    ) -> MasterChangeRequest:
+        """Record the second operator's decision on a master change.
+
+        Four-eyes is enforced here: the proposer cannot decide their
+        own change. Approval additionally requires the out-of-band
+        verification reference — the document (or colleague) asking
+        for new bank details is never itself the evidence. An
+        approved change applies immediately when its effective date
+        has arrived; a future-dated one waits for
+        :meth:`apply_due_master_changes`. Rejection leaves the
+        master exactly as it was.
+        """
+        store = self._get_store()
+        change = store.get_master_change(request_id)
+        if change is None:
+            raise KeyError(
+                f"Unknown master change: {request_id} (propose it first)"
+            )
+        if change.status != "pending":
+            raise ValueError(
+                f"Master change {request_id} is already {change.status} "
+                f"(decided by {change.decided_by})"
+            )
+        if actor == change.proposed_by:
+            raise ValueError(
+                "four-eyes on master data: "
+                f"{change.proposed_by} proposed this change and cannot "
+                "also decide it — a second operator must approve or "
+                "reject a bank-detail change"
+            )
+        if approve and not verification_ref.strip():
+            raise ValueError(
+                "approving a bank-detail change requires the out-of-band "
+                "verification reference (e.g. 'call-back to the number "
+                "on file, confirmed with the supplier's AP contact') — "
+                "the document that asked for the change is not evidence"
+            )
+        now = datetime.now(timezone.utc)
+        stamp = now.isoformat(timespec="seconds")
+        change.decided_by = actor
+        change.decided_at = stamp
+        change.decision_note = note
+        if not approve:
+            change.status = "rejected"
+            change.history.append(
+                MasterChangeEvent(
+                    status="rejected", actor=actor, at=stamp, note=note
+                )
+            )
+            store.save_master_change(change)
+            return change
+        change.status = "approved"
+        change.verification_ref = verification_ref
+        if not change.effective_from:
+            change.effective_from = now.date().isoformat()
+        change.history.append(
+            MasterChangeEvent(
+                status="approved",
+                actor=actor,
+                at=stamp,
+                note=note or f"verified out-of-band: {verification_ref}",
+            )
+        )
+        store.save_master_change(change)
+        effective = _parse_date(change.effective_from)
+        if effective is not None and effective <= now.date():
+            self._apply_master_change(
+                change,
+                actor=actor,
+                note="applied on approval — the effective date has arrived",
+            )
+        return change
+
+    def _apply_master_change(
+        self, change: MasterChangeRequest, *, actor: str, note: str
+    ) -> MasterChangeRequest:
+        """Land an approved change in the supplier master and record
+        the application on the request's audit history. This is the
+        only write path from the change workflow into the master."""
+        self._get_supplier_master().upsert_supplier(change.proposed)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        change.applied_at = stamp
+        change.history.append(
+            MasterChangeEvent(status="applied", actor=actor, at=stamp, note=note)
+        )
+        self._get_store().save_master_change(change)
+        return change
+
+    def apply_due_master_changes(self, as_of: str = "") -> list[MasterChangeRequest]:
+        """Apply every approved master change whose effective date
+        has arrived (promotion sweep). Called at the top of each
+        analysis, so screening always compares against the record in
+        force today, and exposed as an endpoint for operators.
+        Returns the changes applied by this call."""
+        anchor = (
+            _parse_date(as_of)
+            if as_of
+            else datetime.now(timezone.utc).date()
+        )
+        if anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        applied: list[MasterChangeRequest] = []
+        for change in self._get_store().list_master_changes():
+            if change.status != "approved" or change.applied_at:
+                continue
+            effective = _parse_date(change.effective_from)
+            if effective is None or effective > anchor:
+                continue
+            applied.append(
+                self._apply_master_change(
+                    change,
+                    actor="system",
+                    note=(
+                        f"effective date {change.effective_from} reached — "
+                        "applied to the supplier master"
+                    ),
+                )
+            )
+        return applied
 
     def queue_view(self, as_of: str = "") -> QueueView:
         """The AP aging queue: invoices still at the gate, aged by

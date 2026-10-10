@@ -44,6 +44,10 @@ from .schemas import (
     DecisionRequest,
     InvoiceBundleInput,
     InvoiceInput,
+    MasterChangeDecisionRequest,
+    MasterChangeFromInvoiceRequest,
+    MasterChangeProposeRequest,
+    MasterChangeRequest,
     PaymentRun,
     PaymentRunRequest,
     QueueView,
@@ -465,6 +469,83 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 to_status=request.to_status,
                 actor=_decision_actor(request),
                 note=request.note or "",
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/suppliers/master-changes", response_model=MasterChangeRequest, dependencies=_AUTH)
+    def propose_master_change(request: MasterChangeProposeRequest) -> MasterChangeRequest:
+        """Propose a governed change to a supplier's master record.
+        The proposal applies nothing: until a second operator
+        approves it (with an out-of-band verification reference) and
+        its effective date arrives, the fraud screen keeps comparing
+        documents against the current record."""
+        try:
+            return svc.propose_master_change(
+                request.proposed,
+                actor=_decision_actor(request),
+                source=request.source,
+                source_invoice_id=request.source_invoice_id,
+                reason=request.reason,
+                effective_from=request.effective_from,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/suppliers/master-changes", response_model=list[MasterChangeRequest], dependencies=_AUTH)
+    def list_master_changes(status: str = Query(default="")) -> list[MasterChangeRequest]:
+        return svc.list_master_changes(status=status)
+
+    @app.post("/suppliers/master-changes/apply-due", dependencies=_AUTH)
+    def apply_due_master_changes(as_of: str = Query(default="")) -> dict:
+        """Promotion sweep: apply approved changes whose effective
+        date has arrived. (Analyses run the same sweep automatically;
+        this is the operator's explicit handle.)"""
+        try:
+            applied = svc.apply_due_master_changes(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"applied": [c.request_id for c in applied]}
+
+    @app.get("/suppliers/master-changes/{request_id}", response_model=MasterChangeRequest, dependencies=_AUTH)
+    def get_master_change(request_id: str) -> MasterChangeRequest:
+        change = svc.get_master_change(request_id)
+        if change is None:
+            raise HTTPException(status_code=404, detail="Master change not proposed yet.")
+        return change
+
+    @app.post("/suppliers/master-changes/{request_id}/decide", response_model=MasterChangeRequest, dependencies=_AUTH)
+    def decide_master_change(request_id: str, request: MasterChangeDecisionRequest) -> MasterChangeRequest:
+        """The second operator's decision: proposer ≠ approver, and
+        approval requires the out-of-band verification reference.
+        Approval applies the change when its effective date has
+        arrived; rejection leaves the master untouched."""
+        try:
+            return svc.decide_master_change(
+                request_id,
+                actor=_decision_actor(request),
+                approve=request.approve,
+                verification_ref=request.verification_ref,
+                note=request.note,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/invoices/{invoice_id}/master-change", response_model=MasterChangeRequest, dependencies=_AUTH)
+    def propose_master_change_from_invoice(invoice_id: str, request: MasterChangeFromInvoiceRequest) -> MasterChangeRequest:
+        """Propose a master change from a processed invoice: the bank
+        details its documents state become a pending, governed
+        request — the governed path for a supplier's 'our bank has
+        changed' note. Nothing is applied by proposing."""
+        try:
+            return svc.propose_master_change_from_invoice(
+                invoice_id,
+                actor=_decision_actor(request),
+                reason=request.reason,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

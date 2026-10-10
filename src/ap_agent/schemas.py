@@ -614,6 +614,99 @@ class BankMasterCheck(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Governed supplier-master changes (a change is proposed, approved by a
+# second operator, and only then applied — effective-dated, audited)
+# ---------------------------------------------------------------------------
+
+class MasterChangeEvent(BaseModel):
+    """One entry in a master change's audit history: the proposal,
+    the decision, and the application to the master, each with its
+    actor and timestamp."""
+
+    status: str  # proposed | approved | rejected | applied
+    actor: str = ""
+    at: str = ""  # ISO timestamp
+    note: str = ""
+
+
+class MasterChangeRequest(BaseModel):
+    """A governed change to one supplier's master record.
+
+    Bank-detail changes are the classic AP fraud vector, so the
+    master never changes on a document's say-so: an operator (or a
+    document, via an operator) *proposes* the change, a second
+    operator *approves* it — proposer ≠ approver — recording the
+    out-of-band verification (the call-back to a number already on
+    file) that backs the decision, and only then is the change
+    applied to the master, on or after its effective date. Until
+    it is applied, the fraud screen keeps comparing documents
+    against the previous record, so the new details still read as a
+    mismatch. ``current`` snapshots the master record the proposal
+    was made against, so the approver sees old vs new."""
+
+    request_id: str
+    supplier_name: str
+    proposed: SupplierMasterRecord
+    current: Optional[SupplierMasterRecord] = None  # None = new supplier
+    source: str = "operator"  # operator | document
+    source_invoice_id: str = ""  # set when source == "document"
+    reason: str = ""
+    proposed_by: str = ""
+    proposed_at: str = ""
+    status: str = "pending"  # pending | approved | rejected
+    decided_by: Optional[str] = None
+    decided_at: Optional[str] = None
+    decision_note: str = ""
+    verification_ref: str = ""  # out-of-band verification, recorded at approval
+    effective_from: str = ""  # ISO date the change takes effect
+    applied_at: Optional[str] = None  # when the change landed in the master
+    history: list[MasterChangeEvent] = Field(default_factory=list)
+
+
+class MasterChangeProposeRequest(BaseModel):
+    """Propose a master change directly (operator-entered details)."""
+
+    proposed: SupplierMasterRecord
+    source: str = "operator"  # operator | document
+    source_invoice_id: str = ""
+    reason: str = ""
+    effective_from: str = ""  # ISO date; "" = effective on approval
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class MasterChangeFromInvoiceRequest(BaseModel):
+    """Propose a master change from a processed invoice's documents:
+    the bank details the document states become the proposal."""
+
+    reason: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class MasterChangeDecisionRequest(BaseModel):
+    """The second operator's decision on a master change."""
+
+    approve: bool
+    verification_ref: str = ""  # required to approve: the out-of-band check
+    note: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+# ---------------------------------------------------------------------------
 # Payment runs (proposed from approved invoices — never executed)
 # ---------------------------------------------------------------------------
 

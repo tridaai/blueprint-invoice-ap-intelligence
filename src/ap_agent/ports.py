@@ -62,7 +62,7 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
         RetrievedPolicy,
         VisionResult,
     )
-    from .schemas import BundleResult, PaymentRun, RecoveryPack
+    from .schemas import BundleResult, MasterChangeRequest, PaymentRun, RecoveryPack
     from .schemas import StatementReconciliation, SupplierMasterRecord
     from .store import ApprovalRecord
 
@@ -129,6 +129,14 @@ class Store(Protocol):
     def save_recovery_pack(self, pack: "RecoveryPack") -> None: ...
 
     def get_recovery_pack(self, invoice_id: str) -> "RecoveryPack | None": ...
+
+    def list_recovery_packs(self) -> list["RecoveryPack"]: ...
+
+    def save_master_change(self, change: "MasterChangeRequest") -> None: ...
+
+    def get_master_change(self, request_id: str) -> "MasterChangeRequest | None": ...
+
+    def list_master_changes(self) -> list["MasterChangeRequest"]: ...
 
     def save_bundle(self, bundle: "BundleResult") -> None: ...
 
