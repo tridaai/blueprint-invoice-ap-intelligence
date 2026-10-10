@@ -41,9 +41,16 @@ def print_trace(
 ) -> None:
     backend = backend or build_backend()
     retriever = retriever or build_retriever()
+    from .supplier_master import get_supplier_master
+
     invoices = sample_invoice_models()
     invoice = invoices[index]
-    result = run_invoice(invoice, backend=backend, retriever=retriever)
+    result = run_invoice(
+        invoice,
+        backend=backend,
+        retriever=retriever,
+        supplier_master=get_supplier_master(),
+    )
     t = result.triage
     backend_desc = (
         "offline mock backend"
@@ -79,6 +86,9 @@ def print_trace(
         print("      (bank-detail change request: case blocked for payment prep; the new details are never echoed in drafts [AP-BANK-01])")
     if not result.injection_flags and not result.fraud_flags:
         print("    No injection or fraud patterns found in supplier text.")
+    if result.bank_master_check is not None:
+        mc = result.bank_master_check
+        print(f"    Supplier master check: {mc.status} — documented details vs the approved record (masked: matched {mc.matched or '—'}, mismatched {mc.mismatched or '—'})")
     for ext in result.extractions:
         notable = [fl for fl in ext.fields if fl.status not in ("match", "source_provided")]
         if notable:
