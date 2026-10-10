@@ -1445,6 +1445,112 @@ def group_answer_follow_through(
     }
 
 
+def group_reexport_analytics(runs: list[PaymentRun]) -> dict:
+    """The re-exports, read back as a population: did the
+    corrected files fare better than the ones that bounced?
+
+    Each re-exported group is graded by its standing receipt —
+    the bank's eventual word on the solo file: accepted (the
+    correction worked), rejected again (the group bounced
+    twice, a pattern with a supplier and a reason attached),
+    or still awaiting its answer. Around that spine, the
+    rejection population itself is read: the bank's reasons as
+    patterns (the same words, counted — a bank whose groups
+    keep bouncing for one reason is a profile conversation,
+    and this is the read that starts it), the suppliers whose
+    groups were rejected more than once across the whole
+    feedback loop, and the drift the re-exports re-priced —
+    the discount value the second files had to give back.
+    Pure over the runs; the receipts and re-export records are
+    the evidence, never recomputed."""
+    from .handoff import batch_group_members, current_group_receipts
+
+    reexports_total = 0
+    accepted = rejected_again = awaiting_answer = 0
+    groups_bounced_twice = 0
+    reasons: dict[str, int] = {}
+    supplier_rejections: dict[str, int] = {}
+    drift_by_currency: dict[str, float] = {}
+    drift_members = 0
+    for run in runs:
+        if not run.handoff_batch_booking or not run.handoff_generated_at:
+            continue
+        members_by_group = batch_group_members(run)
+        if not members_by_group:
+            continue
+        standing = current_group_receipts(run)
+        suppliers_by_invoice = {
+            line.invoice_id: line.supplier_name for line in run.lines
+        }
+        rejected_by_group: dict[str, int] = {}
+        for receipt in run.handoff_group_receipts:
+            if receipt.status != "rejected":
+                continue
+            rejected_by_group[receipt.execution_date] = (
+                rejected_by_group.get(receipt.execution_date, 0) + 1
+            )
+            if receipt.detail:
+                reasons[receipt.detail] = reasons.get(receipt.detail, 0) + 1
+            members = receipt.member_invoice_ids or members_by_group.get(
+                receipt.execution_date, []
+            )
+            for supplier in {
+                suppliers_by_invoice.get(m, "") for m in members
+            } - {""}:
+                supplier_rejections[supplier] = (
+                    supplier_rejections.get(supplier, 0) + 1
+                )
+        groups_bounced_twice += sum(
+            1 for count in rejected_by_group.values() if count >= 2
+        )
+        reexports_total += len(run.handoff_group_reexports)
+        for entry in run.handoff_group_reexports:
+            if entry.drift_total:
+                drift_by_currency[run.currency] = round(
+                    drift_by_currency.get(run.currency, 0.0)
+                    + entry.drift_total,
+                    2,
+                )
+            drift_members += len(entry.drift)
+        for execution_date in {
+            entry.execution_date for entry in run.handoff_group_reexports
+        }:
+            receipt = standing.get(execution_date)
+            if receipt is None:
+                awaiting_answer += 1
+            elif receipt.status == "accepted":
+                accepted += 1
+            elif receipt.status == "rejected":
+                rejected_again += 1
+    decided = accepted + rejected_again
+    return {
+        "reexports_total": reexports_total,
+        "groups_reexported": accepted + rejected_again + awaiting_answer,
+        "accepted_after_reexport": accepted,
+        "rejected_again": rejected_again,
+        "awaiting_answer": awaiting_answer,
+        "acceptance_rate": (
+            round(accepted / decided, 4) if decided else None
+        ),
+        "groups_bounced_twice": groups_bounced_twice,
+        "rejection_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                reasons.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+        ],
+        "repeat_rejection_suppliers": [
+            {"supplier_name": supplier, "rejections": count}
+            for supplier, count in sorted(
+                supplier_rejections.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+            if count >= 2
+        ],
+        "drift_repriced_by_currency": drift_by_currency,
+        "drift_members_repriced": drift_members,
+    }
+
+
 def handoff_metrics(
     runs: list[PaymentRun],
     *,
@@ -1550,6 +1656,11 @@ def handoff_metrics(
             as_of=as_of or datetime.now(timezone.utc).date(),
             aging_days=group_aging_days,
         ),
+        # The re-exports as a population: the corrected groups'
+        # eventual standing, the bank's rejection reasons as
+        # patterns, the repeat-rejection suppliers, and the
+        # drift the second files re-priced.
+        "group_reexports": group_reexport_analytics(runs),
         "four_eyes_wait": {
             "runs_second_confirmed": second_confirmed_runs,
             "cost_by_currency": wait_cost_value,
