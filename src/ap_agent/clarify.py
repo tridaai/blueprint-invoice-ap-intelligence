@@ -21,9 +21,17 @@ sent.
 The request is composed, never sent — like every output here it stops
 at the approver gate, and leaves only if a human approves it and
 routes it through their own system.
+
+The loop closes here too: when the supplier (or purchasing) answers,
+the reply is recorded against the open request and analysed in code
+(:func:`analyse_information_reply`) — which of the missing items it
+supplied, which are still missing, and whether the gap is closed —
+so the resolution lives on the record, not in someone's inbox.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from .guardrails import repair_directive, validate_information_request
 from .model_backends import DraftContext
@@ -41,9 +49,26 @@ _ITEM_PHRASES = {
     "legible_invoice": "a legible copy of the invoice — the scan received could not be read reliably",
 }
 
+#: The canonical missing-item keys — the vocabulary a reply is
+#: recorded and analysed in (a reply names keys; the record names
+#: phrases, via :func:`humanize_item`).
+INFORMATION_ITEM_KEYS = tuple(_ITEM_PHRASES)
+
 
 def humanize_item(item: str) -> str:
     return _ITEM_PHRASES.get(item, item.replace("_", " "))
+
+
+def missing_item_keys(facts: MatchFacts) -> list[str]:
+    """The missing items' canonical keys, computed from the match
+    facts — the same evidence as :func:`missing_items`, in the
+    reply loop's vocabulary."""
+    keys: list[str] = []
+    if not facts.has_po:
+        keys.append("purchase_order")
+    if facts.has_po and not facts.has_receipt:
+        keys.append("goods_receipt")
+    return keys
 
 
 def missing_items(facts: MatchFacts, extractions: list | None = None) -> list[str]:
@@ -52,12 +77,7 @@ def missing_items(facts: MatchFacts, extractions: list | None = None) -> list[st
     Driven by what the match could NOT see: no PO attached, no goods
     receipt attached. Legibility is added by the caller via the
     ``unreadable`` triage (see ``needs_information``)."""
-    items: list[str] = []
-    if not facts.has_po:
-        items.append(humanize_item("purchase_order"))
-    if facts.has_po and not facts.has_receipt:
-        items.append(humanize_item("goods_receipt"))
-    return items
+    return [humanize_item(key) for key in missing_item_keys(facts)]
 
 
 def needs_information(triage_outcome: str, items: list[str]) -> bool:
@@ -153,11 +173,10 @@ def build_information_request(
     still fails falls back to the template — the failure stays on
     the record (``rejected_draft_checks``), never in the outbox.
     """
-    items = missing_items(facts, extractions)
-    if triage_outcome == "unreadable":
-        legible = humanize_item("legible_invoice")
-        if legible not in items:
-            items = [*items, legible]
+    keys = missing_item_keys(facts)
+    if triage_outcome == "unreadable" and "legible_invoice" not in keys:
+        keys = [*keys, "legible_invoice"]
+    items = [humanize_item(key) for key in keys]
     if not needs_information(triage_outcome, items):
         return None
 
@@ -211,8 +230,78 @@ def build_information_request(
     return InformationRequest(
         needed=True,
         missing_items=items,
+        missing_item_keys=keys,
         message=message,
+        requested_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         validation=validate(message),
         draft_source=draft_source,
         rejected_draft_checks=rejected,
+    )
+
+
+def analyse_information_reply(
+    request: InformationRequest,
+    supplied_keys: list[str],
+    *,
+    received_at: str,
+    note: str = "",
+    recorded_by: str = "",
+) -> InformationRequest:
+    """Analyse one reply against the open request, in code.
+
+    The reply is data, not a verdict: the items it supplied are
+    intersected with the items the request computed as missing,
+    and the resolution is arithmetic — everything supplied closes
+    the gap (``answered``), some of it moves the case to
+    ``partially_answered`` with the still-missing items named,
+    and a reply that supplies nothing the request asked for
+    leaves the status at ``awaiting_reply`` with the attempt on
+    the record. Replies accumulate: a second reply adds its items
+    to the first's, and ``reply_received_at`` moves to the latest
+    arrival — the wait the queue ages runs from there. Supplied
+    keys the request never asked for are ignored here (the
+    service refuses unknown keys outright; a known key that was
+    not missing is surplus, recorded nowhere). Pure: returns the
+    updated request; the caller persists it.
+    """
+    missing_keys = list(request.missing_item_keys)
+    if not missing_keys:
+        # Requests stored before the keys were kept: recover them
+        # from the phrases — the phrase IS the humanised key.
+        by_phrase = {humanize_item(key): key for key in INFORMATION_ITEM_KEYS}
+        missing_keys = [
+            by_phrase[phrase]
+            for phrase in request.missing_items
+            if phrase in by_phrase
+        ]
+    already = {
+        phrase
+        for phrase in request.reply_supplied_items
+    }
+    supplied_phrases = [
+        humanize_item(key)
+        for key in missing_keys
+        if key in supplied_keys and humanize_item(key) not in already
+    ]
+    all_supplied = [*request.reply_supplied_items, *supplied_phrases]
+    still_missing = [
+        humanize_item(key)
+        for key in missing_keys
+        if humanize_item(key) not in all_supplied
+    ]
+    if not still_missing and missing_keys:
+        status = "answered"
+    elif supplied_phrases or all_supplied:
+        status = "partially_answered"
+    else:
+        status = "awaiting_reply"
+    return request.model_copy(
+        update={
+            "reply_status": status,
+            "reply_received_at": received_at,
+            "reply_supplied_items": all_supplied,
+            "reply_still_missing": still_missing,
+            "reply_note": note if note else request.reply_note,
+            "reply_recorded_by": recorded_by or request.reply_recorded_by,
+        }
     )

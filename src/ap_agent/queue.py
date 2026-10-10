@@ -55,6 +55,15 @@ cluster becomes a work item when it is big enough
 and a waiting one — the double-payment shape itself, at any
 size. The item carries the graph (members + screened edges),
 so the case is worked whole, not record by record.
+
+**Information waits** age here too. An invoice blocked on an
+information request waits on someone outside the building —
+purchasing owes a PO, the supplier owes a legible copy — and
+that wait used to be invisible: the case sat at the gate with
+nothing ageing it. Past ``INFORMATION_WAIT_AGING_DAYS`` an
+unanswered request (or one a partial reply restarted) joins
+the worklist with the still-missing items named, so the chase
+has an owner and an age like every other stall.
 """
 
 from __future__ import annotations
@@ -65,6 +74,7 @@ from typing import Iterable
 from .matching import _parse_date
 from .schemas import (
     FourEyesAgingItem,
+    InformationWaitItem,
     OpenPostingItem,
     PaymentRun,
     QueueItem,
@@ -292,6 +302,76 @@ def twin_escalation_items(
     return items
 
 
+DEFAULT_INFORMATION_WAIT_AGING_DAYS = 3
+
+
+def information_wait_items(
+    records: list[ApprovalRecord],
+    *,
+    as_of: date,
+    aging_days: int = DEFAULT_INFORMATION_WAIT_AGING_DAYS,
+) -> list[InformationWaitItem]:
+    """The information requests that have outlasted their wait:
+    invoices still at the gate whose request is unanswered — or
+    answered only in part — past the aging threshold.
+
+    The wait's clock depends on where the loop stands. With no
+    reply recorded, it runs from the request's own stamp
+    (``requested_at``; requests stored before the stamp existed
+    fall back to the invoice's submission date). A partial reply
+    restarts it: the supplier answered, the ball moved, and the
+    remaining items have been owed only since that answer landed
+    (``reply_received_at``). A fully answered request closes the
+    wait whatever its age, and a decided invoice is not waiting
+    at all. Work order: the longest wait first.
+    """
+    items: list[InformationWaitItem] = []
+    for record in records:
+        result = record.result
+        if result.status != "awaiting_approver":
+            continue
+        request = result.information_request
+        if not result.needs_information or request is None:
+            continue
+        if request.reply_status == "answered":
+            continue
+        invoice = record.invoice or {}
+        if request.reply_status == "partially_answered" and request.reply_received_at:
+            anchor = _parse_date(request.reply_received_at)
+            still_missing = request.reply_still_missing or request.missing_items
+        else:
+            anchor = _parse_date(request.requested_at) or _parse_date(
+                str(invoice.get("submitted_at", ""))
+            ) or _parse_date(str(invoice.get("invoice_date", "")))
+            still_missing = request.missing_items
+            if request.reply_received_at:
+                # A reply landed but resolved nothing the request
+                # asked for: the remaining items are everything.
+                still_missing = request.reply_still_missing or still_missing
+        if anchor is None:
+            continue
+        waiting_days = (as_of - anchor).days
+        if waiting_days <= aging_days:
+            continue
+        items.append(
+            InformationWaitItem(
+                invoice_id=result.invoice_id,
+                supplier_name=result.supplier_name
+                or str(invoice.get("supplier_name", "")),
+                invoice_number=str(invoice.get("invoice_number", "")),
+                outcome=result.triage.outcome,
+                requested_at=request.requested_at,
+                reply_status=request.reply_status,
+                reply_received_at=request.reply_received_at,
+                waiting_days=waiting_days,
+                aging_threshold_days=aging_days,
+                still_missing=list(still_missing),
+            )
+        )
+    items.sort(key=lambda item: (-(item.waiting_days or 0), item.invoice_id))
+    return items
+
+
 def _bucket(days_overdue: int | None, due: date | None, as_of: date) -> str:
     if due is None or days_overdue is None:
         return "no_due_date"
@@ -321,6 +401,8 @@ def build_queue(
     twin_items: Iterable[TwinEscalationItem] = (),
     twin_min_size: int = DEFAULT_TWIN_CLUSTER_MIN_SIZE,
     twin_value_threshold: float = DEFAULT_TWIN_CLUSTER_VALUE_THRESHOLD,
+    information_waits: Iterable[InformationWaitItem] = (),
+    information_wait_aging_days: int = DEFAULT_INFORMATION_WAIT_AGING_DAYS,
 ) -> QueueView:
     """The aging queue over the store's records, as of a date
     (today when not given — tests and API callers pass it
@@ -330,9 +412,11 @@ def build_queue(
     action items, oldest first (``posting.approved_not_posted``
     already orders them). Four-eyes runs whose second
     confirmation has outlasted the aging threshold join them
-    (see :func:`four_eyes_aging`), and twin clusters past their
+    (see :func:`four_eyes_aging`), twin clusters past their
     escalation triggers join as cases with their graphs (see
-    :func:`twin_escalation_items`)."""
+    :func:`twin_escalation_items`), and information waits past
+    their aging threshold ride along computed by the service
+    (see :func:`information_wait_items`)."""
     as_of = as_of or date.today()
     items: list[QueueItem] = []
     triage_mix: dict[str, int] = {}
@@ -400,6 +484,7 @@ def build_queue(
         payment_runs, as_of=as_of, aging_days=four_eyes_aging_days
     )
     twin_list = list(twin_items)
+    wait_list = list(information_waits)
     return QueueView(
         as_of=as_of.isoformat(),
         count=len(items),
@@ -423,4 +508,7 @@ def build_queue(
         twin_escalation_count=len(twin_list),
         twin_cluster_min_size=twin_min_size,
         twin_cluster_value_threshold=twin_value_threshold,
+        information_waits=wait_list,
+        information_wait_count=len(wait_list),
+        information_wait_aging_days=information_wait_aging_days,
     )

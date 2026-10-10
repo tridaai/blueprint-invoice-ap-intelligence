@@ -273,6 +273,27 @@ def recovery_case_sla_days() -> int:
     return max(1, env_int("RECOVERY_CASE_SLA_DAYS", RECOVERY_CASE_SLA_DEFAULT_DAYS))
 
 
+# Default aging threshold for an information wait: an invoice
+# blocked on a missing PO / receipt / legible copy waits on
+# someone outside the building, and past this many days without
+# a complete reply the wait joins the approver queue as work
+# (INFORMATION_WAIT_AGING_DAYS overrides it).
+INFORMATION_WAIT_AGING_DEFAULT_DAYS = 3
+
+
+def information_wait_aging_days() -> int:
+    """The configured information-wait aging threshold, in days
+    since the request (or since a partial reply restarted it)."""
+    load_dotenv()
+    return max(
+        0,
+        env_int(
+            "INFORMATION_WAIT_AGING_DAYS",
+            INFORMATION_WAIT_AGING_DEFAULT_DAYS,
+        ),
+    )
+
+
 # Default decision window for a pending master change: a request
 # nobody has decided within this many days expires (MASTER_CHANGE_
 # EXPIRY_DAYS overrides it) — a live bank-detail change must not
@@ -921,6 +942,90 @@ class InvoiceService:
             {"decision": "rejected", "actor": reviewer, "reason": reason},
         )
         return record.result
+
+    def record_information_reply(
+        self,
+        invoice_id: str,
+        *,
+        actor: str,
+        supplied_items: list[str],
+        note: str = "",
+        received_at: str = "",
+    ) -> AgentResult:
+        """Record a reply to the invoice's open information
+        request, and analyse it against the gap.
+
+        The request the agent composed asked for computed items
+        (a PO, a receipt, a legible copy); the answer arrives
+        outside the system and used to live in an inbox, with a
+        human re-linking it to the case by memory. Here the
+        operator records what arrived — the canonical item keys
+        it supplied, when, and a note — and the analysis is
+        arithmetic (clarify.analyse_information_reply): the
+        supplied items close against the missing list, the
+        resolution (answered / partially answered / still
+        awaiting) and the still-missing items are named on the
+        record, and replies accumulate across answers. Recording
+        is bookkeeping: it decides nothing, re-runs nothing, and
+        sends nothing — the approver still works the case at the
+        gate with the gap's state in front of them.
+
+        Guards: the invoice must be carrying an open request
+        (a case that never asked, or whose request is already
+        fully answered, has no loop to close); supplied keys must
+        be the request's vocabulary — an unknown key is refused
+        by name; and a reply must carry something (an item or a
+        note) — an empty recording is a keystroke, not an answer.
+        """
+        from .clarify import INFORMATION_ITEM_KEYS, analyse_information_reply
+
+        unknown = [key for key in supplied_items if key not in INFORMATION_ITEM_KEYS]
+        if unknown:
+            raise ValueError(
+                f"Unknown information item(s): {', '.join(unknown)} — "
+                f"a reply supplies one of: {', '.join(INFORMATION_ITEM_KEYS)}"
+            )
+        if not supplied_items and not note.strip():
+            raise ValueError(
+                "a reply must record something — the item(s) it "
+                "supplied, or a note saying what arrived"
+            )
+        store = self._get_store()
+        record = store.get(invoice_id)
+        if record is None:
+            raise KeyError(f"Unknown invoice_id: {invoice_id} (analyze it first)")
+        result = record.result
+        request = result.information_request
+        if not result.needs_information or request is None:
+            raise ValueError(
+                f"Invoice {invoice_id} carries no information "
+                "request — there is no open loop for a reply to close"
+            )
+        if request.reply_status == "answered":
+            raise ValueError(
+                f"Invoice {invoice_id}'s information request is "
+                "already fully answered — the loop is closed"
+            )
+        if received_at:
+            try:
+                datetime.fromisoformat(received_at)
+            except ValueError:
+                raise ValueError(
+                    f"received_at {received_at!r} is not an ISO "
+                    "date or datetime"
+                ) from None
+            received = received_at
+        else:
+            received = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result.information_request = analyse_information_reply(
+            request,
+            list(supplied_items),
+            received_at=received,
+            note=note.strip(),
+            recorded_by=actor,
+        )
+        store.save(record)
+        return result
 
     def record_posting_receipt(
         self,
@@ -2135,11 +2240,13 @@ class InvoiceService:
         aging threshold (``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``), and
         the twin clusters past their escalation triggers
         (``TWIN_CLUSTER_MIN_SIZE`` / ``TWIN_CLUSTER_VALUE_THRESHOLD``,
-        or any approved+awaiting span), so one worklist shows
-        everything the building still owes an answer for. A pure
-        read over the store — it decides and writes nothing."""
+        or any approved+awaiting span), and the information waits
+        past their aging threshold (``INFORMATION_WAIT_AGING_DAYS``)
+        whose requests no complete reply has closed, so one worklist
+        shows everything the building still owes an answer for. A
+        pure read over the store — it decides and writes nothing."""
         from .posting import approved_not_posted
-        from .queue import twin_escalation_items
+        from .queue import information_wait_items, twin_escalation_items
 
         anchor = _parse_date(as_of) if as_of else None
         store = self._get_store()
@@ -2152,6 +2259,7 @@ class InvoiceService:
         )
         min_size = twin_cluster_min_size()
         value_threshold = twin_cluster_value_threshold()
+        wait_aging = information_wait_aging_days()
         return build_queue(
             records,
             as_of=anchor,
@@ -2166,6 +2274,12 @@ class InvoiceService:
             ),
             twin_min_size=min_size,
             twin_value_threshold=value_threshold,
+            information_waits=information_wait_items(
+                records,
+                as_of=anchor or datetime.now(timezone.utc).date(),
+                aging_days=wait_aging,
+            ),
+            information_wait_aging_days=wait_aging,
         )
 
     def escalation_digest(self, as_of: str = "") -> EscalationDigest:

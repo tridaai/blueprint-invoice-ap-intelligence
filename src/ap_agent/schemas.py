@@ -397,7 +397,16 @@ class Validation(BaseModel):
 class InformationRequest(BaseModel):
     needed: bool = False
     missing_items: list[str] = Field(default_factory=list)
+    # The missing items' canonical keys (purchase_order |
+    # goods_receipt | legible_invoice) beside their humanised
+    # phrases — the vocabulary a supplier's reply is analysed in.
+    missing_item_keys: list[str] = Field(default_factory=list)
     message: str = ""
+    # When the request was composed (the run's stamp). The reply
+    # loop's ageing runs from here; requests stored before the
+    # stamp existed read "" and the queue falls back to the
+    # invoice's own submission date.
+    requested_at: str = ""
     # The request is a supplier-facing letter, so it is policed
     # like one (guardrails.validate_information_request): the
     # stored message's validation rides on the record, with the
@@ -407,6 +416,19 @@ class InformationRequest(BaseModel):
     validation: Optional[Validation] = None
     draft_source: str = "template"
     rejected_draft_checks: list[str] = Field(default_factory=list)
+    # The reply loop: a supplier's answer, recorded against the
+    # open request and analysed in code (clarify.
+    # analyse_information_reply). reply_status runs
+    # awaiting_reply → partially_answered → answered; the
+    # supplied and still-missing items are named in the same
+    # humanised phrases as missing_items, so the record reads
+    # as one account of the gap, not two vocabularies.
+    reply_status: str = "awaiting_reply"
+    reply_received_at: str = ""
+    reply_supplied_items: list[str] = Field(default_factory=list)
+    reply_still_missing: list[str] = Field(default_factory=list)
+    reply_note: str = ""
+    reply_recorded_by: str = ""
 
 
 class AutonomyRecommendation(BaseModel):
@@ -937,6 +959,24 @@ class MasterChangeReproposeRequest(BaseModel):
         return self.actor or self.approver or self.reviewer
 
 
+class InformationReplyRequest(BaseModel):
+    """Record a supplier's reply to an open information request:
+    which of the missing items it supplied (canonical keys —
+    purchase_order | goods_receipt | legible_invoice), when it
+    arrived, and a note. The analysis (what it resolved, what is
+    still missing) is computed in code, never asserted here."""
+
+    supplied_items: list[str] = Field(default_factory=list)
+    note: str = ""
+    received_at: str = ""  # ISO date/datetime; "" = now
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
 # ---------------------------------------------------------------------------
 # Payment runs (proposed from approved invoices — never executed)
 # ---------------------------------------------------------------------------
@@ -1321,6 +1361,33 @@ class TwinEscalationItem(BaseModel):
     edges: list[dict] = Field(default_factory=list)  # screened duplicate_of edges
 
 
+class InformationWaitItem(BaseModel):
+    """One invoice blocked on an information request nobody has
+    fully answered, aged onto the approver's worklist.
+
+    The request leaves the building (a human sends it through
+    their own system), and the wait that follows was invisible:
+    the invoice sat at the gate with its drafts while purchasing
+    or the supplier held the missing piece, and nothing aged.
+    Past ``INFORMATION_WAIT_AGING_DAYS`` the wait joins the queue
+    like the other stalls — the request's date, how long it has
+    been waiting, the reply state (none yet, or a partial answer
+    that restarted the wait when it landed), and the items still
+    missing, named. A fully answered request closes the wait and
+    drops off; a decided invoice is done waiting either way."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    outcome: str = ""
+    requested_at: str = ""
+    reply_status: str = "awaiting_reply"  # awaiting_reply | partially_answered
+    reply_received_at: str = ""
+    waiting_days: Optional[int] = None
+    aging_threshold_days: int = 0
+    still_missing: list[str] = Field(default_factory=list)
+
+
 class QueueView(BaseModel):
     """The aging queue: awaiting invoices, overdue first, with the
     triage mix — a pure read model over the store's records. Open
@@ -1362,6 +1429,13 @@ class QueueView(BaseModel):
     twin_escalation_count: int = 0
     twin_cluster_min_size: int = 0
     twin_cluster_value_threshold: float = 0.0
+    # Information waits: invoices blocked on an information
+    # request past its aging threshold (INFORMATION_WAIT_AGING_DAYS)
+    # with no complete reply recorded — the supplier or purchasing
+    # holds the missing piece, and the wait is worklist work.
+    information_waits: list[InformationWaitItem] = Field(default_factory=list)
+    information_wait_count: int = 0
+    information_wait_aging_days: int = 0
 
 
 # ---------------------------------------------------------------------------

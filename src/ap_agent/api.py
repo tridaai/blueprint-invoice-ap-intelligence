@@ -51,6 +51,7 @@ from .schemas import (
     InvoiceBundleInput,
     InvoiceInput,
     MasterChangeDecisionRequest,
+    InformationReplyRequest,
     MasterChangeReproposeRequest,
     MasterChangeFromInvoiceRequest,
     MasterChangeProposeRequest,
@@ -822,6 +823,27 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 external_reference=request.external_reference,
                 idempotency_key=request.idempotency_key,
                 detail=request.detail,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/invoices/{invoice_id}/information-reply", response_model=AgentResult, dependencies=_AUTH)
+    def record_information_reply(invoice_id: str, request: InformationReplyRequest) -> AgentResult:
+        """Record a reply to the invoice's open information
+        request: which missing items it supplied (canonical keys),
+        when it arrived, and a note. The resolution — answered,
+        partially answered with the still-missing items named —
+        is computed in code and lands on the record; nothing is
+        decided, re-run, or sent."""
+        try:
+            return svc.record_information_reply(
+                invoice_id,
+                actor=_decision_actor(request),
+                supplied_items=request.supplied_items,
+                note=request.note,
+                received_at=request.received_at,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
