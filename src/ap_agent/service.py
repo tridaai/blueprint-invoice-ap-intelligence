@@ -40,7 +40,13 @@ from .checkpoints import get_checkpointer
 from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
-from .paymentruns import discount_drift, handoff_metrics, wait_cost_budget_status
+from .paymentruns import (
+    discount_drift,
+    grade_lag_statistics,
+    handoff_metrics,
+    lag_statistics,
+    wait_cost_budget_status,
+)
 from .paymentruns import price_four_eyes_wait as _price_four_eyes_wait
 from .paymentruns import drift_forecast as _drift_forecast
 from .paymentruns import propose_payment_runs as _propose_runs
@@ -2417,11 +2423,14 @@ class InvoiceService:
         Confirmation is also when the drift forecast is computed
         (``paymentruns.drift_forecast``): each discounted member's
         deadline is set against the run's expected export date —
-        its proposal date plus the measured mean proposal→export
-        lag over the runs already exported — and the members
-        projected to lapse are flagged on the run, with the basis
-        stated. A forecast, labelled as one: it warns the
-        confirmer while they can still hurry the export; it
+        its proposal date plus a measured proposal→export lag —
+        and the members projected to lapse are flagged on the run,
+        with the basis stated. The lag is a selected statistic
+        (the governing profile's segment, the currency's, or the
+        global pool), graded against the recorded export outcomes
+        in the accuracy ledger; the basis names the statistic and
+        why it was chosen. A forecast, labelled as one: it warns
+        the confirmer while they can still hurry the export; it
         changes no figures, and the export-time drift check
         remains the authority on what actually lapsed.
         """
@@ -2439,13 +2448,25 @@ class InvoiceService:
         run.confirmed_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
         )
-        lag_stats = handoff_metrics(store.list_payment_runs())["export_lag"][
-            "proposal_to_export"
-        ]
+        # The forecast's lag statistic is selected, not assumed:
+        # the run's governing profile segment, its currency
+        # segment, or the global pool — graded against the
+        # accuracy ledger (paymentruns._select_lag_statistic).
+        # The governing profile is resolved the way the export
+        # will resolve it, so the segment the forecast names is
+        # the segment the export will stamp.
+        from .handoff_profiles import resolve_export_format
+
+        runs = store.list_payment_runs()
+        _format, profile, _basis = resolve_export_format(
+            run, store.list_handoff_profiles(), ""
+        )
         forecast, basis = _drift_forecast(
             run,
             as_of=datetime.now(timezone.utc).date(),
-            lag_stats=lag_stats,
+            lag_segments=lag_statistics(runs),
+            lag_grades=grade_lag_statistics(runs),
+            profile_id=profile.profile_id if profile else "",
         )
         run.drift_forecast = forecast
         run.drift_forecast_basis = basis

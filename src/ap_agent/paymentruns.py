@@ -202,7 +202,10 @@ def drift_forecast(
     run: PaymentRun,
     *,
     as_of: date,
-    lag_stats: dict | None,
+    lag_stats: dict | None = None,
+    lag_segments: dict | None = None,
+    lag_grades: dict | None = None,
+    profile_id: str = "",
 ) -> tuple[list[PaymentRunForecast], str]:
     """Forecast, at confirmation, which of a run's discounted
     members will lapse before the run is likely to be exported.
@@ -212,11 +215,21 @@ def drift_forecast(
     deadline falls inside that sit loses its discount (the export
     drift check then re-prices it at full gross). This projects
     the same numbers forward while the confirmer can still act:
-    the expected export date is the run's proposal date plus the
-    measured mean proposal→export lag (``lag_stats`` — the
-    ``proposal_to_export`` entry of :func:`handoff_metrics`), and
-    a discounted member is flagged when its deadline falls before
-    that date.
+    the expected export date is the run's proposal date plus a
+    measured proposal→export lag, and a discounted member is
+    flagged when its deadline falls before that date.
+
+    Which lag statistic projects is itself a decision, and it is
+    no longer a static one. Given ``lag_segments`` (see
+    :func:`lag_statistics`), the statistic is *selected* for this
+    run — its governing profile's segment, its currency's, or the
+    global pool — by :func:`_select_lag_statistic`, which grades
+    the candidates against the accuracy ledger (the recorded
+    export outcomes, :func:`grade_lag_statistics`) and prefers
+    the statistic with the best recorded recall. The basis states
+    the statistic used and why it was chosen. The legacy flat
+    ``lag_stats`` argument (the global statistic, pre-selection)
+    remains for direct callers.
 
     Returns (forecast entries, basis). The basis always says what
     the projection rests on — including the honest empty cases:
@@ -224,6 +237,18 @@ def drift_forecast(
     dressed up without one. Pure: the run is not mutated; the
     service stamps the result on the run record at confirmation.
     """
+    label = ""
+    why = ""
+    if lag_segments is not None:
+        chosen, label, why = _select_lag_statistic(
+            run, lag_segments, lag_grades or {}, profile_id
+        )
+        if chosen is None:
+            return [], (
+                "no forecast: no exported runs yet, so there is no "
+                "measured proposal→export lag to project from"
+            )
+        lag_stats = chosen
     if not lag_stats or lag_stats.get("mean_days") is None:
         return [], (
             "no forecast: no exported runs yet, so there is no "
@@ -235,12 +260,20 @@ def drift_forecast(
     lag_days = float(lag_stats["mean_days"])
     count = int(lag_stats.get("count") or 0)
     expected_export = proposed + timedelta(days=lag_days)
-    basis = (
-        f"forecast from the measured proposal→export lag: mean "
-        f"{lag_days:.2f} days over {count} exported run(s); this "
-        f"run proposed {proposed.isoformat()}, so its expected "
-        f"export date is {expected_export.isoformat()}"
-    )
+    if label:
+        basis = (
+            f"forecast from the {label} proposal→export lag: mean "
+            f"{lag_days:.2f} days over {count} exported run(s) — "
+            f"{why}; this run proposed {proposed.isoformat()}, so "
+            f"its expected export date is {expected_export.isoformat()}"
+        )
+    else:
+        basis = (
+            f"forecast from the measured proposal→export lag: mean "
+            f"{lag_days:.2f} days over {count} exported run(s); this "
+            f"run proposed {proposed.isoformat()}, so its expected "
+            f"export date is {expected_export.isoformat()}"
+        )
     entries: list[PaymentRunForecast] = []
     for line in run.lines:
         if line.discount_amount <= 0:
@@ -293,6 +326,295 @@ def _lag_stats(lags: list[float]) -> dict | None:
         "mean_days": round(sum(lags) / len(lags), 2),
         "max_days": max(lags),
     }
+
+
+def lag_statistics(runs: list[PaymentRun]) -> dict:
+    """Proposal→export lag statistics, segmented — the raw
+    material the forecast's statistic selection chooses from.
+
+    One pool is the global statistic the forecast always used.
+    The others exist because the pool mixes unlike work: a
+    currency whose runs clear through a slow bank rail, or a
+    hand-off profile whose lead days stretch every export, has a
+    lag of its own, and the global mean understates exactly the
+    runs most likely to drift. Segments: ``by_currency`` over the
+    run's currency, ``by_profile`` over the governing profile id
+    the export stamped on the run (ungoverned exports join no
+    profile segment). Each value is a :func:`_lag_stats` dict or
+    None; computed over exported runs only. Pure.
+    """
+    global_lags: list[float] = []
+    by_currency: dict[str, list[float]] = {}
+    by_profile: dict[str, list[float]] = {}
+    for run in runs:
+        if not run.handoff_generated_at:
+            continue
+        lag = _lag_days(run.proposed_at, run.handoff_generated_at)
+        if lag is None:
+            continue
+        global_lags.append(lag)
+        by_currency.setdefault(run.currency, []).append(lag)
+        if run.handoff_profile_id:
+            by_profile.setdefault(run.handoff_profile_id, []).append(lag)
+    return {
+        "global": _lag_stats(global_lags),
+        "by_currency": {
+            key: _lag_stats(values)
+            for key, values in sorted(by_currency.items())
+        },
+        "by_profile": {
+            key: _lag_stats(values)
+            for key, values in sorted(by_profile.items())
+        },
+    }
+
+
+def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
+    """Grade each candidate lag statistic against the accuracy
+    ledger — what the exports actually recorded.
+
+    The forecast's report card (:func:`forecast_accuracy`) scores
+    the forecasts that were made. This scores the *statistics*
+    that could have made them: for every exported run carrying
+    discounted members, each applicable statistic (global, the
+    run's currency, the run's governing profile) is recomputed
+    WITHOUT that run (leave-one-out — a statistic never grades
+    itself on its own evidence), the flag rule is replayed with
+    it, and the replayed flags are scored against the drift the
+    export actually measured, in the same two-by-two cells.
+    Returns ``{statistic_key: {cells…, precision, recall,
+    graded_members}}`` — the selection's evidence base. A
+    statistic with no graded members is absent, never dressed up
+    with a rate over zero cases. Pure.
+    """
+    exported: list[tuple[PaymentRun, float]] = []
+    for run in runs:
+        if not run.handoff_generated_at:
+            continue
+        lag = _lag_days(run.proposed_at, run.handoff_generated_at)
+        if lag is not None:
+            exported.append((run, lag))
+    cells: dict[str, dict] = {}
+    for run, _own_lag in exported:
+        discounted = [
+            line for line in run.lines if line.discount_amount > 0
+        ]
+        if not discounted:
+            continue
+        proposed = _parse_date(run.proposed_at)
+        if proposed is None:
+            continue
+        drifted = {
+            entry.invoice_id: entry
+            for entry in run.handoff_drift
+            if entry.discount_lost > 0.005
+        }
+        candidates: list[tuple[str, list[float]]] = [
+            (
+                "global",
+                [lag for other, lag in exported if other is not run],
+            ),
+            (
+                f"currency:{run.currency}",
+                [
+                    lag
+                    for other, lag in exported
+                    if other is not run and other.currency == run.currency
+                ],
+            ),
+        ]
+        if run.handoff_profile_id:
+            candidates.append(
+                (
+                    f"profile:{run.handoff_profile_id}",
+                    [
+                        lag
+                        for other, lag in exported
+                        if other is not run
+                        and other.handoff_profile_id
+                        == run.handoff_profile_id
+                    ],
+                )
+            )
+        members = (
+            set(drifted)
+            | {line.invoice_id for line in discounted}
+        )
+        for key, segment_lags in candidates:
+            if not segment_lags:
+                continue
+            mean_lag = sum(segment_lags) / len(segment_lags)
+            expected = proposed + timedelta(days=mean_lag)
+            flagged = {
+                line.invoice_id
+                for line in discounted
+                if (deadline := _parse_date(line.discount_deadline))
+                is not None
+                and deadline < expected
+            }
+            cell = cells.setdefault(key, _new_accuracy_cell())
+            for invoice_id in members:
+                is_flagged = invoice_id in flagged
+                is_drifted = invoice_id in drifted
+                if is_flagged and is_drifted:
+                    bucket = "flagged_drifted"
+                elif is_flagged:
+                    bucket = "flagged_saved"
+                elif is_drifted:
+                    bucket = "unflagged_drifted"
+                else:
+                    bucket = "unflagged_saved"
+                cell[bucket] += 1
+                if is_flagged:
+                    cell["value_flagged"] = round(
+                        cell["value_flagged"]
+                        + next(
+                            line.discount_amount
+                            for line in discounted
+                            if line.invoice_id == invoice_id
+                        ),
+                        2,
+                    )
+                if is_drifted:
+                    value_key = (
+                        "value_lost_flagged"
+                        if is_flagged
+                        else "value_lost_unflagged"
+                    )
+                    cell[value_key] = round(
+                        cell[value_key]
+                        + drifted[invoice_id].discount_lost,
+                        2,
+                    )
+    graded: dict[str, dict] = {}
+    for key, cell in sorted(cells.items()):
+        precision, recall = _accuracy_rates(cell)
+        graded[key] = {
+            **{
+                name: cell[name]
+                for name in (
+                    "flagged_drifted",
+                    "flagged_saved",
+                    "unflagged_drifted",
+                    "unflagged_saved",
+                    "value_flagged",
+                    "value_lost_flagged",
+                    "value_lost_unflagged",
+                )
+            },
+            "precision": precision,
+            "recall": recall,
+            "graded_members": sum(
+                cell[name]
+                for name in (
+                    "flagged_drifted",
+                    "flagged_saved",
+                    "unflagged_drifted",
+                    "unflagged_saved",
+                )
+            ),
+        }
+    return graded
+
+
+# A segment mean over one or two exports is an anecdote, not a
+# statistic; a grade over three members is a coin toss. The
+# selection requires both bars before it trusts either.
+_MIN_SEGMENT_RUNS = 3
+_MIN_GRADED_MEMBERS = 4
+
+
+def _select_lag_statistic(
+    run: PaymentRun,
+    segments: dict,
+    grades: dict,
+    profile_id: str,
+) -> tuple[dict | None, str, str]:
+    """Choose the lag statistic that projects this run's export,
+    and say why — (stats, label, why); (None, "", "") when no
+    segment carries a measured lag at all.
+
+    Candidates, most specific first: the governing profile's
+    segment, the currency's, the global pool. Among candidates
+    with enough measured runs, a candidate the ledger has graded
+    over enough members wins on recorded recall (the miss —
+    ``unflagged_drifted`` — is the expensive cell; precision,
+    then specificity, break ties). With no graded candidate, the
+    most specific adequately-measured segment governs. With no
+    adequately-measured segment at all, the global pool — the
+    pre-selection behaviour — is the fallback, so a young ledger
+    forecasts exactly as it did before segments existed.
+    """
+    candidates: list[tuple[int, str, str, dict]] = []
+    profile_stats = (
+        segments.get("by_profile", {}).get(profile_id)
+        if profile_id
+        else None
+    )
+    if profile_stats:
+        candidates.append(
+            (2, f"profile:{profile_id}", f"per-profile ({profile_id})", profile_stats)
+        )
+    currency_stats = segments.get("by_currency", {}).get(run.currency)
+    if currency_stats:
+        candidates.append(
+            (1, f"currency:{run.currency}", f"per-currency ({run.currency})", currency_stats)
+        )
+    global_stats = segments.get("global")
+    if global_stats:
+        candidates.append((0, "global", "global", global_stats))
+    if not candidates:
+        return None, "", ""
+    eligible = [
+        c for c in candidates if (c[3].get("count") or 0) >= _MIN_SEGMENT_RUNS
+    ]
+    if not eligible:
+        stats, label = global_stats, "global"
+        return (
+            stats,
+            label,
+            "the only segment with a measured lag so far — segment "
+            "statistics govern once one holds "
+            f"{_MIN_SEGMENT_RUNS} or more exported runs",
+        )
+    graded = [
+        c
+        for c in eligible
+        if (grades.get(c[1]) or {}).get("graded_members", 0)
+        >= _MIN_GRADED_MEMBERS
+        and (grades.get(c[1]) or {}).get("recall") is not None
+    ]
+    if graded:
+        def rank(candidate: tuple[int, str, str, dict]) -> tuple:
+            grade = grades[candidate[1]]
+            return (
+                grade["recall"],
+                grade["precision"] or 0.0,
+                candidate[0],
+            )
+
+        best = max(graded, key=rank)
+        grade = grades[best[1]]
+        precision_clause = (
+            f" (precision {grade['precision']:.2f})"
+            if grade["precision"] is not None
+            else ""
+        )
+        why = (
+            "selected on the accuracy ledger: recall "
+            f"{grade['recall']:.2f} over {grade['graded_members']} "
+            f"graded members{precision_clause}, the best recorded "
+            f"of {len(graded)} graded candidate(s)"
+        )
+        return best[3], best[2], why
+    best = max(eligible, key=lambda c: c[0])
+    return (
+        best[3],
+        best[2],
+        "no candidate statistic has graded history over "
+        f"{_MIN_GRADED_MEMBERS} or more members yet, so the most "
+        "specific adequately-measured segment governs",
+    )
 
 
 def _new_accuracy_cell() -> dict:
@@ -771,8 +1093,15 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
         "export_lag": {
             "confirm_to_export": _lag_stats(confirm_lags),
             "proposal_to_export": _lag_stats(proposal_lags),
+            "proposal_to_export_by_currency": lag_statistics(runs)[
+                "by_currency"
+            ],
+            "proposal_to_export_by_profile": lag_statistics(runs)[
+                "by_profile"
+            ],
         },
         "forecast_accuracy": forecast_accuracy(runs),
+        "lag_statistic_grades": grade_lag_statistics(runs),
         "creditor_completion": creditor_completion_metrics(runs),
         "four_eyes_wait": {
             "runs_second_confirmed": second_confirmed_runs,
