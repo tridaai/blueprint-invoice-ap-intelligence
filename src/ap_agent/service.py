@@ -248,6 +248,27 @@ def master_change_expiry_days() -> int:
     )
 
 
+# Default warning band for a pending master change's expiry:
+# with this many days (or fewer) of its decision window left,
+# the worklist flags the change as expiring soon and the digest
+# names it — the rescue has to happen while a decision can
+# still land (MASTER_CHANGE_EXPIRY_WARNING_DAYS overrides it).
+MASTER_CHANGE_EXPIRY_WARNING_DEFAULT_DAYS = 7
+
+
+def master_change_expiry_warning_days() -> int:
+    """The configured expiry warning band for pending master
+    changes, in days of window remaining."""
+    load_dotenv()
+    return max(
+        0,
+        env_int(
+            "MASTER_CHANGE_EXPIRY_WARNING_DAYS",
+            MASTER_CHANGE_EXPIRY_WARNING_DEFAULT_DAYS,
+        ),
+    )
+
+
 # Default grace window for the posting-receipt loop: an approved
 # invoice with no posted receipt older than this is reported as an
 # open item (POSTING_RECEIPT_GRACE_DAYS overrides it).
@@ -1955,7 +1976,7 @@ class InvoiceService:
         stored records and sent nowhere — the push counterpart to
         the queue's pull, left for a human to read or forward."""
         from .digest import build_digest
-        from .schemas import DigestWaitBudgetEntry
+        from .schemas import DigestOnboardingEntry, DigestWaitBudgetEntry
 
         anchor = _parse_date(as_of) if as_of else None
         if as_of and anchor is None:
@@ -1978,11 +1999,29 @@ class InvoiceService:
             for row in budget_status["currencies"]
             if row["over_budget"]
         ]
+        # The onboarding early warning, from the marker
+        # worklist aged against the digest's own day: pending
+        # changes inside their expiry warning band, whose owed
+        # decision can still rescue them.
+        onboarding = [
+            DigestOnboardingEntry(
+                supplier_name=item.supplier_name,
+                currency=item.currency,
+                change_id=item.in_flight_change_id,
+                proposed_by=item.in_flight_proposed_by,
+                age_days=item.in_flight_age_days,
+                days_to_expiry=item.in_flight_days_to_expiry,
+                marked_value=item.marked_value,
+            )
+            for item in self.marker_worklist(as_of=anchor.isoformat()).items
+            if item.in_flight_expiring_soon
+        ]
         return build_digest(
             as_of=anchor,
             queue=self.queue_view(as_of=anchor.isoformat()),
             runs=runs,
             wait_budget_breaches=breaches,
+            onboarding_expiring=onboarding,
         )
 
     def store_digest(self, as_of: str = "", actor: str = "") -> EscalationDigest:
@@ -2104,7 +2143,7 @@ class InvoiceService:
             entries=entries,
         )
 
-    def marker_worklist(self) -> MarkerWorklist:
+    def marker_worklist(self, as_of: str = "") -> MarkerWorklist:
         """The supplier-onboarding worklist: suppliers ranked by
         the export value that still carried the at-import marker,
         from the stored runs' completion receipts (see
@@ -2142,12 +2181,16 @@ class InvoiceService:
                 or (record.account_number or "").strip()
             ):
                 onboarded.add(name)
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
         return _marker_worklist(
             runs,
             onboarded_suppliers=onboarded,
             changes=store.list_master_changes(),
-            as_of=datetime.now(timezone.utc).date(),
+            as_of=anchor or datetime.now(timezone.utc).date(),
             expiry_days=master_change_expiry_days(),
+            expiry_warning_days=master_change_expiry_warning_days(),
         )
 
     def set_handoff_profile(

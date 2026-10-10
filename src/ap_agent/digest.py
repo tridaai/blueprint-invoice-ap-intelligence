@@ -26,6 +26,11 @@ that crossed a line, as of a day.
   discount value this month than their configured budget
   (``FOUR_EYES_WAIT_BUDGETS``) allows. A breach stands until the
   month turns, so the digest keeps naming it.
+- **Onboarding windows closing** — supplier-master changes
+  inside their expiry warning band: the decision is owed by a
+  second operator, and the digest names the change, its age,
+  and the days of window left while a decision can still
+  rescue the onboarding.
 
 Composition is the reconciliation summary's discipline: computed
 in code from the stored records, every exception named, an
@@ -53,6 +58,7 @@ from .schemas import (
     DigestForecastLapse,
     DigestHistory,
     DigestHistoryEntry,
+    DigestOnboardingEntry,
     DigestWaitBudgetEntry,
     EscalationDigest,
     PaymentRun,
@@ -124,6 +130,7 @@ def build_digest(
     queue: QueueView,
     runs: Iterable[PaymentRun],
     wait_budget_breaches: Iterable[DigestWaitBudgetEntry] = (),
+    onboarding_expiring: Iterable[DigestOnboardingEntry] = (),
 ) -> EscalationDigest:
     """Compose the digest for one day from the queue view (built
     for the same day by the service) and the stored payment runs.
@@ -131,7 +138,12 @@ def build_digest(
     ``wait_budget_breaches`` are the month-to-date four-eyes wait
     budget breaches the service computed for the digest's month
     (``paymentruns.wait_cost_budget_status``) — a monthly fact
-    the daily digest carries while it stands."""
+    the daily digest carries while it stands.
+    ``onboarding_expiring`` are the marker worklist's early
+    warnings (pending master changes inside their expiry
+    warning band), aged against the digest's day by the
+    service — decisions owed while the window can still be
+    rescued."""
     breaches = [case for case in queue.recovery_cases if case.sla_breached]
     recovery_amounts: dict[str, float] = {}
     for case in breaches:
@@ -195,6 +207,14 @@ def build_digest(
             )
     forecast_lapses.sort(key=lambda e: (e.discount_deadline, e.invoice_id))
     drift_today.sort(key=lambda e: e.run_id)
+    onboarding_sorted = sorted(
+        onboarding_expiring,
+        key=lambda e: (
+            e.days_to_expiry is None,
+            e.days_to_expiry or 0,
+            e.supplier_name,
+        ),
+    )
 
     digest = EscalationDigest(
         as_of=as_of.isoformat(),
@@ -215,6 +235,8 @@ def build_digest(
         wait_budget_breaches=sorted(
             wait_budget_breaches, key=lambda e: e.currency
         ),
+        onboarding_expiring=onboarding_sorted,
+        onboarding_expiring_count=len(onboarding_sorted),
     )
     digest.summary = _compose_summary(digest, queue)
     return digest
@@ -348,6 +370,22 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
             "confirmation wait is a control with a price ceiling — "
             "the month stays over until it turns."
         )
+    if digest.onboarding_expiring:
+        named = "; ".join(
+            f"{entry.supplier_name} ({entry.change_id}, proposed by "
+            f"{entry.proposed_by or 'an unnamed proposer'}, "
+            f"{entry.age_days if entry.age_days is not None else '?'}d "
+            f"waiting, {entry.days_to_expiry if entry.days_to_expiry is not None else '?'}d "
+            f"of window left, {entry.currency} "
+            f"{entry.marked_value:,.2f} still exporting marked)"
+            for entry in digest.onboarding_expiring
+        )
+        parts.append(
+            f"Onboarding decisions owed, window closing: "
+            f"{digest.onboarding_expiring_count} — {named}. Decide "
+            "before the window closes: an undecided change expires "
+            "and the supplier returns to open work."
+        )
     if (
         digest.recovery_breach_count == 0
         and digest.posting_escalation_count == 0
@@ -356,6 +394,7 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
         and not digest.forecast_lapses
         and not digest.drift_today
         and not digest.wait_budget_breaches
+        and not digest.onboarding_expiring
     ):
         parts.append(
             "All clear: nothing crossed a line today — no breaches, no "

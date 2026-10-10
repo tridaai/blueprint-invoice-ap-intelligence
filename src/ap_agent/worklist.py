@@ -38,6 +38,14 @@ bank:
   wearing the rejection — decider, date, and the recorded note —
   so re-proposing is deliberate. An expired pending change is
   neither: it decided nothing, and the row reads open again.
+- A pending change also ages against its own decision window:
+  the row carries the days of window left, and inside the
+  warning band (``MASTER_CHANGE_EXPIRY_WARNING_DAYS``, default
+  7) the change is flagged expiring soon — the early-warning
+  surface that lets the owed decision rescue the onboarding
+  before the window closes silently. The digest carries the
+  same warning (``digest.build_digest``) for the suppliers
+  whose windows are closing.
 
 Pure over the inputs given: the service supplies the store's
 runs, the set of suppliers the master now covers, and the
@@ -66,6 +74,7 @@ def _flow_state(
     *,
     as_of: date,
     expiry_days: int,
+    expiry_warning_days: int = 7,
 ) -> dict:
     """One supplier's onboarding flow state, from its latest
     governed master change. Live means the change can still
@@ -73,17 +82,31 @@ def _flow_state(
     not yet applied (its effective date is still ahead — once
     applied with bank details the supplier resolves off the
     worklist entirely, so a listed approved change is by
-    construction an unapplied one)."""
+    construction an unapplied one).
+
+    A *pending* change also ages against its window: the row
+    carries how many days of window remain and flags the
+    change ``in_flight_expiring_soon`` once the remainder is
+    inside the warning band — the early warning that lets a
+    decision rescue the change before day ``expiry_days``
+    silently returns the supplier to open. An approved change
+    never expires, so it carries neither figure."""
     if change is None:
         return {"onboarding_state": "open"}
     if change.status == "pending" and not is_change_expired(
         change, as_of, expiry_days
     ):
+        age = change_age_days(change, as_of)
+        days_left = expiry_days - age if age is not None else None
         return {
             "onboarding_state": "in_flight",
             "in_flight_change_id": change.request_id,
             "in_flight_proposed_by": change.proposed_by,
-            "in_flight_age_days": change_age_days(change, as_of),
+            "in_flight_age_days": age,
+            "in_flight_days_to_expiry": days_left,
+            "in_flight_expiring_soon": (
+                days_left is not None and days_left <= expiry_warning_days
+            ),
         }
     if change.status == "approved" and not change.applied_at:
         return {
@@ -112,6 +135,7 @@ def marker_worklist(
     changes: Iterable[MasterChangeRequest] = (),
     as_of: date | None = None,
     expiry_days: int = 30,
+    expiry_warning_days: int = 7,
 ) -> MarkerWorklist:
     """Rank suppliers by marked export value, from the runs'
     completion receipts. ``onboarded_suppliers`` names suppliers
@@ -122,7 +146,9 @@ def marker_worklist(
     last one per supplier is its latest), joined onto the listed
     rows as the onboarding flow state; ``as_of`` anchors change
     ages and the pending-expiry check, against the configured
-    ``expiry_days`` decision window."""
+    ``expiry_days`` decision window, with
+    ``expiry_warning_days`` the band inside which a pending
+    change is flagged as expiring soon."""
     onboarded = set(onboarded_suppliers)
     as_of = as_of or date.today()
     latest_change: dict[str, MasterChangeRequest] = {}
@@ -187,6 +213,7 @@ def marker_worklist(
                 latest_change.get(supplier),
                 as_of=as_of,
                 expiry_days=expiry_days,
+                expiry_warning_days=expiry_warning_days,
             ),
         )
         for (supplier, currency), cell in cells.items()
@@ -225,6 +252,13 @@ def marker_worklist(
                 item.supplier_name
                 for item in items
                 if item.onboarding_state == "rejected"
+            }
+        ),
+        expiring_soon_count=len(
+            {
+                item.supplier_name
+                for item in items
+                if item.in_flight_expiring_soon
             }
         ),
     )

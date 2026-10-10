@@ -616,6 +616,16 @@ class MarkerWorklistItem(BaseModel):
     in_flight_change_id: str = ""  # the live change's request id
     in_flight_proposed_by: str = ""  # who proposed it (decision is owed by another)
     in_flight_age_days: Optional[int] = None  # days since the live change was proposed
+    # The pending change's expiry early warning: how much of
+    # its decision window is left, and whether it is inside
+    # the warning band — a pending change undecided past the
+    # window expires and the supplier silently returns to
+    # open, so the closing window is surfaced while a decision
+    # can still rescue it. Only pending changes expire; an
+    # approved change awaiting its effective date carries
+    # neither field.
+    in_flight_days_to_expiry: Optional[int] = None
+    in_flight_expiring_soon: bool = False
     rejected_change_id: str = ""  # the rejected change's request id
     rejected_by: str = ""  # who rejected it
     rejected_at: str = ""  # ISO timestamp of the rejection
@@ -644,6 +654,7 @@ class MarkerWorklist(BaseModel):
     resolved_value_by_currency: dict[str, float] = Field(default_factory=dict)
     in_flight_count: int = 0  # distinct listed suppliers with a live change
     rejected_count: int = 0  # distinct listed suppliers whose latest change was rejected
+    expiring_soon_count: int = 0  # distinct suppliers whose pending change is inside the expiry warning band
 
 
 # ---------------------------------------------------------------------------
@@ -1303,6 +1314,24 @@ class DigestDriftEntry(BaseModel):
     value_lost: float = 0.0
 
 
+class DigestOnboardingEntry(BaseModel):
+    """One supplier whose onboarding change is about to expire
+    undecided: the marker worklist's early warning, carried
+    into the digest. The change was proposed, a second operator
+    owes the decision, and ``days_to_expiry`` of the decision
+    window remain — past the window the change expires, the
+    supplier returns to open work, and the marked exports keep
+    flowing to a bank the master still cannot complete for."""
+
+    supplier_name: str = ""
+    currency: str = "USD"
+    change_id: str = ""
+    proposed_by: str = ""
+    age_days: Optional[int] = None  # days the change has waited
+    days_to_expiry: Optional[int] = None  # days of window left
+    marked_value: float = 0.0  # the export exposure riding on it
+
+
 class DigestWaitBudgetEntry(BaseModel):
     """One currency whose four-eyes waits have destroyed more
     discount value this month than its monthly budget allows
@@ -1353,6 +1382,11 @@ class EscalationDigest(BaseModel):
     # DigestWaitBudgetEntry): a monthly governance fact on a
     # daily surface, present only while a breach stands.
     wait_budget_breaches: list[DigestWaitBudgetEntry] = Field(default_factory=list)
+    # Onboarding changes inside their expiry warning band
+    # (see DigestOnboardingEntry): decisions owed while the
+    # window can still be rescued, most urgent first.
+    onboarding_expiring: list[DigestOnboardingEntry] = Field(default_factory=list)
+    onboarding_expiring_count: int = 0
     # Provenance: a digest is "computed" at read time by default —
     # fresh every call, and labelled as such. An operator can store
     # a day's first-computed digest (POST /digest/{date}/store);
