@@ -80,16 +80,23 @@ def propose_payment_runs(
     as_of: date | None = None,
     exclude_invoice_ids: set[str] | None = None,
     four_eyes_threshold: float | None = None,
+    four_eyes_thresholds: dict[str, float] | None = None,
 ) -> list[PaymentRun]:
     """Group the approved, not-yet-run records into proposed runs.
 
     Pure over the records it is given — the service layer supplies
     the store's records and the membership of confirmed runs. When
-    ``four_eyes_threshold`` is given, a run whose net total is
-    *above* it is stamped ``four_eyes_required``: the hand-off then
-    waits for a second confirmer, different from the first (the
-    service enforces it). A total exactly at the threshold is not
-    above it.
+    a four-eyes threshold applies, a run whose net total is *above*
+    it is stamped ``four_eyes_required``: the hand-off then waits
+    for a second confirmer, different from the first (the service
+    enforces it). A total exactly at the threshold is not above it.
+
+    The threshold is per-currency: ``four_eyes_thresholds`` maps a
+    currency code to its threshold, and ``four_eyes_threshold`` is
+    the fallback for currencies the map does not name — 25,000 USD
+    and 25,000 JPY are not the same risk, so one global number
+    cannot gate both honestly. Whichever figure applied is stamped
+    on the run (``four_eyes_threshold``) and named in its note.
     """
     as_of = as_of or date.today()
     window_days = max(1, int(window_days))
@@ -132,8 +139,12 @@ def propose_payment_runs(
             total_discount=round(sum(line.discount_amount for line in lines), 2),
             total_net=round(sum(line.net_amount for line in lines), 2),
         )
-        if four_eyes_threshold is not None and run.total_net > four_eyes_threshold:
-            run.four_eyes_required = True
+        threshold = four_eyes_threshold
+        if four_eyes_thresholds:
+            threshold = four_eyes_thresholds.get(currency, four_eyes_threshold)
+        if threshold is not None:
+            run.four_eyes_threshold = threshold
+            run.four_eyes_required = run.total_net > threshold
         run.note = (
             f"{run.invoice_count} approved invoice(s), {currency} "
             f"{run.total_net:.2f} net payable in the window ending "
@@ -147,7 +158,13 @@ def propose_payment_runs(
             + ". A proposal only: a finance lead confirms the run; "
             "payment itself happens in the AP system of record."
             + (
-                " This run is above the four-eyes threshold: a second "
+                f" The four-eyes threshold for {currency} runs is "
+                f"{currency} {threshold:,.2f}."
+                if threshold is not None
+                else ""
+            )
+            + (
+                " This run is above that threshold: a second "
                 "confirmer, different from the first, must also confirm "
                 "it before the hand-off file can be generated."
                 if run.four_eyes_required

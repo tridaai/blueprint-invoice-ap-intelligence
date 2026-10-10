@@ -852,11 +852,17 @@ class PaymentRun(BaseModel):
     proposed_at: str = ""
     confirmed_by: Optional[str] = None
     confirmed_at: Optional[str] = None
-    # Four-eyes on large runs: a run whose net total exceeded
-    # PAYMENT_RUN_FOUR_EYES_THRESHOLD when proposed needs a second
-    # confirmation — from a different person than the first — before
-    # the hand-off file can be generated.
+    # Four-eyes on large runs: a run whose net total exceeded the
+    # four-eyes threshold when proposed needs a second confirmation
+    # — from a different person than the first — before the hand-off
+    # file can be generated. The threshold is per-currency
+    # (PAYMENT_RUN_FOUR_EYES_THRESHOLDS, with the global
+    # PAYMENT_RUN_FOUR_EYES_THRESHOLD as the fallback);
+    # ``four_eyes_threshold`` stamps the figure that applied to
+    # this run, in the run's currency, at proposal time — 0 when
+    # the run was proposed without thresholds configured.
     four_eyes_required: bool = False
+    four_eyes_threshold: float = 0.0
     second_confirmed_by: Optional[str] = None
     second_confirmed_at: Optional[str] = None
     note: str = ""

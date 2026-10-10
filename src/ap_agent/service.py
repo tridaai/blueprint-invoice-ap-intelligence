@@ -115,15 +115,48 @@ from .ports import Store  # noqa: E402,F401
 # Default four-eyes threshold for payment runs: a run whose net
 # total is above this needs a second, different confirmer before
 # its hand-off file can be generated (PAYMENT_RUN_FOUR_EYES_THRESHOLD
-# overrides it).
+# overrides it). The threshold is per-currency in effect:
+# PAYMENT_RUN_FOUR_EYES_THRESHOLDS ("EUR=50000,JPY=3000000") maps
+# currencies to their own figures, and the global value is the
+# fallback for currencies the map does not name.
 PAYMENT_RUN_FOUR_EYES_DEFAULT = 25_000.0
 
 
 def payment_run_four_eyes_threshold() -> float:
-    """The configured four-eyes threshold for payment runs."""
+    """The configured global four-eyes threshold for payment runs
+    — the fallback for currencies with no per-currency figure."""
     load_dotenv()
     return env_float(
         "PAYMENT_RUN_FOUR_EYES_THRESHOLD", PAYMENT_RUN_FOUR_EYES_DEFAULT
+    )
+
+
+def payment_run_four_eyes_thresholds() -> dict[str, float]:
+    """The per-currency four-eyes thresholds, from
+    ``PAYMENT_RUN_FOUR_EYES_THRESHOLDS`` — a comma list of
+    ``CODE=amount`` pairs. Malformed pairs are skipped: a typo in
+    one currency's entry must not silently change another's gate,
+    and a currency lost to a typo falls back to the global
+    threshold rather than to no gate at all."""
+    load_dotenv()
+    raw = env_str("PAYMENT_RUN_FOUR_EYES_THRESHOLDS", "") or ""
+    thresholds: dict[str, float] = {}
+    for part in raw.split(","):
+        code, sep, value = part.partition("=")
+        if not sep or not code.strip():
+            continue
+        try:
+            thresholds[code.strip().upper()] = float(value.strip())
+        except ValueError:
+            continue
+    return thresholds
+
+
+def payment_run_four_eyes_threshold_for(currency: str) -> float:
+    """The four-eyes threshold that applies to one currency: its
+    per-currency figure when configured, else the global one."""
+    return payment_run_four_eyes_thresholds().get(
+        (currency or "").upper(), payment_run_four_eyes_threshold()
     )
 
 
@@ -998,6 +1031,7 @@ class InvoiceService:
             as_of=anchor,
             exclude_invoice_ids=confirmed_members,
             four_eyes_threshold=payment_run_four_eyes_threshold(),
+            four_eyes_thresholds=payment_run_four_eyes_thresholds(),
         )
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         saved: list[PaymentRun] = []
@@ -1627,7 +1661,7 @@ class InvoiceService:
 
         Four-eyes: the second confirmer must be a different person
         from the first. Only a run stamped ``four_eyes_required``
-        (net total above ``PAYMENT_RUN_FOUR_EYES_THRESHOLD`` when
+        (net total above its currency's four-eyes threshold when
         proposed) takes a second confirmation, and only after the
         first — the confirmations are a pair, in order, both named
         on the run record. Like the first confirmation, this pays
@@ -1641,7 +1675,14 @@ class InvoiceService:
             raise ValueError(
                 f"Payment run {run_id} totals {run.currency} "
                 f"{run.total_net:.2f} — not above the four-eyes "
-                "threshold, so no second confirmation is required"
+                "threshold"
+                + (
+                    f" for {run.currency} runs ({run.currency} "
+                    f"{run.four_eyes_threshold:,.2f})"
+                    if run.four_eyes_threshold
+                    else ""
+                )
+                + ", so no second confirmation is required"
             )
         if run.status != "confirmed":
             raise ValueError(
@@ -1714,8 +1755,14 @@ class InvoiceService:
         if run.four_eyes_required and not run.second_confirmed_by:
             raise ValueError(
                 f"Payment run {run_id} totals {run.currency} "
-                f"{run.total_net:.2f} — above the four-eyes threshold — "
-                f"and has only been confirmed by {run.confirmed_by}: "
+                f"{run.total_net:.2f} — above the four-eyes threshold "
+                f"for {run.currency} runs"
+                + (
+                    f" ({run.currency} {run.four_eyes_threshold:,.2f})"
+                    if run.four_eyes_threshold
+                    else ""
+                )
+                + f" — and has only been confirmed by {run.confirmed_by}: "
                 "a second confirmer, different from the first, must "
                 "confirm the run before the hand-off file can be "
                 "generated"
