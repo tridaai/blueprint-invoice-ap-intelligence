@@ -1303,6 +1303,22 @@ class DigestDriftEntry(BaseModel):
     value_lost: float = 0.0
 
 
+class DigestWaitBudgetEntry(BaseModel):
+    """One currency whose four-eyes waits have destroyed more
+    discount value this month than its monthly budget allows
+    (``FOUR_EYES_WAIT_BUDGETS``): the wait cost month-to-date,
+    the budget, and the excess. The digest is a daily surface
+    carrying a monthly fact — a breached budget stays breached
+    for the rest of the month, and every morning's digest keeps
+    saying so until the month turns."""
+
+    currency: str = "USD"
+    month: str = ""  # YYYY-MM the cost is charged to
+    wait_cost: float = 0.0  # discounts the waits destroyed, month to date
+    budget: float = 0.0  # the monthly ceiling in force
+    excess: float = 0.0  # wait_cost − budget
+
+
 class EscalationDigest(BaseModel):
     """The day's escalations in one operator summary: the queue's
     action items (recovery cases past their SLA, open postings past
@@ -1333,6 +1349,10 @@ class EscalationDigest(BaseModel):
     forecast_value_by_currency: dict[str, float] = Field(default_factory=dict)
     drift_today: list[DigestDriftEntry] = Field(default_factory=list)
     drift_value_by_currency: dict[str, float] = Field(default_factory=dict)
+    # Four-eyes wait budgets breached this month (see
+    # DigestWaitBudgetEntry): a monthly governance fact on a
+    # daily surface, present only while a breach stands.
+    wait_budget_breaches: list[DigestWaitBudgetEntry] = Field(default_factory=list)
     # Provenance: a digest is "computed" at read time by default —
     # fresh every call, and labelled as such. An operator can store
     # a day's first-computed digest (POST /digest/{date}/store);

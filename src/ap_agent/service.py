@@ -40,7 +40,7 @@ from .checkpoints import get_checkpointer
 from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
-from .paymentruns import discount_drift, handoff_metrics
+from .paymentruns import discount_drift, handoff_metrics, wait_cost_budget_status
 from .paymentruns import price_four_eyes_wait as _price_four_eyes_wait
 from .paymentruns import drift_forecast as _drift_forecast
 from .paymentruns import propose_payment_runs as _propose_runs
@@ -169,6 +169,34 @@ def payment_run_four_eyes_threshold_for(currency: str) -> float:
     return payment_run_four_eyes_thresholds().get(
         (currency or "").upper(), payment_run_four_eyes_threshold()
     )
+
+
+def four_eyes_wait_budgets() -> dict[str, float]:
+    """The per-currency monthly budgets for the priced four-eyes
+    wait, from ``FOUR_EYES_WAIT_BUDGETS`` — a comma list of
+    ``CODE=amount`` pairs, parsed like the four-eyes thresholds.
+    A currency with no entry is *unbudgeted*: its wait cost is
+    still priced and reported, it simply has no ceiling to
+    breach — an absent budget is never read as a zero budget,
+    and a malformed pair is skipped rather than fatal."""
+    load_dotenv()
+    raw = env_str("FOUR_EYES_WAIT_BUDGETS", "") or ""
+    budgets: dict[str, float] = {}
+    for part in raw.split(","):
+        code, sep, value = part.partition("=")
+        if not sep or not code.strip():
+            continue
+        try:
+            budgets[code.strip().upper()] = float(value.strip())
+        except ValueError:
+            continue
+    return budgets
+
+
+def four_eyes_wait_budget_for(currency: str) -> float | None:
+    """The monthly wait-cost budget for one currency, or None
+    when the currency carries no budget."""
+    return four_eyes_wait_budgets().get((currency or "").upper())
 
 
 # Default aging threshold for a four-eyes run's second
@@ -1054,6 +1082,16 @@ class InvoiceService:
             "handoff_profiles": _handoff_profile_summary(
                 self._get_store().list_handoff_profiles()
             ),
+            # The priced four-eyes wait against its monthly
+            # budgets (FOUR_EYES_WAIT_BUDGETS): this month's
+            # destroyed discounts per currency, the ceiling in
+            # force, and which currencies are over it — the
+            # control's cost, owned.
+            "four_eyes_wait_budget": wait_cost_budget_status(
+                self._get_store().list_payment_runs(),
+                four_eyes_wait_budgets(),
+                month=datetime.now(timezone.utc).strftime("%Y-%m"),
+            ),
         }
 
     def audit_rows(self) -> list[dict]:
@@ -1917,15 +1955,34 @@ class InvoiceService:
         stored records and sent nowhere — the push counterpart to
         the queue's pull, left for a human to read or forward."""
         from .digest import build_digest
+        from .schemas import DigestWaitBudgetEntry
 
         anchor = _parse_date(as_of) if as_of else None
         if as_of and anchor is None:
             raise ValueError(f"as_of {as_of!r} is not an ISO date")
         anchor = anchor or datetime.now(timezone.utc).date()
+        runs = self._get_store().list_payment_runs()
+        budget_status = wait_cost_budget_status(
+            runs,
+            four_eyes_wait_budgets(),
+            month=anchor.strftime("%Y-%m"),
+        )
+        breaches = [
+            DigestWaitBudgetEntry(
+                currency=row["currency"],
+                month=budget_status["month"],
+                wait_cost=row["wait_cost"],
+                budget=row["budget"],
+                excess=row["excess"],
+            )
+            for row in budget_status["currencies"]
+            if row["over_budget"]
+        ]
         return build_digest(
             as_of=anchor,
             queue=self.queue_view(as_of=anchor.isoformat()),
-            runs=self._get_store().list_payment_runs(),
+            runs=runs,
+            wait_budget_breaches=breaches,
         )
 
     def store_digest(self, as_of: str = "", actor: str = "") -> EscalationDigest:

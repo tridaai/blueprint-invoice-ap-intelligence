@@ -603,6 +603,64 @@ def price_four_eyes_wait(
     return round(sum(lapse.discount_amount for lapse in lapses), 2), lapses
 
 
+def wait_cost_budget_status(
+    runs: list[PaymentRun], budgets: dict[str, float], *, month: str
+) -> dict:
+    """The four-eyes wait's cost against its monthly budgets,
+    for one calendar month (``YYYY-MM``).
+
+    Round 11 priced the wait per run; a price nobody owns is
+    still just a number. This read model gives it an owner: for
+    each currency with wait cost in the month *or* a configured
+    budget, the month's destroyed-discount total (summed from
+    the runs' stamps, charged to the month the second
+    confirmation landed — the moment the wait ended and its
+    cost became final), the budget in force, and whether the
+    month is over it, by how much. A currency with no budget
+    configured reports ``budget: None`` and can never be over:
+    unbudgeted is a fact to state, not a zero ceiling to breach
+    against. Pure over the runs given."""
+    cells: dict[str, dict] = {}
+    for run in runs:
+        if not run.second_confirmed_at:
+            continue
+        second = _parse_date(run.second_confirmed_at)
+        if second is None or second.strftime("%Y-%m") != month:
+            continue
+        cell = cells.setdefault(
+            run.currency,
+            {"currency": run.currency, "wait_cost": 0.0, "runs_waited": 0},
+        )
+        cell["runs_waited"] += 1
+        cell["wait_cost"] = round(
+            cell["wait_cost"] + run.four_eyes_wait_cost, 2
+        )
+    rows: list[dict] = []
+    for currency in sorted(set(cells) | set(budgets)):
+        cell = cells.get(
+            currency,
+            {"currency": currency, "wait_cost": 0.0, "runs_waited": 0},
+        )
+        budget = budgets.get(currency)
+        over = budget is not None and cell["wait_cost"] > budget
+        rows.append(
+            {
+                **cell,
+                "budget": budget,
+                "over_budget": over,
+                "excess": (
+                    round(cell["wait_cost"] - budget, 2) if over else 0.0
+                ),
+            }
+        )
+    return {
+        "month": month,
+        "budgets_configured": bool(budgets),
+        "currencies": rows,
+        "breach_currencies": [r["currency"] for r in rows if r["over_budget"]],
+    }
+
+
 def handoff_metrics(runs: list[PaymentRun]) -> dict:
     """The hand-off story, aggregated over the stored runs — the
     ``payment_runs`` section of ``/metrics``.

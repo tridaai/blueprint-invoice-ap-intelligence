@@ -21,6 +21,11 @@ that crossed a line, as of a day.
   confirmed *that day*, and drift realised on runs exported
   *that day*: the forecast and its outcome, one day apart in the
   making, side by side in the digest.
+- **Wait-budget breaches** — the one monthly fact on this daily
+  surface: currencies whose four-eyes waits have destroyed more
+  discount value this month than their configured budget
+  (``FOUR_EYES_WAIT_BUDGETS``) allows. A breach stands until the
+  month turns, so the digest keeps naming it.
 
 Composition is the reconciliation summary's discipline: computed
 in code from the stored records, every exception named, an
@@ -48,6 +53,7 @@ from .schemas import (
     DigestForecastLapse,
     DigestHistory,
     DigestHistoryEntry,
+    DigestWaitBudgetEntry,
     EscalationDigest,
     PaymentRun,
     QueueView,
@@ -117,10 +123,15 @@ def build_digest(
     as_of: date,
     queue: QueueView,
     runs: Iterable[PaymentRun],
+    wait_budget_breaches: Iterable[DigestWaitBudgetEntry] = (),
 ) -> EscalationDigest:
     """Compose the digest for one day from the queue view (built
     for the same day by the service) and the stored payment runs.
-    Pure: nothing is stored, sent, or mutated."""
+    Pure: nothing is stored, sent, or mutated.
+    ``wait_budget_breaches`` are the month-to-date four-eyes wait
+    budget breaches the service computed for the digest's month
+    (``paymentruns.wait_cost_budget_status``) — a monthly fact
+    the daily digest carries while it stands."""
     breaches = [case for case in queue.recovery_cases if case.sla_breached]
     recovery_amounts: dict[str, float] = {}
     for case in breaches:
@@ -201,6 +212,9 @@ def build_digest(
         forecast_value_by_currency=forecast_value,
         drift_today=drift_today,
         drift_value_by_currency=drift_value,
+        wait_budget_breaches=sorted(
+            wait_budget_breaches, key=lambda e: e.currency
+        ),
     )
     digest.summary = _compose_summary(digest, queue)
     return digest
@@ -321,6 +335,19 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
             f"{_money(digest.drift_value_by_currency)} of discounts lapsed "
             "between confirmation and export."
         )
+    if digest.wait_budget_breaches:
+        named = "; ".join(
+            f"{entry.currency} waits destroyed {entry.currency} "
+            f"{entry.wait_cost:,.2f} in {entry.month} against a "
+            f"{entry.currency} {entry.budget:,.2f} monthly budget "
+            f"({entry.currency} {entry.excess:,.2f} over)"
+            for entry in digest.wait_budget_breaches
+        )
+        parts.append(
+            f"Four-eyes wait budget breached: {named}. The second-"
+            "confirmation wait is a control with a price ceiling — "
+            "the month stays over until it turns."
+        )
     if (
         digest.recovery_breach_count == 0
         and digest.posting_escalation_count == 0
@@ -328,6 +355,7 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
         and digest.four_eyes_pending_count == 0
         and not digest.forecast_lapses
         and not digest.drift_today
+        and not digest.wait_budget_breaches
     ):
         parts.append(
             "All clear: nothing crossed a line today — no breaches, no "
