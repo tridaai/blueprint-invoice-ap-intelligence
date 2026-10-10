@@ -76,6 +76,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 26. **Four-eyes on large payment runs** — a run whose net total is above `PAYMENT_RUN_FOUR_EYES_THRESHOLD` (default 25000) is stamped at proposal and its hand-off export refuses — with the reason spelled out — until a second confirmer, different from the first, has also confirmed it (`POST /payment-runs/{run_id}/confirm-second`). A total exactly at the threshold is not above it.
 27. **Recovery-case aging** — open duplicate-payment cases age in the queue and `/metrics`: total age, the age of the status each case is stuck in, age buckets, and an SLA flag when one status outlasts `RECOVERY_CASE_SLA_DAYS` (default 14). The SLA runs on status age — a case that moved yesterday is moving, not stuck.
 28. **ERP posting receipts** — the example adapter's return path: the ERP's outcome (`posted` + its document number, or `failed` + its reason, under the posting's idempotency key) is recorded back onto the invoice (`POST /invoices/{id}/posting-receipt`) and into the audit export. A posted receipt replays by key but can never be replaced by a different posting; the agent itself still posts nothing.
+29. **Discount drift check at export** — a run confirmed while a discount was capturable can be handed off after the window closed. Export re-prices every discounted member from its stored invoice as of the export date: a drifted member is exported at its full gross amount (the amount actually owed once the window closes — the stale net would short-pay the supplier), the drift is itemised on the run record (`handoff_drift`, with the lost amount and the closed deadline), and the clean members export exactly as confirmed.
+30. **Master-coverage metrics** — `/metrics` reports the fraud screen's blind spot: the share of processed invoices (and of spend) whose supplier has a master record, the recorded bank-check verdict mix (match / mismatch / no master record / no details stated / not checked), and the governed changes in flight to close the gap. A pending change counts as in flight, not as coverage.
+31. **Master-change expiry** — a pending change nobody decides within `MASTER_CHANGE_EXPIRY_DAYS` (default 30) expires: the sweep runs with the promotion sweep and at analysis time, a late decision attempt expires the request on the spot, and the expiry is recorded in the request's audit history. Expired changes are decidable no longer — re-proposing restarts the governed path with fresh eyes.
+32. **Approved-not-posted reconciliation** — the receipt loop's open items: approved invoices with no posted receipt past `POSTING_RECEIPT_GRACE_DAYS` (default 7), oldest first, at `GET /reconciliation/approved-not-posted` and as a count in `/metrics`. A failed receipt keeps its item open with the ERP's reason; a posted receipt closes it. Approvals now stamp `decided_at`, the age anchor (legacy records fall back to submission, labelled).
 
 ## Quickstart
 
@@ -106,7 +110,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 222 tests
+make test        # 250 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -152,6 +156,8 @@ Everything is environment variables (`.env` supported; real env wins). The full 
 | `COST_OF_CAPITAL_ANNUAL_PCT` | Cost of capital (default 6.0) used to price early-payment discounts |
 | `PAYMENT_RUN_FOUR_EYES_THRESHOLD` | A payment run above this net total needs a second, different confirmer before hand-off (default 25000) |
 | `RECOVERY_CASE_SLA_DAYS` | Days a recovery case may sit in one status before the queue flags it stuck (default 14) |
+| `MASTER_CHANGE_EXPIRY_DAYS` | Days a pending supplier-master change may sit undecided before it expires and must be re-proposed (default 30) |
+| `POSTING_RECEIPT_GRACE_DAYS` | Days an approved invoice may go without a posted receipt before the approved-not-posted report flags it (default 7) |
 | `API_KEY` | When set, data endpoints require `X-API-Key` |
 
 ## Architecture
@@ -173,7 +179,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            222 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            250 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -181,7 +187,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 222 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 250 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
