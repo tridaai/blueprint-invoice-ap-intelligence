@@ -21,10 +21,14 @@ document text layer and asks for a verbatim transcription plus a
 confidence, because every NIM in the catalog speaks that shape. If
 your OCR NIM exposes a dedicated transcription endpoint instead,
 replace this one class — the rest of the pipeline programs against
-``OcrEngine`` and never sees the difference. Live NIM verification of
-this adapter is a documented follow-up (no NVIDIA key was available
-when this blueprint was built); it is fake-tested against the shape
-it documents.
+``OcrEngine`` and never sees the difference. This adapter was
+verified live against the hosted catalog on 2026-10-10 with a
+text-native Nemotron model (the default below): the read came back
+with a verbatim transcription and a calibrated confidence. One
+catalog lesson is baked into that default: NVIDIA's image-native
+parse models (e.g. ``nvidia/nemotron-parse``) reject text input
+outright, so they belong behind the image variant of this seam,
+not this text-layer adapter.
 """
 
 from __future__ import annotations
@@ -89,7 +93,7 @@ class NimOcrEngine:
                 "uv sync --extra llm"
             ) from exc
         self.base_url = env_str("OCR_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        self._model = env_str("OCR_MODEL", "nvidia/nemotron-ocr-v1")
+        self._model = env_str("OCR_MODEL", "nvidia/nemotron-3-super-120b-a12b")
         self._client = OpenAI(
             api_key=api_key,
             base_url=self.base_url,
@@ -103,6 +107,7 @@ class NimOcrEngine:
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
+                temperature=0,
                 max_tokens=1200,
                 messages=[
                     {"role": "system", "content": _OCR_SYSTEM},

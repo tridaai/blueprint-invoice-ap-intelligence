@@ -12,7 +12,7 @@ environment variable (see :func:`get_retriever`):
   the local Ollama server when ``MODEL_BACKEND=ollama``, otherwise from
   an OpenAI-compatible endpoint — the NIM profile points
   ``OPENAI_BASE_URL`` at NVIDIA's hosted endpoint with an NV-Embed
-  model (``OPENAI_EMBEDDING_MODEL``, e.g. ``nvidia/nv-embed-v1``);
+  model (``OPENAI_EMBEDDING_MODEL``, e.g. ``nvidia/nemotron-3-embed-1b``);
   Anthropic has no embeddings API, so ``MODEL_BACKEND=anthropic``
   still needs the OpenAI-compatible key for this retriever — the
   failure message says exactly that when the key is missing.
@@ -102,7 +102,7 @@ def _build_embeddings_client(mode_label: str):
       — fully local, no cloud key.
     - Otherwise → an OpenAI-compatible endpoint (``OPENAI_BASE_URL``):
       plain OpenAI, or NVIDIA NIM in the lead profile
-      (``OPENAI_EMBEDDING_MODEL=nvidia/nv-embed-v1`` against
+      (``OPENAI_EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b`` against
       ``https://integrate.api.nvidia.com/v1``). Anthropic offers no
       embeddings API, so with ``MODEL_BACKEND=anthropic`` (or ``mock``)
       an ``OPENAI_API_KEY`` is still required, and the error says so.

@@ -12,7 +12,7 @@ so the NIM deployment story runs through the plain OpenAI backend:
 - hosted NIM (build.nvidia.com): ``MODEL_BACKEND=openai``,
   ``OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1``,
   ``OPENAI_API_KEY=<nvapi- key>``, ``OPENAI_MODEL`` = a Nemotron model
-  (e.g. ``nvidia/llama-3.3-nemotron-super-49b-v1``);
+  (e.g. ``nvidia/nemotron-3-super-120b-a12b``);
 - self-hosted NIM containers: the same variables pointed at the
   container's ``/v1`` endpoint.
 

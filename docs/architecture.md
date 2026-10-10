@@ -84,10 +84,10 @@ NIM services speak the OpenAI chat-completions dialect, so "built on NIM" is a c
 
 | Capability | Port | NIM profile | Offline equivalent |
 |---|---|---|---|
-| Reasoning / extraction / drafting | `ModelBackend` (`openai`) | `OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1`, `nvapi-` key, Nemotron model (e.g. `nvidia/llama-3.3-nemotron-super-49b-v1`) | deterministic templates (`mock`) |
-| OCR | `OcrEngine` (`nim`) | `OCR_ENGINE=nim`, `OCR_MODEL=nvidia/nemotron-ocr-v1` | the document's provided text layer + confidence metadata |
+| Reasoning / extraction / drafting | `ModelBackend` (`openai`) | `OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1`, `nvapi-` key, Nemotron model (e.g. `nvidia/nemotron-3-super-120b-a12b`) | deterministic templates (`mock`) |
+| OCR | `OcrEngine` (`nim`) | `OCR_ENGINE=nim`, `OCR_MODEL=nvidia/nemotron-3-super-120b-a12b` | the document's provided text layer + confidence metadata |
 | Document vision | `DocVision` (`nim`) | `VISION_ENGINE=nim`, a Nemotron VL model | deterministic verdict from provided metadata |
-| Embeddings | `Retriever` (`semantic`/`hybrid`) | `OPENAI_EMBEDDING_MODEL=nvidia/nv-embed-v1` on the same endpoint | keyword retrieval |
+| Embeddings | `Retriever` (`semantic`/`hybrid`) | `OPENAI_EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b` on the same endpoint | keyword retrieval |
 
 Self-hosted NIM is the same profile with `*_BASE_URL` pointed at the containers (the local compose override documents the per-service URLs). Anthropic, plain OpenAI, and Ollama remain first-class `ModelBackend` choices — the engine is portable by construction.
 

@@ -116,7 +116,7 @@ uv sync --extra dev --extra llm --extra postgres --extra s3
 uv run ap-agent-demo   # the trace header names the backend that produced it
 ```
 
-`.env.example` documents the full NIM profile: Nemotron LLM (`MODEL_BACKEND=openai` + the integrate endpoint), Nemotron OCR (`OCR_ENGINE=nim`), Nemotron VL (`VISION_ENGINE=nim`), NV-Embed (`RETRIEVER=hybrid` + `OPENAI_EMBEDDING_MODEL=nvidia/nv-embed-v1`). For self-hosted NIM containers, point the `*_BASE_URL` variables at your containers instead — no code changes.
+`.env.example` documents the full NIM profile: Nemotron LLM (`MODEL_BACKEND=openai` + the integrate endpoint), Nemotron OCR (`OCR_ENGINE=nim`), Nemotron VL (`VISION_ENGINE=nim`), NV-Embed (`RETRIEVER=hybrid` + `OPENAI_EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b`). For self-hosted NIM containers, point the `*_BASE_URL` variables at your containers instead — no code changes.
 
 > Live NIM runs are the one path not yet exercised end-to-end by the maintainers (no key in the dev sandbox); the NIM seams are covered by fake-based tests. The OCR endpoint's chat-completions shape is a documented adapter assumption — see `docs/architecture.md`.
 

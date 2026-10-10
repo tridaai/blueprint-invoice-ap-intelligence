@@ -14,8 +14,10 @@ it legible enough to trust the numbers*? This port answers them:
   document's text layer and metadata. (A production deployment would
   pass the page image; the adapter seam is this one class.)
 
-Live NIM verification is a documented follow-up, as with the OCR
-adapter; both implementations are fake-tested here.
+Verified live against the hosted catalog on 2026-10-10 with the
+default Nemotron omni model below: the verdict JSON came back
+clean (document type, legibility, quality, confidence), with the
+model's reasoning kept out of the answer channel.
 """
 
 from __future__ import annotations
@@ -103,7 +105,7 @@ class NimVision:
                 "uv sync --extra llm"
             ) from exc
         self.base_url = env_str("VISION_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        self._model = env_str("VISION_MODEL", "nvidia/llama-3.1-nemotron-nano-vl-8b-v1")
+        self._model = env_str("VISION_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
         self._client = OpenAI(
             api_key=api_key,
             base_url=self.base_url,
@@ -126,6 +128,7 @@ class NimVision:
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
+                temperature=0,
                 max_tokens=300,
                 messages=[
                     {"role": "system", "content": _VISION_SYSTEM},
