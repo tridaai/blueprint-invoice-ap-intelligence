@@ -86,6 +86,17 @@ derive everything from the run record — the group membership
 from the export receipt, never recomputed from the lines,
 because the bank answered the file that was sent.
 
+A group the bank **rejected** can be re-presented alone
+(``service.reexport_handoff_group``): a single-``PmtInf``
+pain.001 carrying the group's own id and only its members,
+drift re-verified as of the re-export date, stored under
+:func:`handoff_group_reexport_key` and stamped on the run as
+a :class:`HandoffGroupReexport` with the bank's rejection
+reason carried onto the record. The re-export resets the
+group's receipts — the rejected answer answered the first
+file, and stands superseded — so the group reads unanswered
+against the new file until the bank answers again.
+
 The run they render is the export-time run: before rendering, the
 service re-verifies each member's discount (``paymentruns.
 discount_drift``) and adjusts any member whose window closed since
@@ -351,6 +362,50 @@ def current_group_receipts(run: PaymentRun) -> dict[str, HandoffGroupReceipt]:
             continue
         current[receipt.execution_date] = receipt
     return current
+
+
+def handoff_group_reexport_key(
+    run_id: str, execution_date: str, sequence: int
+) -> str:
+    """The object-store key a bounced group's solo re-export
+    lives under: beside the run's own files, named by the group
+    and the re-export's sequence for that group (a group can
+    bounce, be re-presented, and bounce again — each file
+    keeps its own key)."""
+    return (
+        f"payment-runs/{run_id}/handoff-group-{execution_date}"
+        f"-reexport-{sequence}.pain001.xml"
+    )
+
+
+def group_reexports(run: PaymentRun, execution_date: str) -> list:
+    """A group's solo re-exports, in the order they were made.
+    Pure over the run record."""
+    return [
+        entry
+        for entry in run.handoff_group_reexports
+        if entry.execution_date == execution_date
+    ]
+
+
+def latest_group_reexport(run: PaymentRun, execution_date: str):
+    """A group's most recent solo re-export, or None when the
+    group has only ever travelled in the whole file. Pure."""
+    entries = group_reexports(run, execution_date)
+    return entries[-1] if entries else None
+
+
+def group_file_sent_at(run: PaymentRun, execution_date: str) -> str:
+    """When the file the bank is currently answering for this
+    group went out: the latest solo re-export's stamp when the
+    group was re-presented, else the whole-file export's stamp
+    — whichever is later (a fresh whole-file export supersedes
+    a solo one, and restarts every group's clock). Pure."""
+    sent = run.handoff_generated_at or ""
+    reexport = latest_group_reexport(run, execution_date)
+    if reexport is not None and reexport.reexported_at > sent:
+        sent = reexport.reexported_at
+    return sent
 
 
 def group_receipt_by_member(run: PaymentRun) -> dict[str, dict]:

@@ -81,6 +81,7 @@ from .schemas import (
     EscalationDigest,
     GoodsReceipt,
     HandoffGroupReceipt,
+    HandoffGroupReexport,
     HandoffProfile,
     HandoffProfileEvent,
     InformationEscalation,
@@ -4044,6 +4045,237 @@ class InvoiceService:
             )
         store.save_payment_run(run)
         return run
+
+    def reexport_handoff_group(
+        self, run_id: str, execution_date: str, *, actor: str, as_of: str = ""
+    ) -> PaymentRun:
+        """Re-export one bounced batch group as its own file.
+
+        The bank rejected the group; the whole-file answer —
+        re-export the run — would re-present every group,
+        including the ones that already booked, and invite the
+        bank to answer money already moving. So the rejected
+        group goes out ALONE: a single-``PmtInf`` pain.001
+        carrying the group's own ``PmtInf`` id and only its
+        members, at their export-time figures with the discount
+        drift re-verified as of the re-export date
+        (``discount_drift``, itemised on the re-export record —
+        a member whose window closed since the first file is
+        re-priced for the new one, never silently).
+
+        The act is stamped on the run (``HandoffGroupReexport``):
+        the file's key and content hash, who re-exported it and
+        when, the group's new requested execution date — the
+        later of the group's original date and the re-export
+        date, since re-presenting on a date already past asks
+        the bank for yesterday — and the bank's rejection
+        reason, carried from the standing rejected receipt: the
+        corrected file exists because of that reason, and the
+        record says so.
+
+        The re-export resets the group's receipts: the standing
+        rejected receipt is marked superseded (it answered the
+        first file), so the group stands unanswered against the
+        new file and the bank's answer to it records through the
+        same endpoint, against the group's original execution
+        date — the group's identity in both files. The other
+        groups' receipts are untouched, and no payment state
+        moves: the re-export is a file in object storage, like
+        the export it corrects.
+        """
+        from .handoff import (
+            batch_group_members,
+            creditor_completions,
+            current_group_receipts,
+            group_reexports,
+            handoff_content_type,
+            handoff_group_reexport_key,
+            render_handoff_pain001,
+        )
+
+        if not (actor or "").strip():
+            raise ValueError(
+                "Provide 'actor' — a group re-export is recorded "
+                "against a name; an unattributed re-presentation "
+                "is refused"
+            )
+        date = (execution_date or "").strip()
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        if not run.handoff_generated_at:
+            raise ValueError(
+                f"Payment run {run_id} has no hand-off export — "
+                "there is no group to re-export; export it first"
+            )
+        if not (run.handoff_format == "pain001" and run.handoff_batch_booking):
+            raise ValueError(
+                f"Payment run {run_id} was exported as "
+                f"{run.handoff_format or 'unknown'}"
+                + (
+                    " without batch booking"
+                    if run.handoff_format == "pain001"
+                    else ""
+                )
+                + " — solo group re-exports belong to a "
+                "batch-booked pain.001 file, whose PmtInf groups "
+                "are what the bank answers"
+            )
+        groups = batch_group_members(run)
+        if date not in groups:
+            names = ", ".join(sorted(groups)) or "none"
+            raise ValueError(
+                f"No group with requested execution date "
+                f"{date!r} in run {run_id}'s export — its "
+                f"groups are: {names}. A re-export for a group "
+                "the file never made is refused, not filed "
+                "against the nearest date"
+            )
+        standing = current_group_receipts(run).get(date)
+        if standing is None:
+            prior = group_reexports(run, date)
+            if prior:
+                raise ValueError(
+                    f"The {date} group of run {run_id} was "
+                    f"already re-exported on "
+                    f"{prior[-1].reexported_at[:10]} by "
+                    f"{prior[-1].reexported_by} and is awaiting "
+                    "the bank's answer to that file — record "
+                    "the answer when it lands instead of sending "
+                    "the group a third time"
+                )
+            raise ValueError(
+                f"The {date} group of run {run_id} has no "
+                "bank answer recorded — nothing has bounced. "
+                "Re-exporting an unanswered group would fork "
+                "the file: the bank could answer either copy. "
+                "Record the group's answer first; only a "
+                "rejected group is re-presented"
+            )
+        if standing.status == "accepted":
+            raise ValueError(
+                f"The {date} group of run {run_id} stands "
+                f"accepted (recorded by {standing.recorded_by}) "
+                "— its money is booked; there is nothing to "
+                "re-present"
+            )
+        object_store = self.object_store
+        if object_store is None:
+            from .storage import get_object_store
+
+            object_store = get_object_store()
+        if object_store is None:
+            raise ValueError(
+                "Object storage is not configured (set S3_BUCKET, or "
+                "inject an object store): the re-export file has "
+                "nowhere to live"
+            )
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        members = list(groups[date])
+        member_set = set(members)
+        # The group's own run: its members only, at the figures
+        # the first file carried (the run's lines ARE the
+        # export-time figures) — then drift re-verified as of
+        # the re-export date, so the new file never nets off a
+        # discount the bank run can no longer take.
+        sub = run.model_copy(deep=True)
+        sub.lines = [
+            line for line in sub.lines if line.invoice_id in member_set
+        ]
+        sub.invoice_count = len(sub.lines)
+        sub.total_gross = round(
+            sum(line.gross_amount for line in sub.lines), 2
+        )
+        sub.total_discount = round(
+            sum(line.discount_amount for line in sub.lines), 2
+        )
+        sub.total_net = round(
+            sum(line.net_amount for line in sub.lines), 2
+        )
+        records = {
+            record.result.invoice_id: record for record in store.list_records()
+        }
+        sub, drift = discount_drift(sub, records, as_of=anchor)
+        completions, _entries = creditor_completions(
+            sub, self._get_supplier_master()
+        )
+        pmt_inf_id = f"{run.run_id}-{date}"
+        sub.run_id = pmt_inf_id
+        group_date = _parse_date(date)
+        reexport_date = (
+            max(anchor, group_date) if group_date is not None else anchor
+        ).isoformat()
+        data = render_handoff_pain001(
+            sub, completions, requested_execution_date=reexport_date
+        )
+        sequence = len(group_reexports(run, date)) + 1
+        key = handoff_group_reexport_key(run.run_id, date, sequence)
+        object_store.put(
+            key, data, content_type=handoff_content_type("pain001")
+        )
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # The rejected receipt answered the first file; the new
+        # file starts the group unanswered.
+        standing.superseded = True
+        run.handoff_group_reexports.append(
+            HandoffGroupReexport(
+                pmt_inf_id=pmt_inf_id,
+                execution_date=date,
+                reexport_execution_date=reexport_date,
+                rejection_reason=standing.detail,
+                member_invoice_ids=members,
+                key=key,
+                sha256=hashlib.sha256(data).hexdigest(),
+                reexported_by=actor,
+                reexported_at=stamp,
+                drift=drift,
+                drift_total=round(
+                    sum(entry.discount_lost for entry in drift), 2
+                ),
+            )
+        )
+        run.note += (
+            f" Group {date} re-exported alone on "
+            f"{anchor.isoformat()} by {actor}: the bank rejected "
+            f"it ('{standing.detail}'), so the group was "
+            f"re-presented as a single-PmtInf pain.001 "
+            f"({pmt_inf_id}) for execution {reexport_date}; the "
+            "group's receipts reset for the new file."
+        )
+        store.save_payment_run(run)
+        return run
+
+    def get_handoff_group_reexport(
+        self, run_id: str, execution_date: str
+    ) -> bytes | None:
+        """The stored bytes of a group's latest solo re-export,
+        or None when the group has never been re-exported (or
+        the object is gone)."""
+        from .handoff import latest_group_reexport
+
+        run = self._get_store().get_payment_run(run_id)
+        if run is None:
+            return None
+        reexport = latest_group_reexport(
+            run, (execution_date or "").strip()
+        )
+        if reexport is None or not reexport.key:
+            return None
+        object_store = self.object_store
+        if object_store is None:
+            from .storage import get_object_store
+
+            object_store = get_object_store()
+        if object_store is None:
+            return None
+        try:
+            return object_store.get(reexport.key)
+        except Exception:
+            return None
 
     def get_payment_run_handoff(self, run_id: str) -> bytes | None:
         """The stored hand-off bytes for a run, or None when no

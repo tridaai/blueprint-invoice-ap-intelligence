@@ -741,6 +741,52 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/payment-runs/{run_id}/handoff/groups/{execution_date}/reexport", response_model=PaymentRun, dependencies=_AUTH)
+    def reexport_handoff_group(run_id: str, execution_date: str, request: DecisionRequest, as_of: str = Query(default="")) -> PaymentRun:
+        """Re-export one bounced batch group as its own file:
+        the bank rejected the group, so it is re-presented
+        ALONE — a single-PmtInf pain.001 carrying the group's
+        id and only its members, drift re-verified as of the
+        re-export date (``as_of``, default today) — instead of
+        re-sending a whole file whose other groups already
+        booked. The bank's rejection reason is carried onto the
+        run's re-export record, and the group's receipts reset:
+        the rejected answer answered the first file, and the
+        group stands unanswered against the new one. Only a
+        group whose standing answer is a rejection can be
+        re-exported — an accepted group is final, and an
+        unanswered group has not bounced."""
+        try:
+            return svc.reexport_handoff_group(
+                run_id,
+                execution_date,
+                actor=_decision_actor(request),
+                as_of=as_of,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/payment-runs/{run_id}/handoff/groups/{execution_date}/reexport", dependencies=_AUTH)
+    def download_group_reexport(run_id: str, execution_date: str) -> PlainTextResponse:
+        """Download a group's latest solo re-export file (the
+        single-PmtInf pain.001 the bank is re-presented with).
+        404 until the group has been re-exported."""
+        data = svc.get_handoff_group_reexport(run_id, execution_date)
+        if data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No solo re-export generated for this group yet.",
+            )
+        return PlainTextResponse(
+            data.decode("utf-8"),
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f"attachment; filename={run_id}-{execution_date}-reexport.pain001.xml"
+            },
+        )
+
     @app.get("/payment-runs/{run_id}/handoff", dependencies=_AUTH)
     def download_payment_run_handoff(run_id: str) -> PlainTextResponse:
         """Download the stored hand-off file, in whichever format

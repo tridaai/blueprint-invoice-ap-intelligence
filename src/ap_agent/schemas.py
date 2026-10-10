@@ -1263,6 +1263,50 @@ class HandoffGroupReceipt(BaseModel):
     superseded: bool = False  # a later receipt for the same group replaced this one
 
 
+class HandoffGroupReexport(BaseModel):
+    """One bounced batch group's solo re-export: the group
+    re-presented as its own single-``PmtInf`` pain.001 file.
+
+    The bank rejected the group (its standing receipt says so,
+    with the bank's reason); re-sending the whole batch file
+    for one bad group would re-present groups that already
+    booked and invite double answers for money already moving.
+    So the group goes out ALONE (``service.
+    reexport_handoff_group``): one ``PmtInf`` carrying the
+    group's ``PmtInf`` id, only its members, at their
+    export-time figures with drift re-verified as of the
+    re-export date and itemised here. The rejection reason the
+    bank gave rides on this record — the corrected file exists
+    because of it, and the record says so.
+
+    The re-export resets the group's receipts: the standing
+    rejected receipt is marked superseded (it answered the
+    FIRST file), and the group stands unanswered against the
+    new file until the bank answers it — the same recording
+    endpoint takes that answer, against the group's original
+    execution date, which is the group's identity in both
+    files. Like the export itself, the re-export changes no
+    payment state: it is a file in object storage, handed to
+    the bank by a human."""
+
+    pmt_inf_id: str = ""  # the group's id in both files: f"{run_id}-{execution_date}"
+    execution_date: str = ""  # the group's original requested execution date
+    reexport_execution_date: str = ""  # the ReqExctnDt written into the new file
+    rejection_reason: str = ""  # the bank's reason, carried from the rejected receipt
+    member_invoice_ids: list[str] = Field(default_factory=list)
+    key: str = ""  # the object-store key the new file lives under
+    sha256: str = ""  # the content hash of the exact bytes stored
+    reexported_by: str = ""
+    reexported_at: str = ""  # ISO timestamp
+    # Discount drift re-verified as of the re-export date for
+    # the group's members alone (same entries the export writes
+    # for the whole run): the new file pays any drifted member
+    # at its re-export-time figure, and this is the receipt of
+    # what moved between the two files.
+    drift: list[PaymentRunDrift] = Field(default_factory=list)
+    drift_total: float = 0.0
+
+
 class PaymentRun(BaseModel):
     """A proposed payment run: approved invoices grouped by currency
     and due window, totals computed in code. The run is a draft
@@ -1339,6 +1383,16 @@ class PaymentRun(BaseModel):
     # group's members stamped from the export receipt. A rejected
     # group's later answer supersedes its earlier one.
     handoff_group_receipts: list[HandoffGroupReceipt] = Field(
+        default_factory=list
+    )
+    # Solo re-exports of bounced batch groups: each rejected
+    # group that was re-presented as its own single-PmtInf file,
+    # with the bank's rejection reason carried on the record
+    # (see HandoffGroupReexport). A fresh whole-file export does
+    # NOT clear these — they are the history of the groups'
+    # corrections; the receipts reset is what a fresh export
+    # does, and it does it to every group at once.
+    handoff_group_reexports: list[HandoffGroupReexport] = Field(
         default_factory=list
     )
     # Drift forecast, computed at confirmation: the discounted
