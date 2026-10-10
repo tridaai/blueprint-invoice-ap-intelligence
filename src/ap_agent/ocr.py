@@ -33,11 +33,18 @@ not this text-layer adapter.
 
 from __future__ import annotations
 
-from .config import env_float, env_str, load_dotenv
+from .config import completion_budget, env_float, env_str, load_dotenv
 from .errors import translate_provider_error
 from .schemas import DocumentInput, OcrResult
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
+
+# The reply is the document's transcription verbatim, in JSON —
+# its size scales with the document, and a reasoning reader thinks
+# inside the same budget. The pre-audit 1200 could truncate a long
+# read mid-document; 2000 is the audited default, tunable via
+# OCR_MAX_TOKENS (docs/architecture.md §10).
+DEFAULT_OCR_MAX_TOKENS = 2000
 
 _OCR_SYSTEM = (
     "You are an OCR engine. Transcribe the document text verbatim. "
@@ -108,7 +115,9 @@ class NimOcrEngine:
             response = self._client.chat.completions.create(
                 model=self._model,
                 temperature=0,
-                max_tokens=1200,
+                max_tokens=completion_budget(
+                    "OCR_MAX_TOKENS", DEFAULT_OCR_MAX_TOKENS
+                ),
                 messages=[
                     {"role": "system", "content": _OCR_SYSTEM},
                     {"role": "user", "content": document.text_layer},

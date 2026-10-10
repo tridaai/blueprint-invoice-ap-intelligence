@@ -22,10 +22,18 @@ model's reasoning kept out of the answer channel.
 
 from __future__ import annotations
 
-from .config import env_float, env_str, load_dotenv
+from .config import completion_budget, env_float, env_str, load_dotenv
 from .errors import translate_provider_error
 from .ocr import LOW_CONFIDENCE_THRESHOLD
 from .schemas import DocumentInput, InvoiceInput, OcrResult, VisionResult
+
+# The verdict is a small JSON object, but the lead vision model is
+# a reasoning omni model that thinks inside the same budget it
+# answers in: the pre-audit 300 left the live verdicts thin
+# headroom (they arrived — with nothing to spare). 1000 is the
+# audited default; VISION_MAX_TOKENS tunes it per deployment
+# (docs/architecture.md §10).
+DEFAULT_VISION_MAX_TOKENS = 1000
 
 _VISION_SYSTEM = (
     "You verify supplier documents for an accounts-payable pipeline. "
@@ -129,7 +137,9 @@ class NimVision:
             response = self._client.chat.completions.create(
                 model=self._model,
                 temperature=0,
-                max_tokens=300,
+                max_tokens=completion_budget(
+                    "VISION_MAX_TOKENS", DEFAULT_VISION_MAX_TOKENS
+                ),
                 messages=[
                     {"role": "system", "content": _VISION_SYSTEM},
                     {"role": "user", "content": user},

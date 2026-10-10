@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import re
 
-from .config import env_float, env_str, load_dotenv
+from .config import completion_budget, env_float, env_str, load_dotenv
 from .errors import translate_construction_error, translate_provider_error
 from .prompts import (
     CLASSIFY_SYSTEM_PROMPT,
@@ -67,6 +67,44 @@ from .schemas import TRIAGE_OUTCOMES
 # Shared request timeout for provider API calls (seconds), overridable
 # with the LLM_TIMEOUT_SECONDS environment variable.
 DEFAULT_TIMEOUT_SECONDS = 60.0
+
+# Audited completion budgets (docs/architecture.md §10): every
+# fixed max_tokens in the provider paths resolves through this
+# registry — call name -> (env var, audited default). The defaults
+# are sized for the answer PLUS a reasoning model's thinking,
+# which spends the same budget: the pre-audit values (300 for
+# classify, 400 for extraction, 500 for the JSON critics) were
+# answer-sized and starved reasoning models into empty or
+# truncated replies that read as malformed output — the same
+# failure the LLM eval pack's judge hit at 300 before
+# JUDGE_MAX_TOKENS (round 14). Each budget is env-tunable for
+# deployments whose models think longer (or barely at all).
+COMPLETION_BUDGETS: dict[str, tuple[str, int]] = {
+    "classify": ("LLM_CLASSIFY_MAX_TOKENS", 1000),
+    "extract": ("LLM_EXTRACT_MAX_TOKENS", 1500),
+    "draft": ("LLM_DRAFT_MAX_TOKENS", 2500),
+    "diagnose": ("LLM_DIAGNOSE_MAX_TOKENS", 1500),
+    "options": ("LLM_OPTIONS_MAX_TOKENS", 1200),
+    "info_request": ("LLM_INFO_REQUEST_MAX_TOKENS", 1200),
+    "verify": ("LLM_VERIFY_MAX_TOKENS", 1200),
+    "review": ("LLM_REVIEW_MAX_TOKENS", 1200),
+}
+
+
+def completion_budgets_in_force() -> dict[str, int]:
+    """The audited budgets as currently resolved — env override
+    over audited default — one per provider call, for traces and
+    operator surfaces that need to say what a run ran with."""
+    return {
+        call: completion_budget(env_name, default)
+        for call, (env_name, default) in COMPLETION_BUDGETS.items()
+    }
+
+
+def _budget(call: str) -> int:
+    """The completion budget in force for one provider call."""
+    env_name, default = COMPLETION_BUDGETS[call]
+    return completion_budget(env_name, default)
 
 # Indicative USD list prices per 1M tokens (input, output) for the
 # telemetry cost ESTIMATE. Verify against your provider — prices move.
@@ -460,7 +498,7 @@ class _BaseLLMBackend:
         return fallback_subject, text.strip()
 
     def draft_documents(self, context: DraftContext) -> tuple[str, str, str]:
-        text = self._complete(DRAFT_SYSTEM_PROMPT, self._render_prompt(context), max_tokens=1200)
+        text = self._complete(DRAFT_SYSTEM_PROMPT, self._render_prompt(context), max_tokens=_budget("draft"))
         subject, rest = self._split_subject(
             text,
             f"Invoice {context['invoice_id']} — "
@@ -485,7 +523,7 @@ class _BaseLLMBackend:
         for a malformed reply.
         """
         user = CLASSIFY_USER_TEMPLATE.format(**self._facts_block(context))
-        text = self._complete(CLASSIFY_SYSTEM_PROMPT, user, max_tokens=300)
+        text = self._complete(CLASSIFY_SYSTEM_PROMPT, user, max_tokens=_budget("classify"))
         return _parse_triage(text, self.name)
 
     def extract_document_fields(
@@ -504,7 +542,7 @@ class _BaseLLMBackend:
             fields=", ".join(fields),
             raw_text=raw_text,
         )
-        text = self._complete(EXTRACT_SYSTEM_PROMPT, user, max_tokens=400)
+        text = self._complete(EXTRACT_SYSTEM_PROMPT, user, max_tokens=_budget("extract"))
         data = parse_json_object(text)
         if data is None:
             return None
@@ -552,7 +590,7 @@ class _BaseLLMBackend:
         deterministic template diagnosis built from the same evidence.
         """
         return self._parse_diagnosis(
-            self._complete(DIAGNOSE_SYSTEM_PROMPT, self._diagnose_user(context), max_tokens=500)
+            self._complete(DIAGNOSE_SYSTEM_PROMPT, self._diagnose_user(context), max_tokens=_budget("diagnose"))
         )
 
     def _tool_loop(
@@ -612,7 +650,7 @@ class _BaseLLMBackend:
             **self._facts_block(context),
             diagnosis=context.get("diagnosis_summary") or "none recorded",
         )
-        data = parse_json_list(self._complete(OPTIONS_SYSTEM_PROMPT, user, max_tokens=500))
+        data = parse_json_list(self._complete(OPTIONS_SYSTEM_PROMPT, user, max_tokens=_budget("options")))
         if not data:
             return None
         proposals: list[dict] = []
@@ -644,7 +682,7 @@ class _BaseLLMBackend:
                 f"- {item}" for item in context.get("missing_items", [])
             ),
         )
-        text = self._complete(INFO_REQUEST_SYSTEM_PROMPT, user, max_tokens=400)
+        text = self._complete(INFO_REQUEST_SYSTEM_PROMPT, user, max_tokens=_budget("info_request"))
         return text.strip() or None
 
     def verify_draft(self, context: dict) -> dict | None:
@@ -661,7 +699,7 @@ class _BaseLLMBackend:
             supplier_letter=context.get("supplier_letter", ""),
             ap_packet=context.get("ap_packet", ""),
         )
-        data = parse_json_object(self._complete(VERIFY_SYSTEM_PROMPT, user, max_tokens=500))
+        data = parse_json_object(self._complete(VERIFY_SYSTEM_PROMPT, user, max_tokens=_budget("verify")))
         if data is None or "grounded" not in data:
             return None
         issues = data.get("issues") or []
@@ -701,7 +739,7 @@ class _BaseLLMBackend:
         )
         model = env_str("REVIEWER_MODEL") or None
         text, _usage = self.complete_with_usage(
-            REVIEWER_SYSTEM_PROMPT, user, max_tokens=500, model=model
+            REVIEWER_SYSTEM_PROMPT, user, max_tokens=_budget("review"), model=model
         )
         data = parse_json_object(text)
         if data is None:
@@ -815,7 +853,7 @@ class OpenAIBackend(_BaseLLMBackend):
         log: list[dict] = []
         calls = 0
         while True:
-            kwargs: dict = {"model": self._model, "max_tokens": 800, "messages": messages}
+            kwargs: dict = {"model": self._model, "max_tokens": _budget("diagnose"), "messages": messages}
             if calls < max_tool_calls and not getattr(self, "_tools_unsupported", False):
                 kwargs["tools"] = tools
             try:
@@ -945,7 +983,7 @@ class AnthropicBackend(_BaseLLMBackend):
         while True:
             kwargs: dict = {
                 "model": self._model,
-                "max_tokens": 800,
+                "max_tokens": _budget("diagnose"),
                 "system": system,
                 "messages": messages,
             }

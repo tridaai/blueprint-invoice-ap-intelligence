@@ -115,3 +115,20 @@ def env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def completion_budget(name: str, default: int) -> int:
+    """A provider completion budget (``max_tokens``) in force.
+
+    Reasoning models think inside the same completion budget they
+    answer in: a budget sized for the answer alone comes back empty
+    or truncated mid-thought, which downstream parses as a
+    malformed reply — a harness failure dressed as a model one
+    (the live judge's 300-token starvation, round 14). Every fixed
+    budget in the provider paths resolves through here: the
+    audited default for that call, overridable via its env var,
+    never below 1. The audit — each call, its old budget, its
+    default, and why — is written down in
+    ``docs/architecture.md`` §10.
+    """
+    return max(1, env_int(name, default))

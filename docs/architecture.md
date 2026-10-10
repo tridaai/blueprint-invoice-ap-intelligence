@@ -140,6 +140,23 @@ Every run returns telemetry: backend, model, call count, token usage, estimated 
 
 Structured JSON logging with request IDs threads the API surface; the CLI's `--stream` flag prints the same event stream for a local run. Two read surfaces aggregate the store itself: `GET /metrics` (runs, outcomes, decisions, mean latency, token/cost totals summed only over runs that reported them — null, not zero, when none did) and `GET /audit/export` (JSON/CSV: one row per invoice with the triage conclusion, the human decision and its reason, and the dispatch outcome). Aggregating at read time keeps the store the single source of truth — there is no counters table to drift.
 
+**Completion-budget audit.** Reasoning models think inside the same completion budget they answer in, so a budget sized for the answer alone returns an empty or truncated reply — which the pipeline then records as a malformed model reply, a harness failure dressed as a drafting one. The live runs made this concrete twice: the LLM eval pack's judge errored 4 of 6 verdicts at a 300-token budget (fixed first, as `JUDGE_MAX_TOKENS`, default 2000), and the vision verdicts arrived live with thin headroom at the same 300. Every fixed `max_tokens` in the provider paths was therefore audited against reasoning-model behaviour; each now resolves through `config.completion_budget` — the audited default below, overridable per call by its env var (`model_backends.completion_budgets_in_force()` reports the resolved set). Tests pin the budget each call actually carries, defaults and overrides alike.
+
+| Call | Was | Default now | Why |
+|---|---|---|---|
+| LLM classify (cross-check triage) | 300 | 1000 (`LLM_CLASSIFY_MAX_TOKENS`) | The answer is a small JSON verdict; the 300 starved the thinking that precedes it, and a starved classify silently degrades the run to rules-only |
+| Document extraction | 400 | 1500 (`LLM_EXTRACT_MAX_TOKENS`) | The reply enumerates every requested field per document — it scales with the document even before reasoning |
+| Draft documents (letter + packet) | 1200 | 2500 (`LLM_DRAFT_MAX_TOKENS`) | Two documents in one reply; the longest answer in the pipeline |
+| Diagnosis (single-shot + each tool-loop turn) | 500 / 800 | 1500 (`LLM_DIAGNOSE_MAX_TOKENS`) | A summary plus risk factors as JSON; the tool loop's composing turn carries the same budget |
+| Next-step options | 500 | 1200 (`LLM_OPTIONS_MAX_TOKENS`) | A JSON list of proposals with descriptions |
+| Information request | 400 | 1200 (`LLM_INFO_REQUEST_MAX_TOKENS`) | A letter, not a snippet |
+| Self-verification | 500 | 1200 (`LLM_VERIFY_MAX_TOKENS`) | A JSON critique over both drafts |
+| Independent review | 500 | 1200 (`LLM_REVIEW_MAX_TOKENS`) | A JSON verdict with findings over both drafts |
+| Vision verdict (NIM adapter) | 300 | 1000 (`VISION_MAX_TOKENS`) | Small JSON verdict, reasoning omni model — the flagged thin-headroom call |
+| OCR read (NIM adapter) | 1200 | 2000 (`OCR_MAX_TOKENS`) | The reply is the document transcribed verbatim — it scales with the document |
+
+The generic `_complete` default (600) is not a call budget: every production call site names its audited budget explicitly, and the default remains only as the signature's fallback for ad-hoc completions (the eval pack's judge passes its own).
+
 ## 11. Evaluation
 
 Two packs, both in-repo. The deterministic pack (`evals/run_evals.py`) runs 30 golden cases — the 14 samples plus 16 constructed variants — through one service instance in queue order (order is load-bearing for the duplicate case) and gates on triage-outcome and match-status accuracy at 95%; it then matches the bundled sample credit notes against the populated store, so a note can only settle a variance its invoice actually computed, and drafts the duplicate-recovery pack for the portal-resend sample once its original is approved. The opt-in LLM pack (`evals/run_llm_evals.py`) runs the same cases against a live provider and adds an LLM judge for draft grounding and cleanliness; it exits 2 without a provider rather than grade the offline templates. Neither pack claims real-world accuracy: the golden set is synthetic and exists as a regression gate.
