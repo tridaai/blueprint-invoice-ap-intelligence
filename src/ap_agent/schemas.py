@@ -1035,13 +1035,22 @@ class RecoveryCaseAgingItem(BaseModel):
 
 class FourEyesAgingItem(BaseModel):
     """One large payment run waiting on its second confirmer past
-    the aging threshold (``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``): the
-    run is confirmed once, its hand-off is locked, and the second
-    pair of eyes has not arrived. A queue-shaped stall — the run
-    cannot export, and its discounts age while it waits — so it
-    joins the approver's worklist as an action item, with the first
-    confirmer named: they are the person to nudge, and the record
-    of who is *not* allowed to be the second."""
+    its aging threshold: the run is confirmed once, its hand-off
+    is locked, and the second pair of eyes has not arrived. A
+    queue-shaped stall — the run cannot export, and its discounts
+    age while it waits — so it joins the approver's worklist as an
+    action item, with the first confirmer named: they are the
+    person to nudge, and the record of who is *not* allowed to be
+    the second.
+
+    The threshold is per run (``aging_threshold_days`` — the one
+    that actually applied): the configured
+    ``PAYMENT_RUN_FOUR_EYES_AGING_DAYS`` for an ordinary run, but
+    tightened to 0 when the run's confirmation-time drift forecast
+    flags members lapsing before the expected export — a run
+    projected to burn discounts while it waits has no patience to
+    spare, so it is chased from the first day of the wait, and the
+    item carries the projected lapse value the wait puts at risk."""
 
     run_id: str
     currency: str = "USD"
@@ -1050,6 +1059,10 @@ class FourEyesAgingItem(BaseModel):
     confirmed_by: str = ""  # the first confirmer — named, on purpose
     confirmed_at: str = ""  # ISO timestamp of the first confirmation
     age_days: Optional[int] = None  # since the first confirmation
+    aging_threshold_days: int = 0  # the threshold that applied to this run
+    forecast_tightened: bool = False  # the forecast tightened the threshold
+    forecast_lapse_count: int = 0  # members the forecast flags
+    forecast_value_at_risk: float = 0.0  # their discounts, summed
 
 
 class QueueView(BaseModel):
@@ -1094,7 +1107,12 @@ class QueueView(BaseModel):
 class DigestForecastLapse(BaseModel):
     """One discount projected to lapse, on a run confirmed on the
     digest's day: the forecast section of the digest. Carries the
-    run it belongs to (``PaymentRunForecast`` itself does not)."""
+    run it belongs to (``PaymentRunForecast`` itself does not).
+    ``blocked_on_four_eyes`` names the stall inside the
+    projection: the run cannot export until its second
+    confirmation lands, so the expected export date the forecast
+    assumes is hostage to the wait — the lapse is not just
+    projected, it is queued behind a person."""
 
     run_id: str
     invoice_id: str
@@ -1103,6 +1121,7 @@ class DigestForecastLapse(BaseModel):
     discount_amount: float = 0.0
     discount_deadline: str = ""
     expected_export_date: str = ""
+    blocked_on_four_eyes: bool = False
 
 
 class DigestDriftEntry(BaseModel):

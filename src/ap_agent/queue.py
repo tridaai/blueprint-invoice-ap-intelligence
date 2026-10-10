@@ -37,7 +37,12 @@ confirmer arrives, so past ``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``
 the wait joins the worklist as an action item — the run, its
 net total, how long it has waited, and the first confirmer's
 name (the person to nudge, and the one person who cannot be
-the second).
+the second). The threshold is forecast-aware: a run whose
+confirmation-time drift forecast flags members lapsing before
+the expected export has no slack — every day of the wait is a
+day the projected lapse gets closer — so its threshold
+tightens to 0 days and it is chased from the first day of the
+wait, carrying the projected lapse value the wait puts at risk.
 """
 
 from __future__ import annotations
@@ -129,6 +134,15 @@ def recovery_case_aging(
     return items, buckets, breaches
 
 
+# The tightened aging threshold for a forecast-flagged four-eyes
+# run: zero days of patience. The configured threshold is the
+# allowance for a run whose discounts are safe; a run the
+# confirmation-time forecast already projects to lapse has no
+# allowance to spend — the wait itself is the leak (see the rule
+# in four_eyes_aging).
+FORECAST_TIGHTENED_AGING_DAYS = 0
+
+
 def four_eyes_aging(
     runs: Iterable[PaymentRun],
     *,
@@ -138,10 +152,25 @@ def four_eyes_aging(
     """The four-eyes runs whose second confirmation is overdue:
     confirmed once, stamped ``four_eyes_required``, no second
     confirmer yet, and the first confirmation older than the
-    aging threshold. A run inside the threshold is a normal
+    run's aging threshold. A run inside its threshold is a normal
     in-flight wait, not a stall; a second-confirmed (or exported)
-    run is done waiting and drops out. Work order: the longest
-    wait first — it has the least discount headroom left.
+    run is done waiting and drops out.
+
+    The threshold is per run, and the forecast sets it: when the
+    run's confirmation-time drift forecast (``run.drift_forecast``)
+    flags members lapsing before the expected export, the second
+    confirmation is the only thing standing between the run and
+    its export — so the threshold tightens from the configured
+    ``aging_days`` to ``FORECAST_TIGHTENED_AGING_DAYS`` (0): the
+    run joins the worklist on the first day of its wait, and the
+    item carries the forecast's lapse count and value at risk.
+    A run with an empty forecast keeps the configured threshold —
+    the forecast was computed at confirmation and is not
+    recomputed here.
+
+    Work order: forecast-tightened items first (value at risk
+    outranks raw age), then the longest wait — it has the least
+    discount headroom left.
     """
     items: list[FourEyesAgingItem] = []
     for run in runs:
@@ -153,7 +182,9 @@ def four_eyes_aging(
         if confirmed is None:
             continue
         age_days = (as_of - confirmed).days
-        if age_days <= aging_days:
+        tightened = bool(run.drift_forecast)
+        threshold = FORECAST_TIGHTENED_AGING_DAYS if tightened else aging_days
+        if age_days <= threshold:
             continue
         items.append(
             FourEyesAgingItem(
@@ -164,9 +195,21 @@ def four_eyes_aging(
                 confirmed_by=run.confirmed_by or "",
                 confirmed_at=run.confirmed_at or "",
                 age_days=age_days,
+                aging_threshold_days=threshold,
+                forecast_tightened=tightened,
+                forecast_lapse_count=len(run.drift_forecast),
+                forecast_value_at_risk=round(
+                    sum(e.discount_amount for e in run.drift_forecast), 2
+                ),
             )
         )
-    items.sort(key=lambda item: (-(item.age_days or 0), item.run_id))
+    items.sort(
+        key=lambda item: (
+            0 if item.forecast_tightened else 1,
+            -(item.age_days or 0),
+            item.run_id,
+        )
+    )
     return items
 
 

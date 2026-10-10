@@ -361,8 +361,8 @@ async function loadQueue() {
   }
   const foureyes = q.four_eyes_pending || [];
   if (foureyes.length) {
-    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Four-eyes runs waiting</b> — confirmed once, hand-off locked, second confirmation past the ${q.four_eyes_aging_days}-day aging threshold. The second confirmer must be someone other than the first.</p>
-    <table><tr><th>Run</th><th>Net</th><th>First confirmer</th><th>Confirmed</th><th>Waiting</th></tr>${foureyes.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.currency)} ${r.total_net}</td><td>${esc(r.confirmed_by || "—")}</td><td>${esc((r.confirmed_at || "").slice(0, 10))}</td><td>${pill((r.age_days ?? "—") + "d waiting", "bad")}</td></tr>`).join("")}</table>`;
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Four-eyes runs waiting</b> — confirmed once, hand-off locked, second confirmation past the ${q.four_eyes_aging_days}-day aging threshold. The second confirmer must be someone other than the first. A run whose drift forecast flags lapses is chased from day one: its threshold tightens to 0, and the projected lapse value rides on the item.</p>
+    <table><tr><th>Run</th><th>Net</th><th>First confirmer</th><th>Confirmed</th><th>Waiting</th></tr>${foureyes.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.currency)} ${r.total_net}</td><td>${esc(r.confirmed_by || "—")}</td><td>${esc((r.confirmed_at || "").slice(0, 10))}</td><td>${pill((r.age_days ?? "—") + "d waiting", "bad")}${r.forecast_tightened ? `<br>${pill("forecast: " + r.forecast_lapse_count + " lapse(s) · " + esc(r.currency) + " " + r.forecast_value_at_risk + " at risk", "warn")}` : ""}</td></tr>`).join("")}</table>`;
   }
 }
 

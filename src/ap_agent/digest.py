@@ -152,6 +152,13 @@ def build_digest(
                         discount_amount=entry.discount_amount,
                         discount_deadline=entry.discount_deadline,
                         expected_export_date=entry.expected_export_date,
+                        # A four-eyes run cannot export until its
+                        # second confirmation lands, so its expected
+                        # export date is hostage to that wait.
+                        blocked_on_four_eyes=bool(
+                            run.four_eyes_required
+                            and not run.second_confirmed_by
+                        ),
                     )
                 )
                 forecast_value[run.currency] = round(
@@ -265,6 +272,15 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
             f"{item.run_id} ({item.currency} {item.total_net:,.2f} net) "
             f"confirmed by {item.confirmed_by or 'an unnamed confirmer'}, "
             f"waiting {item.age_days}d for a second confirmer"
+            + (
+                f" — its forecast flags {item.forecast_lapse_count} "
+                f"discount(s) totalling {item.currency} "
+                f"{item.forecast_value_at_risk:,.2f} lapsing before the "
+                "expected export, so the wait was chased from day one "
+                "(aging threshold tightened to 0 days)"
+                if item.forecast_tightened
+                else ""
+            )
             for item in digest.four_eyes_pending
         )
         parts.append(
@@ -280,11 +296,19 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
             f"{entry.discount_amount:,.2f}, deadline {entry.discount_deadline})"
             for entry in digest.forecast_lapses
         )
+        blocked = sum(1 for e in digest.forecast_lapses if e.blocked_on_four_eyes)
         parts.append(
             f"Forecast on runs confirmed today: {len(digest.forecast_lapses)} "
             f"discount(s) projected to lapse before their runs' expected "
             f"export dates — {named}. {_money(digest.forecast_value_by_currency)} "
             "at risk if the exports wait."
+            + (
+                f" {blocked} of them sit on four-eyes runs still waiting "
+                "on a second confirmation — those projections are blocked "
+                "on the wait, not on the export."
+                if blocked
+                else ""
+            )
         )
     if digest.drift_today:
         named = "; ".join(
