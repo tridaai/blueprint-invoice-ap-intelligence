@@ -81,9 +81,30 @@
     <div class="gate">
       <button id="propose">Propose payment run</button>
       <input type="text" id="lead" placeholder="Finance lead (for confirm)" size="22">
-      <span class="note" id="paynote">Groups the approved invoices by currency + due window. Confirming records the lead's acceptance; the AP system of record executes the run.</span>
+      <span class="note" id="paynote">Groups the approved invoices by currency + due window. Confirming records the lead's acceptance; the AP system of record executes the run. A run above the four-eyes threshold also needs a second, different confirmer before its hand-off file can be generated.</span>
     </div>
     <div id="payrunsbody"></div>
+  </section>
+  <section id="sec-master">
+    <h2>Supplier master changes (governed — proposer ≠ approver)</h2>
+    <p class="note">A bank-detail change is proposed here, decided by a second operator with the out-of-band verification reference recorded, and applied only from its effective date. Until then the fraud screen keeps matching documents against the current record — the new details still read as a mismatch.</p>
+    <div class="gate">
+      <input type="text" id="mc-supplier" placeholder="Supplier name" size="24">
+      <input type="text" id="mc-account" placeholder="New account number" size="18">
+      <input type="text" id="mc-sort" placeholder="Sort code" size="10">
+      <input type="text" id="mc-iban" placeholder="IBAN" size="20">
+      <input type="text" id="mc-effective" placeholder="Effective date (YYYY-MM-DD, optional)" size="26">
+      <input type="text" id="mc-reason" placeholder="Reason" size="26">
+      <input type="text" id="mc-actor" placeholder="Your name" size="18">
+      <button id="mc-propose">Propose change</button>
+    </div>
+    <div class="gate" style="margin-top:8px">
+      <input type="text" id="mc-invoice" placeholder="Invoice id (e.g. INV-1010)" size="20">
+      <button id="mc-from-invoice" class="secondary">Propose from invoice</button>
+      <button id="mc-load" class="secondary">Load changes</button>
+      <span class="note" id="mcnote">Proposing from an invoice turns the bank details its documents state into a pending request — nothing is applied by proposing.</span>
+    </div>
+    <div id="mcbody"></div>
   </section>
 </main>
 <script>
@@ -189,9 +210,12 @@ function render(r) {
       <button id="approve">Approve packet</button>
       <button id="reject" class="secondary">Reject</button>
     </div>
-    <p class="note">Approving records the decision only — it never pays the invoice. Drafts that fail guardrails cannot be approved (the API returns 422).</p>`;
+    <p class="note">Approving records the decision only — it never pays the invoice. Drafts that fail guardrails cannot be approved (the API returns 422).</p>
+    ${r.status === "approved" ? receiptHtml(r) : ""}`;
   $("approve").onclick = () => decide("approve");
   $("reject").onclick = () => decide("reject");
+  const recBtn = $("recordreceipt");
+  if (recBtn) recBtn.onclick = recordReceipt;
   renderRecovery(r);
   $("out").classList.remove("hidden");
 }
@@ -238,6 +262,30 @@ async function transitionCase(toStatus) {
   renderPack(body);
 }
 
+function receiptHtml(r) {
+  const rec = r.posting_receipt;
+  const line = rec
+    ? `<p class="kv"><b>ERP posting receipt:</b> ${rec.status === "posted" ? pill("posted · " + (rec.external_reference || ""), "ok") : pill("failed — " + (rec.detail || ""), "bad")} · recorded by ${esc(rec.recorded_by || "")} · ${esc(rec.recorded_at || "")}</p>`
+    : `<p class="kv"><b>ERP posting receipt:</b> none recorded yet — when the ERP answers the posting (see <span class="note">examples/erp_posting.py</span>), record its outcome here.</p>`;
+  return `${line}
+    <div class="gate">
+      <select id="rec-status"><option value="posted">posted</option><option value="failed">failed</option></select>
+      <input type="text" id="rec-ref" placeholder="ERP document number (when posted)" size="26">
+      <input type="text" id="rec-detail" placeholder="ERP reason (when failed)" size="26">
+      <input type="text" id="rec-key" placeholder="Idempotency key (from the posting)" size="28">
+      <button id="recordreceipt" class="secondary">Record posting receipt</button>
+    </div>`;
+}
+async function recordReceipt() {
+  const actor = ($("actor").value || "").trim();
+  if (!actor) { $("status").textContent = "Enter your name in the approver field first — receipts are attributable."; return; }
+  const res = await fetch(`/invoices/${currentId}/posting-receipt`, {method: "POST", headers: headers(), body: JSON.stringify({actor, status: $("rec-status").value, external_reference: $("rec-ref").value.trim(), detail: $("rec-detail").value.trim(), idempotency_key: $("rec-key").value.trim()})});
+  const body = await res.json();
+  if (!res.ok) { $("status").textContent = `Receipt refused (${res.status}): ${body.detail || ""}`; return; }
+  $("status").textContent = `Posting receipt recorded for ${currentId}: ${body.posting_receipt.status}${body.posting_receipt.external_reference ? " · " + body.posting_receipt.external_reference : ""}. The agent posted nothing — this records the ERP's answer.`;
+  render(body);
+}
+
 async function decide(kind) {
   const actor = $("actor").value.trim(), reason = $("reason").value.trim();
   if (!actor) { $("status").textContent = "Enter your name first — decisions are attributable."; return; }
@@ -268,16 +316,44 @@ async function loadQueue() {
   const mix = Object.entries(q.triage_mix || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
   $("queuenote").textContent = `${q.count} awaiting · ${q.overdue_count} overdue · as of ${q.as_of}${mix ? " · mix: " + mix : ""}`;
   $("queuebody").innerHTML = (q.items || []).length ? `<table><tr><th>Invoice</th><th>Supplier</th><th>Outcome</th><th>Amount</th><th>Due</th><th>Aging</th><th>Discount by</th></tr>${q.items.map(i => `<tr><td>${esc(i.invoice_id)}<br><span class="note">${esc(i.invoice_number || "")}</span></td><td>${esc(i.supplier_name)}</td><td>${pill(i.outcome, i.outcome === "clean_match" ? "ok" : "warn")} ${sevPill(i.severity)}</td><td>${esc(i.currency)} ${i.total_amount ?? "—"}</td><td>${esc(i.due_date || "—")}</td><td>${i.days_overdue > 0 ? pill(i.days_overdue + "d overdue", "bad") : i.bucket === "due_today" ? pill("due today", "warn") : esc(String(i.bucket).replaceAll("_", " "))}</td><td>${i.discount_deadline ? esc(i.discount_deadline) + (i.discount_days_left != null ? ` (${i.discount_days_left}d left)` : "") : "—"}</td></tr>`).join("")}</table>` : `<p class="kv">Nothing is waiting at the gate.</p>`;
+  const cases = q.recovery_cases || [];
+  if (cases.length) {
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Open recovery cases</b> — ${q.recovery_open_count} open · ${q.recovery_sla_breaches} past the ${q.recovery_sla_days}-day per-status SLA</p>
+    <table><tr><th>Case</th><th>Supplier</th><th>Amount</th><th>Stuck on</th><th>Case age</th><th>In status</th><th>SLA</th></tr>${cases.map(c => `<tr><td>${esc(c.pack_id)}<br><span class="note">${esc(c.duplicate_invoice_id)}</span></td><td>${esc(c.supplier_name)}</td><td>${esc(c.currency)} ${c.amount}</td><td>${esc(c.case_status.replaceAll("_", " "))}</td><td>${c.age_days ?? "—"}d</td><td>${c.status_age_days ?? "—"}d</td><td>${c.sla_breached ? pill("SLA breached", "bad") : pill("within SLA", "ok")}</td></tr>`).join("")}</table>`;
+  }
 }
 
+function runControls(run) {
+  if (run.status !== "confirmed") return `<button class="secondary" data-confirm="${esc(run.run_id)}">Confirm run</button>`;
+  let html = "";
+  if (run.four_eyes_required && !run.second_confirmed_by) {
+    html += `${pill("four-eyes: second confirmation pending", "warn")} <button class="secondary" data-second="${esc(run.run_id)}">Confirm as second</button> <span class="note">hand-off locked until a different confirmer confirms</span>`;
+    return html;
+  }
+  if (run.four_eyes_required) html += `${pill("four-eyes complete", "ok")} `;
+  html += run.handoff_key
+    ? `<span class="note">hand-off: ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…</span> <button class="secondary" data-download="${esc(run.run_id)}">Download CSV</button>`
+    : ` <button class="secondary" data-handoff="${esc(run.run_id)}">Generate hand-off file</button>`;
+  return html;
+}
 function renderRuns(runs) {
   $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
-    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b> · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || ""), "ok") : pill("proposed", "info")} ${run.status !== "confirmed" ? `<button class="secondary" data-confirm="${esc(run.run_id)}">Confirm run</button>` : run.handoff_key ? `<span class="note">hand-off: ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…</span> <button class="secondary" data-download="${esc(run.run_id)}">Download CSV</button>` : ` <button class="secondary" data-handoff="${esc(run.run_id)}">Generate hand-off file</button>`}</p>
+    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b> · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || "") + (run.second_confirmed_by ? " + " + run.second_confirmed_by : ""), "ok") : pill("proposed", "info")} ${runControls(run)}</p>
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
+  document.querySelectorAll("[data-second]").forEach(btn => btn.onclick = () => confirmSecond(btn.dataset.second));
   document.querySelectorAll("[data-handoff]").forEach(btn => btn.onclick = () => exportHandoff(btn.dataset.handoff));
   document.querySelectorAll("[data-download]").forEach(btn => btn.onclick = () => downloadHandoff(btn.dataset.download));
+}
+async function confirmSecond(runId) {
+  const actor = $("lead").value.trim();
+  if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — the second confirmer must be a different, named person."; return; }
+  const res = await fetch(`/payment-runs/${runId}/confirm-second`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("paynote").textContent = `Second confirmation refused (${res.status}): ${body.detail || ""}`; return; }
+  $("paynote").textContent = `Run ${runId} second-confirmed by ${body.second_confirmed_by} (first: ${body.confirmed_by}). The hand-off export is unlocked — it still pays nothing.`;
+  loadRuns();
 }
 async function exportHandoff(runId) {
   const actor = $("lead").value.trim();
@@ -312,6 +388,64 @@ async function confirmRun(runId) {
   $("paynote").textContent = `Run ${runId} confirmed by ${body.confirmed_by}. No payment was made — the run is the pay list for the AP system of record.`;
   loadRuns();
 }
+function maskId(v) { const d = String(v || "").replace(/[^A-Za-z0-9]/g, ""); return d ? "••••" + d.slice(-4) : "—"; }
+function recSummary(r) {
+  if (!r) return "no master record";
+  const parts = [];
+  if (r.account_number) parts.push("account " + maskId(r.account_number));
+  if (r.sort_code) parts.push("sort " + maskId(r.sort_code));
+  if (r.iban) parts.push("IBAN " + maskId(r.iban));
+  return parts.join(" · ") || "—";
+}
+async function loadChanges() {
+  const res = await fetch("/suppliers/master-changes", {headers: headers()});
+  if (!res.ok) { $("mcnote").textContent = `Changes failed to load (${res.status}).`; return; }
+  renderChanges(await res.json());
+}
+function renderChanges(changes) {
+  $("mcbody").innerHTML = (changes || []).length ? changes.map(c => `
+    <p class="kv" style="margin-top:12px"><b>${esc(c.request_id)}</b> · ${esc(c.supplier_name)} · ${c.status === "pending" ? pill("pending", "warn") : c.status === "approved" ? pill("approved" + (c.applied_at ? " · applied " + esc(c.applied_at.slice(0, 10)) : " · effective " + esc(c.effective_from || "")), "ok") : pill("rejected", "bad")} · source ${esc(c.source)}${c.source_invoice_id ? " (" + esc(c.source_invoice_id) + ")" : ""} · proposed by ${esc(c.proposed_by || "")}${c.decided_by ? ` · decided by ${esc(c.decided_by)}` : ""}<br>
+    <span class="note">current: ${esc(recSummary(c.current))} → proposed: ${esc(recSummary(c.proposed))}${c.verification_ref ? ` · verified: ${esc(c.verification_ref)}` : ""}${c.reason ? `<br>${esc(c.reason)}` : ""}</span></p>
+    ${(c.history || []).map(h => `<p class="note" style="margin:2px 0">· <b>${esc(h.status)}</b> — ${esc(h.actor)} · ${esc(h.at)}${h.note ? " · " + esc(h.note) : ""}</p>`).join("")}
+    ${c.status === "pending" ? `<div class="gate"><input type="text" id="mcv-${esc(c.request_id)}" placeholder="Out-of-band verification reference (to approve)" size="44"><button class="secondary" data-mc-approve="${esc(c.request_id)}">Approve change</button><button class="secondary" data-mc-reject="${esc(c.request_id)}">Reject</button></div>` : ""}`).join("") : `<p class="kv">No master changes proposed yet.</p>`;
+  document.querySelectorAll("[data-mc-approve]").forEach(btn => btn.onclick = () => decideChange(btn.dataset.mcApprove, true));
+  document.querySelectorAll("[data-mc-reject]").forEach(btn => btn.onclick = () => decideChange(btn.dataset.mcReject, false));
+}
+async function decideChange(requestId, approve) {
+  const actor = $("mc-actor").value.trim();
+  if (!actor) { $("mcnote").textContent = "Enter your name first — master-change decisions are attributable, and the proposer cannot decide their own change."; return; }
+  const verification_ref = ($(`mcv-${requestId}`) || {}).value?.trim() || "";
+  const res = await fetch(`/suppliers/master-changes/${requestId}/decide`, {method: "POST", headers: headers(), body: JSON.stringify({actor, approve, verification_ref})});
+  const body = await res.json();
+  if (!res.ok) { $("mcnote").textContent = `Decision refused (${res.status}): ${body.detail || ""}`; return; }
+  $("mcnote").textContent = approve
+    ? `Change ${requestId} approved by ${body.decided_by}${body.applied_at ? " and applied to the master" : " — it applies from " + body.effective_from}.`
+    : `Change ${requestId} rejected by ${body.decided_by}. The master record is unchanged.`;
+  loadChanges();
+}
+$("mc-propose").onclick = async () => {
+  const actor = $("mc-actor").value.trim();
+  if (!actor) { $("mcnote").textContent = "Enter your name first — proposals are attributable."; return; }
+  const proposed = {supplier_name: $("mc-supplier").value.trim(), account_number: $("mc-account").value.trim(), sort_code: $("mc-sort").value.trim(), iban: $("mc-iban").value.trim()};
+  const res = await fetch("/suppliers/master-changes", {method: "POST", headers: headers(), body: JSON.stringify({actor, proposed, reason: $("mc-reason").value.trim(), effective_from: $("mc-effective").value.trim()})});
+  const body = await res.json();
+  if (!res.ok) { $("mcnote").textContent = `Proposal refused (${res.status}): ${body.detail || ""}`; return; }
+  $("mcnote").textContent = `Change ${body.request_id} proposed for ${body.supplier_name} — pending a second operator's decision. The master record is unchanged until approval and the effective date.`;
+  loadChanges();
+};
+$("mc-from-invoice").onclick = async () => {
+  const actor = $("mc-actor").value.trim();
+  const invoiceId = $("mc-invoice").value.trim();
+  if (!actor) { $("mcnote").textContent = "Enter your name first — proposals are attributable."; return; }
+  if (!invoiceId) { $("mcnote").textContent = "Enter the invoice id the change comes from."; return; }
+  const res = await fetch(`/invoices/${invoiceId}/master-change`, {method: "POST", headers: headers(), body: JSON.stringify({actor, reason: $("mc-reason").value.trim()})});
+  const body = await res.json();
+  if (!res.ok) { $("mcnote").textContent = `Proposal refused (${res.status}): ${body.detail || ""}`; return; }
+  $("mcnote").textContent = `Change ${body.request_id} proposed from ${invoiceId}: ${recSummary(body.proposed)} for ${body.supplier_name} — pending a second operator. The document applied nothing itself.`;
+  loadChanges();
+};
+$("mc-load").onclick = loadChanges;
+
 $("propose").onclick = async () => {
   const res = await fetch("/payment-runs/propose", {method: "POST", headers: headers(), body: JSON.stringify({window_days: 7})});
   const runs = await res.json();
@@ -321,7 +455,7 @@ $("propose").onclick = async () => {
 };
 $("loadqueue").onclick = loadQueue;
 
-loadSamples(); loadEvals(); loadRuns();
+loadSamples(); loadEvals(); loadRuns(); loadChanges();
 </script>
 </body>
 </html>
