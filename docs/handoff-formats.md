@@ -11,8 +11,10 @@ Both formats sit behind the one hand-off seam
 (`ap_agent/handoff.py`), behind the same gates:
 
 - the run must be **confirmed** by a finance lead;
-- a run stamped four-eyes (`PAYMENT_RUN_FOUR_EYES_THRESHOLD`)
-  must carry its **second confirmation**, from a different person;
+- a run stamped four-eyes (its currency's threshold —
+  `PAYMENT_RUN_FOUR_EYES_THRESHOLDS`, falling back to
+  `PAYMENT_RUN_FOUR_EYES_THRESHOLD`) must carry its **second
+  confirmation**, from a different person;
 - every member's discount is **re-verified at export** as of the
   export date — a member whose window closed since confirmation
   is exported at full gross and the drift is itemised on the run
@@ -22,14 +24,23 @@ Choose the format per export: `POST /payment-runs/{run_id}/handoff`
 defaults to `?format=csv`; `?format=pain001` selects the XML. The
 run record's export receipt (`handoff_key`, `handoff_sha256`,
 `handoff_generated_at/by`, `handoff_format`) always names the
-format of the file it points at.
+format of the file it points at, and `handoff_creditor_entries`
+records how each member's creditor account was completed
+(see "Bank-account elements" below). Confirmation also computes
+the run's drift forecast (`drift_forecast`): members whose
+discount deadlines fall before the expected export date are
+flagged while the confirmer can still act — a projection from
+the measured proposal→export lag, labelled as a forecast; the
+export-time drift re-verification above remains the authority.
 
-## Format 1 — CSV (layout v1)
+## Format 1 — CSV (layout v2)
 
 Object key: `payment-runs/<run_id>/handoff.csv`
 
 One header row, one row per run line, one totals row. Amounts are
 plain decimals with two places, no thousands separators; dates ISO.
+Layout v2 appends the two creditor columns to v1 — the v1 columns
+keep their order and meaning.
 
 | column | content |
 |---|---|
@@ -43,6 +54,8 @@ plain decimals with two places, no thousands separators; dates ISO.
 | `gross_amount` | the approved invoice total |
 | `discount_amount` | capturable early-payment discount, else 0.00 |
 | `net_amount` | gross − discount: the amount to pay |
+| `creditor_account` | the supplier master's IBAN (else account number) for the supplier, else `SUPPLIER-MASTER-AT-IMPORT` |
+| `creditor_account_source` | `supplier_master` when completed from the master, else `at_import` |
 
 ## Format 2 — ISO 20022 pain.001 (XML)
 
@@ -66,27 +79,39 @@ transaction per run line. The mapping:
 | `CdtTrfTxInf/PmtId/EndToEndId` | the agent's invoice id |
 | `CdtTrfTxInf/Amt/InstdAmt` (+ `Ccy`) | the line's export-time **net** amount, in the run's currency |
 | `CdtTrfTxInf/Cdtr/Nm` | the supplier name as recorded on the invoice |
+| `CdtTrfTxInf/CdtrAcct/Id/IBAN` | the master's IBAN for the supplier — only when the master holds one (see below) |
+| `CdtTrfTxInf/CdtrAcct/Id/Othr/Id` | the master's account number for the supplier, else the `SUPPLIER-MASTER-AT-IMPORT` marker |
+| `CdtTrfTxInf/CdtrAgt/FinInstnId/Othr/Id` | the master's sort code — only on account-number completions |
 | `CdtTrfTxInf/RmtInf/Ustrd` | `Invoice <invoice_number> (<invoice_id>)` |
 
-### Completed at import — the bank-account elements
+### Bank-account elements — completed from the master, or marked
 
-The agent holds no bank accounts, deliberately: creditor bank
-details are governed supplier-master data (documents stating bank
-details are exactly what the fraud screen checks *against* the
-master — a hand-off file must never source account data from
-documents), and the debtor's account belongs to the customer's own
-bank portal. These elements are therefore emitted with explicit
-completion markers, and the importing system fills them from its
-own records — keyed on the creditor name and remittance
-information above — before submission:
+Creditor bank details are governed supplier-master data: documents
+stating bank details are exactly what the fraud screen checks
+*against* the master, so a hand-off file never sources account
+data from documents. It may, however, source them from the master
+itself — at export, each member's supplier is looked up, and
+where (and only where) the master holds approved bank details,
+the creditor account is completed from them: the IBAN where
+recorded, else the account number with the sort code as the
+creditor agent. Every other member carries the explicit
+`SUPPLIER-MASTER-AT-IMPORT` marker for the importing system to
+complete. The run record's export receipt
+(`handoff_creditor_entries`) records, per member, which way it
+went — with masked labels only; the full identifiers live in the
+master record and in the file, never on the run record.
 
-| element | marker | completed from |
+The debtor side is never completed: the customer's own account
+belongs to their bank portal, not to master data.
+
+| element | when not completed | marker |
 |---|---|---|
-| `PmtInf/DbtrAcct/Id/Othr/Id` | `DEBTOR-ACCOUNT-AT-IMPORT` | the customer's bank portal / ERP company bank setup |
-| `PmtInf/DbtrAgt/FinInstnId/Othr/Id` | `DEBTOR-AGENT-AT-IMPORT` | the customer's bank |
-| `CdtTrfTxInf/CdtrAcct/Id/Othr/Id` | `SUPPLIER-MASTER-AT-IMPORT` | the ERP's supplier master (the same record the bank-change screen governs) |
+| `PmtInf/DbtrAcct/Id/Othr/Id` | always | `DEBTOR-ACCOUNT-AT-IMPORT` |
+| `PmtInf/DbtrAgt/FinInstnId/Othr/Id` | always | `DEBTOR-AGENT-AT-IMPORT` |
+| `CdtTrfTxInf/CdtrAcct/...` | the master holds no bank details for the supplier | `SUPPLIER-MASTER-AT-IMPORT` |
 
 A bank or ERP that rejects placeholder account ids at import is
-doing its job: the markers make the hand-off's one incompleteness
-visible at exactly the step where the authoritative data lives,
-instead of letting the agent invent or transcribe account numbers.
+doing its job: the markers make the hand-off's remaining
+incompleteness visible at exactly the step where the
+authoritative data lives, instead of letting the agent invent or
+transcribe account numbers.

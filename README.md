@@ -73,7 +73,7 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 23. **Recovery-case lifecycle** — a recovery pack opens a case that operators walk (`opened → supplier_contacted → credit_received → closed`), one audited transition at a time (`POST /invoices/{id}/recovery-case/transition`); the console renders the case on duplicate invoices. The agent records the case — it contacts nobody and books no credit.
 24. **ERP posting example** — `examples/erp_posting.py` shapes an approved result into a generic double-entry journal (purchases / input tax / AP control) with a stable idempotency key, refusing unapproved results and unreconciled figures. No vendor SDK — the transport into a real ERP is the customer's step.
 25. **Governed supplier-master changes** — a bank-detail change becomes a request object (migration 0009): proposed by an operator or from a document (the details an invoice states, overlaid on the current record), decided by a *second* operator — proposer ≠ approver — with the out-of-band verification reference recorded, and applied only from its effective date (`/suppliers/master-changes`). Until a change is approved and in force, the master check keeps returning a mismatch for the new details.
-26. **Four-eyes on large payment runs** — a run whose net total is above `PAYMENT_RUN_FOUR_EYES_THRESHOLD` (default 25000) is stamped at proposal and its hand-off export refuses — with the reason spelled out — until a second confirmer, different from the first, has also confirmed it (`POST /payment-runs/{run_id}/confirm-second`). A total exactly at the threshold is not above it.
+26. **Four-eyes on large payment runs** — a run whose net total is above its four-eyes threshold (default 25000; per-currency via `PAYMENT_RUN_FOUR_EYES_THRESHOLDS` — see 37) is stamped at proposal and its hand-off export refuses — with the reason spelled out — until a second confirmer, different from the first, has also confirmed it (`POST /payment-runs/{run_id}/confirm-second`). A total exactly at the threshold is not above it.
 27. **Recovery-case aging** — open duplicate-payment cases age in the queue and `/metrics`: total age, the age of the status each case is stuck in, age buckets, and an SLA flag when one status outlasts `RECOVERY_CASE_SLA_DAYS` (default 14). The SLA runs on status age — a case that moved yesterday is moving, not stuck.
 28. **ERP posting receipts** — the example adapter's return path: the ERP's outcome (`posted` + its document number, or `failed` + its reason, under the posting's idempotency key) is recorded back onto the invoice (`POST /invoices/{id}/posting-receipt`) and into the audit export. A posted receipt replays by key but can never be replaced by a different posting; the agent itself still posts nothing.
 29. **Discount drift check at export** — a run confirmed while a discount was capturable can be handed off after the window closed. Export re-prices every discounted member from its stored invoice as of the export date: a drifted member is exported at its full gross amount (the amount actually owed once the window closes — the stale net would short-pay the supplier), the drift is itemised on the run record (`handoff_drift`, with the lost amount and the closed deadline), and the clean members export exactly as confirmed.
@@ -83,6 +83,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 33. **Duplicate screening across arrival shapes** — duplicate identity is judged on a canonical key (supplier name punctuation/case normalised, invoice number reduced to alphanumerics), so a resend is caught whichever shape it arrives in: a bundle segment that re-sends a portal single is flagged with the single as its twin (and the recovery path opens for it), a single that re-sends a bundle segment likewise, and a repeated segment inside one bundle too. Statement lines are screened on the same key: a line whose number AP holds twice, or that the statement itself lists twice, is flagged with the twin reference in the reconciliation report.
 34. **Hand-off drift + lag metrics** — `/metrics` aggregates the export story over the stored runs: runs exported with drift, members drifted, discount value lost per currency — beside confirm→export and proposal→export lag stats, because the lag is the process leak that causes the drift.
 35. **Open-posting escalation** — an open posting past `POSTING_ESCALATION_DAYS` (default 21, never below the grace window) stops being a report line and joins the approver queue (`GET /queue`) as an action item with the ERP failure reason attached; `/metrics` counts the escalated items.
+36. **Recovery-case escalation webhook** — the queue flags a case whose status outlasted the SLA; the sweep (`POST /recovery-cases/escalate`) also *tells* someone: a signed `recovery_escalation` webhook (the same opt-in `ACTION_WEBHOOK_URL` seam and HMAC scheme as approvals) carrying the case's aging snapshot. Each dispatch is recorded in the pack's own escalation ledger, deduped per status crossing — re-sweeping never re-fires, a case that moves and stalls again escalates for the new crossing, and with no webhook configured nothing is recorded.
+37. **Per-currency four-eyes thresholds** — `PAYMENT_RUN_FOUR_EYES_THRESHOLDS` (`EUR=50000,JPY=3000000`) gives currencies their own gates, with the global threshold as fallback in both directions; the figure that applied is stamped on the run at proposal (`four_eyes_threshold`), named in its note and the console, and quoted in the second-confirmation and export refusals.
+38. **Creditor-account completion at export** — the hand-off's creditor account is completed from the governed supplier master where (and only where) it holds approved bank details for the member's supplier: the IBAN as the pain.001 `IBAN` element, else the account number with the sort code as creditor agent; every other member keeps the `SUPPLIER-MASTER-AT-IMPORT` marker, and the debtor side always keeps its. The export receipt (`handoff_creditor_entries`) records completed vs marked per member, masked labels only; the CSV carries the account plus its source (layout v2).
+39. **Drift forecasting at confirmation** — confirmation projects the drift leak forward: each discounted member's deadline is set against the run's expected export date (proposal date + the measured mean proposal→export lag, the same lag `/metrics` publishes), and members projected to lapse are flagged on the run (`drift_forecast`, with `drift_forecast_basis` stating the lag it rests on — or that no exported runs exist yet). Labelled a forecast everywhere; the export-time drift check remains the authority.
 
 ## Quickstart
 
@@ -113,7 +117,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 277 tests
+make test        # 296 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -154,10 +158,11 @@ Everything is environment variables (`.env` supported; real env wins). The full 
 | `DATABASE_URL` | PostgreSQL — approvals, checkpoints, vectors. Unset = in-memory test doubles |
 | `S3_BUCKET` / `S3_ENDPOINT_URL` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3-compatible document storage (MinIO in compose) |
 | `RUN_TOKEN_BUDGET` | Per-run token budget; later provider steps degrade to templates when exceeded |
-| `ACTION_WEBHOOK_URL` | Opt-in: POSTed once on approval — the only external action available |
+| `ACTION_WEBHOOK_URL` | Opt-in: POSTed once on approval, and by the recovery-escalation sweep on an SLA breach — the only external action available |
 | `ACTION_WEBHOOK_SECRET` | When set, the webhook body is HMAC-SHA256 signed (`X-Trida-Signature`) |
 | `COST_OF_CAPITAL_ANNUAL_PCT` | Cost of capital (default 6.0) used to price early-payment discounts |
 | `PAYMENT_RUN_FOUR_EYES_THRESHOLD` | A payment run above this net total needs a second, different confirmer before hand-off (default 25000) |
+| `PAYMENT_RUN_FOUR_EYES_THRESHOLDS` | Per-currency four-eyes thresholds (`EUR=50000,JPY=3000000`); the global threshold is the fallback for unlisted currencies |
 | `RECOVERY_CASE_SLA_DAYS` | Days a recovery case may sit in one status before the queue flags it stuck (default 14) |
 | `MASTER_CHANGE_EXPIRY_DAYS` | Days a pending supplier-master change may sit undecided before it expires and must be re-proposed (default 30) |
 | `POSTING_RECEIPT_GRACE_DAYS` | Days an approved invoice may go without a posted receipt before the approved-not-posted report flags it (default 7) |
@@ -183,7 +188,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            277 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            296 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -191,7 +196,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 277 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 296 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
