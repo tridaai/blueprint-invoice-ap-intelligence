@@ -103,13 +103,14 @@
   </section>
   <section id="sec-profiles">
     <h2>Hand-off profiles (governed routing — per supplier / per currency)</h2>
-    <p class="note">The payee side's say in the export: which format its bank or ERP ingests, how many lead days a pain.001 requested execution date needs, and whether its bank rejects at-import creditor markers. Setting a profile names its actor and appends to the profile's audit trail. Exports resolve it deterministically — a format named on the export wins, then the currency profile, then a supplier profile the run's members agree on, else the CSV default. A supplier whose bank rejects markers is flagged on the run at proposal time while the master holds no bank details for it.</p>
+    <p class="note">The payee side's say in the export: which format its bank or ERP ingests, how many lead days a pain.001 requested execution date needs, whether its bank rejects at-import creditor markers, and whether it books per value date (batch booking: one PmtInf per requested execution date, the lead days flooring every group's date). /metrics grades each profile — exports routed, marker rate against ungoverned exports, flag follow-through, lead promises kept. Setting a profile names its actor and appends to the profile's audit trail. Exports resolve it deterministically — a format named on the export wins, then the currency profile, then a supplier profile the run's members agree on, else the CSV default. A supplier whose bank rejects markers is flagged on the run at proposal time while the master holds no bank details for it.</p>
     <div class="gate">
       <select id="hp-scope"><option value="currency">Currency</option><option value="supplier">Supplier</option></select>
       <input type="text" id="hp-key" placeholder="Currency code (EUR) or supplier name" size="30">
       <select id="hp-format"><option value="csv">CSV</option><option value="pain001">pain.001</option></select>
       <input type="text" id="hp-lead" placeholder="Lead days" size="9">
       <label class="note"><input type="checkbox" id="hp-markers"> bank rejects markers</label>
+      <label class="note"><input type="checkbox" id="hp-batch"> batch booking (one PmtInf per execution date)</label>
       <input type="text" id="hp-note" placeholder="Note (why — e.g. bank portal)" size="26">
       <input type="text" id="hp-actor" placeholder="Your name" size="16">
       <button id="hp-set">Set profile</button>
@@ -575,7 +576,7 @@ async function loadProfiles() {
   const ps = await res.json();
   if (!res.ok) { $("hpnote").textContent = `Profiles failed to load (${res.status}): ${ps.detail || ""}`; return; }
   $("hpnote").textContent = ps.length ? `${ps.length} profile(s) in force — exports resolve them per run; the audit trail rides each record.` : "No profiles in force — exports use the format named on the call, else the CSV default.";
-  $("hpbody").innerHTML = ps.length ? `<table><tr><th>Profile</th><th>Scope</th><th>Format</th><th>Lead</th><th>Markers</th><th>Set by</th><th>Audit trail</th></tr>${ps.map(p => `<tr><td>${esc(p.profile_id)}</td><td>${esc(p.scope)}: ${esc(p.scope === "supplier" ? p.supplier_name : p.currency)}</td><td>${pill(p.format, p.format === "pain001" ? "info" : "ok")}</td><td>${p.lead_days}d</td><td>${p.markers_rejected ? pill("rejected by bank", "bad") : "accepted"}</td><td>${esc(p.updated_by || "—")}<br><span class="note">${esc((p.updated_at || "").slice(0, 10))}</span></td><td><span class="note">${(p.history || []).map(e => esc(e.action) + " by " + esc(e.actor) + " (" + esc((e.at || "").slice(0, 10)) + "): " + esc(e.detail)).join("<br>")}</span></td></tr>`).join("")}</table>` : "";
+  $("hpbody").innerHTML = ps.length ? `<table><tr><th>Profile</th><th>Scope</th><th>Format</th><th>Lead</th><th>Markers</th><th>Batch</th><th>Set by</th><th>Audit trail</th></tr>${ps.map(p => `<tr><td>${esc(p.profile_id)}</td><td>${esc(p.scope)}: ${esc(p.scope === "supplier" ? p.supplier_name : p.currency)}</td><td>${pill(p.format, p.format === "pain001" ? "info" : "ok")}</td><td>${p.lead_days}d</td><td>${p.markers_rejected ? pill("rejected by bank", "bad") : "accepted"}</td><td>${p.batch_booking ? pill("per value date", "info") : "single PmtInf"}</td><td>${esc(p.updated_by || "—")}<br><span class="note">${esc((p.updated_at || "").slice(0, 10))}</span></td><td><span class="note">${(p.history || []).map(e => esc(e.action) + " by " + esc(e.actor) + " (" + esc((e.at || "").slice(0, 10)) + "): " + esc(e.detail)).join("<br>")}</span></td></tr>`).join("")}</table>` : "";
 }
 $("hp-load").onclick = loadProfiles;
 $("hp-set").onclick = async () => {
@@ -583,12 +584,12 @@ $("hp-set").onclick = async () => {
   if (!actor) { $("hpnote").textContent = "Enter your name first — a profile is governed configuration; an unattributed set is refused."; return; }
   const scope = $("hp-scope").value;
   const key = $("hp-key").value.trim();
-  const payload = {actor, scope, format: $("hp-format").value, lead_days: parseInt($("hp-lead").value || "0", 10) || 0, markers_rejected: $("hp-markers").checked, note: $("hp-note").value.trim()};
+  const payload = {actor, scope, format: $("hp-format").value, lead_days: parseInt($("hp-lead").value || "0", 10) || 0, markers_rejected: $("hp-markers").checked, batch_booking: $("hp-batch").checked, note: $("hp-note").value.trim()};
   if (scope === "supplier") payload.supplier_name = key; else payload.currency = key;
   const res = await fetch("/handoff/profiles", {method: "POST", headers: headers(), body: JSON.stringify(payload)});
   const body = await res.json();
   if (!res.ok) { $("hpnote").textContent = `Profile refused (${res.status}): ${body.detail || ""}`; return; }
-  $("hpnote").textContent = `Profile ${body.profile_id} set by ${body.updated_by} — format ${body.format}, lead ${body.lead_days}d${body.markers_rejected ? ", markers rejected by the payee's bank" : ""}. It applies from the next proposal/export; it changed no run by itself.`;
+  $("hpnote").textContent = `Profile ${body.profile_id} set by ${body.updated_by} — format ${body.format}, lead ${body.lead_days}d${body.markers_rejected ? ", markers rejected by the payee's bank" : ""}${body.batch_booking ? ", batch booking per execution date" : ""}. It applies from the next proposal/export; it changed no run by itself.`;
   loadProfiles();
 };
 

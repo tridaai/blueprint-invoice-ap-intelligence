@@ -25,8 +25,9 @@ Choose the format per export — or let the run's governed
 /handoff/profiles`, migration 0011) records the payee side's
 routing facts per supplier or per currency: preferred format,
 a lead-days figure for the pain.001 requested execution date,
-and whether the payee's bank rejects at-import creditor
-markers. Resolution is deterministic: `?format=csv|pain001`
+whether the payee's bank rejects at-import creditor
+markers, and whether it books per value date (batch booking —
+see the pain.001 section). Resolution is deterministic: `?format=csv|pain001`
 named on the export call wins; with no format named, the
 governing profile's format applies — the run's currency
 profile first, then a supplier profile the run's profiled
@@ -132,3 +133,29 @@ doing its job: the markers make the hand-off's remaining
 incompleteness visible at exactly the step where the
 authoritative data lives, instead of letting the agent invent or
 transcribe account numbers.
+
+### Batch booking — one `PmtInf` per requested execution date
+
+A governing profile can call for batch booking (`batch_booking`)
+for a bank that books per value date: the document then carries
+**one `PmtInf` per requested execution date** instead of one for
+the whole run — each with `BtchBookg` `true`, a `PmtInfId` of
+`<run id>-<date>`, its own `NbOfTxs`/`CtrlSum` over its own
+lines, and the group's date as its `ReqExctnDt` (the group
+header keeps the run's totals — the file is still one message
+about one run). The grouping rule, and its interaction with the
+profile's lead days, is stated per group: **a line's group date
+is the later of its due date (the run's window end when it
+carries none) and the lead floor (export date + lead days)** —
+the floor wins when later, so the bank keeps its processing
+lead on every group; the due date wins when IT is later, so no
+group executes before its lines fall due. The run's
+`handoff_execution_date` stamps every group date, and each
+completion entry records the execution date its member exported
+under, so creditor-completion coverage (`/metrics`) splits by
+PmtInf grouping. The completion and drift gates are computed
+per member before rendering, so they hold inside each `PmtInf`
+exactly as they hold for the file. Batch booking is a pain.001
+shape only — the CSV stays the flat list — and the default
+single-`PmtInf` document is byte-identical to before (both
+shapes are pinned by golden files).
