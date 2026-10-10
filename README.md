@@ -107,6 +107,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 55. **The duplicate screen, read back as a twin graph** — the audit export gains the twin columns (`duplicate_of`, `arrival_shape`, `twin_arrival_shape`, `twin_cluster`, `twin_cluster_size`) and `GET /audit/twins` returns the clusters: which records were screened as twins of which, on what key evidence (the duplicate-of edge, or a shared canonical key at a matching total), and how each twin arrived — single upload, or re-cut as its own invoice out of a remittance bundle, so a supplier resending one invoice three different ways reads as one cluster, not three coincidences. Statement lines stay reconciliation's business; the graph is over invoice records.
 56. **pain.001 batch booking** — a governing profile can now call for batch booking: the export groups the run's lines into one `PmtInf` per requested execution date (`BtchBookg` true, per-group control sums) for banks that book per value date. The lead-days interaction is per group — a line's group date is the later of its due date and the profile's lead floor; the floor wins when later, the due date wins when later — and the completion and drift gates hold inside each group by construction. Each completion entry is stamped with its member's execution date, and creditor-completion coverage splits by PmtInf grouping. The default single-`PmtInf` file is byte-identical (a second golden file pins the batch shape); the CSV stays flat.
 57. **Profile effectiveness, graded** — `/metrics` grades every hand-off profile over the exports it governed: routed exports and format mix, the marker rate on its members against the ungoverned population's, whether suppliers its marker-rejection stance flagged at proposal time stopped exporting marked, and whether the lead promise was kept by the dates actually written. A profile governing nothing — or governing no safer than nothing — is named as configuration theatre in its own notes.
+58. **The duplicate screen, moved into the pipeline** — a live judged slice scored the INV-1004 resend as a clean match: the AP-DUP-01 screen existed only because the service computed the verdict over the store and passed it in, and the LLM eval pack called `run_invoice` directly, with no store — the screen never ran. The pipeline now computes the verdict itself from whatever priors it is handed (a caller-supplied verdict is discarded when priors ride along), and the LLM pack runs its cases through one shared service in file order, the production path. A deterministic control that depends on the caller remembering to invoke it is not a control.
+59. **Outcome claims trace like figures** — the same live judge caught a letter claiming "received and matched" over a partial quantity-variance match. The subject's claim is now composed from the computed outcome in the template drafter and the provider fallback alike (an unknown outcome defaults to "under review", never "matched"), and a new guardrail — `outcome_claim_must_trace` — fails a draft whose claim exceeds the computed outcome: outcome claims require a `clean_match` outcome, the match claim requires a `full_match` status, so a duplicate may state its full match but never a clean outcome. The repair directive teaches the fix by name; the catch is reproduced with a stub and repaired end-to-end.
+60. **Twin clusters escalate into the queue** — the twin graph was audit-only; the approver works the queue. A cluster now joins the worklist as one case, its graph attached (members + screened edges), when any trigger fires: size (`TWIN_CLUSTER_MIN_SIZE`, default 3), combined value in a single currency (`TWIN_CLUSTER_VALUE_THRESHOLD`, default 10000), or an approved twin spanning a waiting one — the double-payment shape itself, which seats first in work order. Under every trigger a cluster stays audit-only.
+61. **A judge budget a reasoning model can think in** — the LLM pack's judge lost 4 of 6 live verdicts to "reply was not a JSON object": a reasoning judge spends its completion budget thinking before the verdict exists, and 300 tokens ran out mid-thought. The judge budget is now its own — `JUDGE_MAX_TOKENS` (default 2000) or `--judge-max-tokens` — and is recorded in `llm_results.json`, so a harness failure can never again masquerade as a drafting score.
 
 ## Quickstart
 
@@ -137,7 +141,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 401 tests
+make test        # 462 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -208,7 +212,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            433 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            462 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -216,7 +220,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 433 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 462 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
