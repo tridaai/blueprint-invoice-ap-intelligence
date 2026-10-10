@@ -1264,6 +1264,37 @@ class DigestHistoryEntry(BaseModel):
     changes: dict[str, int] = Field(default_factory=dict)
 
 
+class DigestStoreSweepEntry(BaseModel):
+    """One day in the digest auto-store sweep's report: the day
+    was ``stored`` by this sweep (its first-computed digest,
+    pinned now, attributed to ``system``), or ``already_stored``
+    — first-computed had already won for that day, and the sweep
+    leaves the stored copy, and its human attribution, untouched."""
+
+    date: str = ""  # ISO date the entry covers
+    outcome: str = ""  # stored | already_stored
+    stored_by: str = ""  # who the day's stored copy is attributed to
+
+
+class DigestStoreSweep(BaseModel):
+    """The digest auto-store sweep's report: which recent days it
+    pinned and which it found already pinned, over a bounded
+    lookback ending at ``through_date``. The sweep exists so the
+    digest history — the trend the operators read — stops
+    depending on someone remembering to press Store every
+    morning: a scheduler can run it daily and every missed day
+    inside the lookback still lands in the series. Days a human
+    stored keep their human attribution; sweep-stored days are
+    attributed to ``system`` in the stored copy's own provenance,
+    so a backfilled day never masquerades as a morning ritual."""
+
+    through_date: str = ""  # ISO date the lookback ends at
+    lookback_days: int = 0  # days covered, today included
+    stored_count: int = 0
+    already_stored_count: int = 0
+    entries: list[DigestStoreSweepEntry] = Field(default_factory=list)
+
+
 class DigestHistory(BaseModel):
     """The stored digests in date order, headline counts only:
     the day-over-day view over the audit-file copies. Days nobody

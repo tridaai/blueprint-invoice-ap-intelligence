@@ -44,6 +44,7 @@ from .schemas import (
     CreditNoteMatch,
     DecisionRequest,
     DigestHistory,
+    DigestStoreSweep,
     EscalationDigest,
     InvoiceBundleInput,
     InvoiceInput,
@@ -391,6 +392,26 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         previous stored day. Days nobody stored are absent — the
         history interpolates nothing."""
         return svc.digest_history()
+
+    @app.post("/digest/store-due", response_model=DigestStoreSweep, dependencies=_AUTH)
+    def store_due_digests(
+        as_of: str = Query(default=""),
+        lookback_days: int | None = Query(default=None),
+    ) -> DigestStoreSweep:
+        """Sweep: store the digest for every recent day nobody
+        stored, over a bounded lookback ending at ``as_of``
+        (default today; ``lookback_days`` overrides
+        ``DIGEST_STORE_LOOKBACK_DAYS``, default 7). First-computed
+        still wins — days already stored are reported
+        ``already_stored`` and never overwritten; days the sweep
+        pins are attributed to ``system`` in their own provenance,
+        so the backfill never masquerades as a morning ritual.
+        Returns the per-day report. The sweep stores digests; it
+        sends nothing."""
+        try:
+            return svc.store_due_digests(lookback_days=lookback_days, as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/digest/{digest_date}", response_model=EscalationDigest, dependencies=_AUTH)
     def stored_digest(digest_date: str) -> EscalationDigest:

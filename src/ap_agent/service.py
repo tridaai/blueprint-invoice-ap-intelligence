@@ -62,6 +62,8 @@ from .schemas import (
     CreditNoteInput,
     CreditNoteMatch,
     DigestHistory,
+    DigestStoreSweep,
+    DigestStoreSweepEntry,
     EscalationDigest,
     MarkerWorklist,
     InvoiceBundleInput,
@@ -246,6 +248,28 @@ def posting_escalation_days() -> int:
     load_dotenv()
     return max(
         1, env_int("POSTING_ESCALATION_DAYS", POSTING_ESCALATION_DEFAULT_DAYS)
+    )
+
+
+# Default lookback for the digest auto-store sweep: the sweep
+# pins digests for the last N days, today included, wherever a
+# morning was missed (DIGEST_STORE_LOOKBACK_DAYS overrides it).
+# A week on purpose: long enough to survive a long weekend plus
+# a forgotten Monday, short enough that a scheduler running the
+# sweep cannot quietly rewrite ancient history — and
+# first-computed wins in any case, so stored days are immune.
+DIGEST_STORE_LOOKBACK_DEFAULT_DAYS = 7
+
+
+def digest_store_lookback_days() -> int:
+    """The configured lookback for the digest auto-store sweep,
+    in days including the anchor day."""
+    load_dotenv()
+    return max(
+        1,
+        env_int(
+            "DIGEST_STORE_LOOKBACK_DAYS", DIGEST_STORE_LOOKBACK_DEFAULT_DAYS
+        ),
     )
 
 
@@ -1903,6 +1927,74 @@ class InvoiceService:
         from .digest import build_digest_history
 
         return build_digest_history(self._get_store().list_digests())
+
+    def store_due_digests(
+        self, lookback_days: int | None = None, as_of: str = ""
+    ) -> DigestStoreSweep:
+        """Sweep: pin the digest for every recent day nobody
+        stored, over a bounded lookback ending at ``as_of``
+        (default today).
+
+        The digest history is only as good as the mornings
+        somebody remembered to press Store — a holiday, a sick
+        day, a busy Monday, and the trend grows a hole exactly
+        where an auditor will look. This sweep is the backfill:
+        for each day in the window (oldest first) with no stored
+        digest, it stores that day's first-computed digest
+        through the same :meth:`store_digest` path a human uses
+        — first-computed still wins, so a day a human already
+        stored is reported ``already_stored`` and its copy and
+        attribution are never touched.
+
+        Sweep-stored days are attributed to ``system`` in the
+        stored copy's own provenance: the backfill is honest
+        about being a backfill — a day pinned by the sweep,
+        computed from the records as they stand now and aged to
+        its own date, never masquerades as a digest somebody
+        composed that morning. The lookback is
+        ``DIGEST_STORE_LOOKBACK_DAYS`` (default 7) unless the
+        caller passes one; it is bounded on purpose, so wiring
+        the sweep to a scheduler cannot rewrite ancient history.
+        Returns the per-day report: stored vs already stored.
+        """
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        window = (
+            digest_store_lookback_days()
+            if lookback_days is None
+            else max(1, int(lookback_days))
+        )
+        entries: list[DigestStoreSweepEntry] = []
+        for offset in range(window - 1, -1, -1):
+            day = (anchor - timedelta(days=offset)).isoformat()
+            existing = store.get_digest(day)
+            if existing is not None:
+                entries.append(
+                    DigestStoreSweepEntry(
+                        date=day,
+                        outcome="already_stored",
+                        stored_by=existing.stored_by,
+                    )
+                )
+                continue
+            digest = self.store_digest(as_of=day, actor="system")
+            entries.append(
+                DigestStoreSweepEntry(
+                    date=day, outcome="stored", stored_by=digest.stored_by
+                )
+            )
+        return DigestStoreSweep(
+            through_date=anchor.isoformat(),
+            lookback_days=window,
+            stored_count=sum(1 for e in entries if e.outcome == "stored"),
+            already_stored_count=sum(
+                1 for e in entries if e.outcome == "already_stored"
+            ),
+            entries=entries,
+        )
 
     def marker_worklist(self) -> MarkerWorklist:
         """The supplier-onboarding worklist: suppliers ranked by

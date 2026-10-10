@@ -86,8 +86,9 @@
     <div class="gate" style="margin-top:10px">
       <input type="text" id="digestactor" placeholder="Your name (to store)" size="20">
       <button id="storedigest" class="secondary">Store digest</button>
+      <button id="storedue" class="secondary">Store due digests</button>
       <button id="loadhistory" class="secondary">Load history</button>
-      <span class="note" id="digeststore-note">Storing pins the day's first-computed digest verbatim — the copy a human forwards or files. First-computed wins: a stored day is never overwritten, and a live recomputation is always labelled "computed".</span>
+      <span class="note" id="digeststore-note">Storing pins the day's first-computed digest verbatim — the copy a human forwards or files. First-computed wins: a stored day is never overwritten, and a live recomputation is always labelled "computed". "Store due digests" backfills the bounded lookback (7 days) for mornings nobody stored, attributed to "system".</span>
     </div>
     <div id="digesthistory"></div>
   </section>
@@ -590,6 +591,14 @@ async function storeDigest() {
   loadDigestHistory();
 }
 $("storedigest").onclick = storeDigest;
+$("storedue").onclick = async () => {
+  const res = await fetch("/digest/store-due", {method: "POST", headers: headers()});
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { $("digeststore-note").textContent = `Sweep refused (${res.status}): ${body.detail || ""}`; return; }
+  const stored = (body.entries || []).filter(e => e.outcome === "stored").map(e => e.date).join(", ");
+  $("digeststore-note").textContent = `Sweep through ${body.through_date} (${body.lookback_days}-day lookback): stored ${body.stored_count} day(s)${stored ? " — " + stored : ""} as "system"; ${body.already_stored_count} day(s) already stored, untouched.`;
+  loadDigestHistory();
+};
 
 const DIGEST_COUNT_LABELS = {
   recovery_breach_count: "recovery breaches",
