@@ -353,7 +353,7 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         return summary
 
     @app.get("/queue", response_model=QueueView, dependencies=_AUTH)
-    def queue(as_of: str = Query(default="")) -> QueueView:
+    def aging_queue(as_of: str = Query(default="")) -> QueueView:
         """The AP aging queue: invoices awaiting an approver, aged
         by due date (overdue first), with the triage mix. Read-only.
         ``as_of`` (ISO date) anchors the aging; default today."""
