@@ -32,6 +32,7 @@ from .schemas import (
     HandoffProfile,
     MasterChangeRequest,
     PaymentRun,
+    ProfileChangeProposal,
     RecoveryPack,
     StatementReconciliation,
 )
@@ -220,6 +221,7 @@ class InMemoryStore:
         self._bundles: dict[str, str] = {}
         self._digests: dict[str, str] = {}
         self._handoff_profiles: dict[str, str] = {}
+        self._profile_proposals: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
@@ -327,6 +329,35 @@ class InMemoryStore:
                 self._handoff_profiles[k] for k in sorted(self._handoff_profiles)
             ]
         return [HandoffProfile.model_validate_json(p) for p in payloads]
+
+    def delete_handoff_profile(self, profile_id: str) -> None:
+        with self._lock:
+            self._handoff_profiles.pop(profile_id, None)
+
+    def save_profile_change_proposal(self, proposal: ProfileChangeProposal) -> None:
+        with self._lock:
+            self._profile_proposals[proposal.proposal_id] = (
+                proposal.model_dump_json()
+            )
+
+    def get_profile_change_proposal(
+        self, proposal_id: str
+    ) -> ProfileChangeProposal | None:
+        with self._lock:
+            payload = self._profile_proposals.get(proposal_id)
+        return (
+            ProfileChangeProposal.model_validate_json(payload)
+            if payload
+            else None
+        )
+
+    def list_profile_change_proposals(self) -> list[ProfileChangeProposal]:
+        with self._lock:
+            payloads = [
+                self._profile_proposals[k]
+                for k in sorted(self._profile_proposals)
+            ]
+        return [ProfileChangeProposal.model_validate_json(p) for p in payloads]
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -603,6 +634,42 @@ class PostgresStore:
             for d in self._all_blobs("handoff_profiles")
         ]
         return sorted(profiles, key=lambda p: p.profile_id)
+
+    def delete_handoff_profile(self, profile_id: str) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM handoff_profiles WHERE profile_id = %s",
+                    (profile_id,),
+                )
+            conn.commit()
+
+    # --- Round-17 artefacts: profile-change proposals
+    # (migration 0012). Same blob pattern, keyed by proposal id;
+    # the decision trail rides inside the payload.
+
+    def save_profile_change_proposal(self, proposal: ProfileChangeProposal) -> None:
+        self._save_blob(
+            "profile_change_proposals",
+            "proposal_id",
+            proposal.proposal_id,
+            proposal.model_dump_json(),
+        )
+
+    def get_profile_change_proposal(
+        self, proposal_id: str
+    ) -> ProfileChangeProposal | None:
+        data = self._get_blob(
+            "profile_change_proposals", "proposal_id", proposal_id
+        )
+        return ProfileChangeProposal.model_validate(data) if data is not None else None
+
+    def list_profile_change_proposals(self) -> list[ProfileChangeProposal]:
+        proposals = [
+            ProfileChangeProposal.model_validate(d)
+            for d in self._all_blobs("profile_change_proposals")
+        ]
+        return sorted(proposals, key=lambda p: p.proposal_id)
 
     def _all_payloads(self) -> list:
         with self._connect() as conn:

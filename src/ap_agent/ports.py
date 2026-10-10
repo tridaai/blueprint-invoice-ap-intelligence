@@ -64,7 +64,7 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
     )
     from .schemas import BundleResult, MasterChangeRequest, PaymentRun, RecoveryPack
     from .schemas import EscalationDigest, StatementReconciliation, SupplierMasterRecord
-    from .schemas import HandoffProfile
+    from .schemas import HandoffProfile, ProfileChangeProposal
     from .store import ApprovalRecord
 
 
@@ -154,6 +154,14 @@ class Store(Protocol):
     def get_handoff_profile(self, profile_id: str) -> "HandoffProfile | None": ...
 
     def list_handoff_profiles(self) -> list["HandoffProfile"]: ...
+
+    def delete_handoff_profile(self, profile_id: str) -> None: ...
+
+    def save_profile_change_proposal(self, proposal: "ProfileChangeProposal") -> None: ...
+
+    def get_profile_change_proposal(self, proposal_id: str) -> "ProfileChangeProposal | None": ...
+
+    def list_profile_change_proposals(self) -> list["ProfileChangeProposal"]: ...
 
     def prior_invoices(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
 

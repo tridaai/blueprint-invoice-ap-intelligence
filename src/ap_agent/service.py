@@ -88,6 +88,8 @@ from .schemas import (
     PaymentRun,
     PostingEscalation,
     PostingReceipt,
+    ProfileChangeProposal,
+    ProfileProposalEvent,
     PurchaseOrder,
     QueueView,
     RecoveryEscalation,
@@ -1474,6 +1476,18 @@ class InvoiceService:
                 self._get_store().list_handoff_profiles(),
                 self._get_store().list_payment_runs(),
             ),
+            # The grades' governed follow-through: profile-change
+            # proposals drafted from them, by state — a pending
+            # count that never moves is a drafting sweep nobody
+            # decides, and it should read that way here.
+            "handoff_profile_proposals": {
+                state: sum(
+                    1
+                    for p in self._get_store().list_profile_change_proposals()
+                    if p.status == state
+                )
+                for state in ("pending", "approved", "rejected")
+            },
             # The priced four-eyes wait against its monthly
             # budgets (FOUR_EYES_WAIT_BUDGETS): this month's
             # destroyed discounts per currency, the ceiling in
@@ -3010,6 +3024,216 @@ class InvoiceService:
 
     def get_handoff_profile(self, profile_id: str) -> HandoffProfile | None:
         return self._get_store().get_handoff_profile(profile_id)
+
+    # --- Effectiveness-driven profile-change proposals -------------
+
+    def draft_profile_change_proposals(
+        self, *, actor: str
+    ) -> list[ProfileChangeProposal]:
+        """Draft profile-change proposals from the effectiveness
+        grades (see ``profile_proposals.py``).
+
+        The grades name configuration theatre — a profile that
+        governs no exports, or one whose files are no safer than
+        ungoverned ones — and this sweep turns each such grade
+        into a governed proposal: drafted from the evidence,
+        carrying the grade's account as its basis, pending a
+        second operator's decision. Drafting applies NOTHING:
+        no profile changes, retires, or tightens until an
+        approval lands. One open question per profile and kind —
+        a profile with a pending proposal of the same kind is
+        not re-drafted, so re-running the sweep is a no-op until
+        the open questions are decided. Returns the proposals
+        this sweep drafted (not the pending backlog)."""
+        from .handoff_profiles import profile_effectiveness
+        from .profile_proposals import next_proposal_id, proposals_from_grades
+
+        if not (actor or "").strip():
+            raise ValueError(
+                "Provide 'actor' — a profile-change proposal is "
+                "governed configuration work; an unattributed "
+                "draft is refused"
+            )
+        store = self._get_store()
+        profiles = store.list_handoff_profiles()
+        grades = profile_effectiveness(profiles, store.list_payment_runs())
+        specs = proposals_from_grades(profiles, grades)
+        existing = store.list_profile_change_proposals()
+        open_keys = {
+            (p.profile_id, p.kind) for p in existing if p.status == "pending"
+        }
+        ids = [p.proposal_id for p in existing]
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        drafted: list[ProfileChangeProposal] = []
+        for spec in specs:
+            if (spec["profile_id"], spec["kind"]) in open_keys:
+                continue  # the question is already open — one per profile+kind
+            proposal_id = next_proposal_id(ids)
+            ids.append(proposal_id)
+            proposal = ProfileChangeProposal(
+                proposal_id=proposal_id,
+                profile_id=spec["profile_id"],
+                kind=spec["kind"],
+                basis=spec["basis"],
+                current=spec["current"],
+                proposed=spec["proposed"],
+                proposed_by=actor,
+                proposed_at=stamp,
+                history=[
+                    ProfileProposalEvent(
+                        status="proposed",
+                        actor=actor,
+                        at=stamp,
+                        note="drafted from the effectiveness grade",
+                    )
+                ],
+            )
+            store.save_profile_change_proposal(proposal)
+            drafted.append(proposal)
+        return drafted
+
+    def list_profile_change_proposals(
+        self, status: str = ""
+    ) -> list[ProfileChangeProposal]:
+        """The profile-change proposals on file, oldest first —
+        or only those in one state (pending | approved |
+        rejected)."""
+        proposals = self._get_store().list_profile_change_proposals()
+        if status:
+            proposals = [p for p in proposals if p.status == status]
+        return proposals
+
+    def get_profile_change_proposal(
+        self, proposal_id: str
+    ) -> ProfileChangeProposal | None:
+        return self._get_store().get_profile_change_proposal(proposal_id)
+
+    def decide_profile_change_proposal(
+        self,
+        proposal_id: str,
+        *,
+        actor: str,
+        approve: bool,
+        note: str = "",
+    ) -> ProfileChangeProposal:
+        """Record the second operator's decision on a
+        profile-change proposal, and apply an approval.
+
+        Four-eyes, as on master changes: the drafter cannot
+        decide their own proposal. Rejection leaves the profile
+        exactly as it was. Approval applies the change the
+        proposal carries — a retirement deletes the profile
+        record; a marker tightening sets ``markers_rejected``
+        through the profile's own governed path (the set names
+        this decision and cites the proposal, so the profile's
+        audit trail and the proposal's agree). The application
+        is guarded against the world having moved since the
+        draft: a retirement whose profile has started governing
+        exports, and a tightening whose flag is already on, are
+        refused — the evidence the proposal answered no longer
+        stands, so the proposal must be rejected and re-drafted
+        against fresh grades, not applied on stale ones."""
+        from .handoff_profiles import profile_effectiveness
+
+        store = self._get_store()
+        proposal = store.get_profile_change_proposal(proposal_id)
+        if proposal is None:
+            raise KeyError(
+                f"Unknown profile-change proposal: {proposal_id} "
+                "(draft it first)"
+            )
+        if proposal.status != "pending":
+            detail = (
+                f" (decided by {proposal.decided_by})"
+                if proposal.decided_by
+                else ""
+            )
+            raise ValueError(
+                f"Profile-change proposal {proposal_id} is already "
+                f"{proposal.status}{detail}"
+            )
+        if actor == proposal.proposed_by:
+            raise ValueError(
+                "four-eyes on governed configuration: "
+                f"{proposal.proposed_by} drafted this proposal and "
+                "cannot also decide it — a second operator must "
+                "approve or reject a profile change"
+            )
+        profile = store.get_handoff_profile(proposal.profile_id)
+        if profile is None:
+            raise ValueError(
+                f"Profile {proposal.profile_id} no longer exists — "
+                "the proposal has nothing to apply to; reject it "
+                "and re-draft against the profiles in force"
+            )
+        now = datetime.now(timezone.utc)
+        stamp = now.isoformat(timespec="seconds")
+        if not approve:
+            proposal.status = "rejected"
+            proposal.decided_by = actor
+            proposal.decided_at = stamp
+            proposal.decision_note = note
+            proposal.history.append(
+                ProfileProposalEvent(
+                    status="rejected", actor=actor, at=stamp, note=note
+                )
+            )
+            store.save_profile_change_proposal(proposal)
+            return proposal
+        if proposal.kind == "retire":
+            grades = profile_effectiveness([profile], store.list_payment_runs())
+            if grades and grades[0]["exports_governed"] > 0:
+                raise ValueError(
+                    f"Profile {proposal.profile_id} has started "
+                    "governing exports since this retirement was "
+                    "drafted — the grade it answered no longer "
+                    "stands; reject the proposal and re-draft "
+                    "against fresh grades"
+                )
+            store.delete_handoff_profile(proposal.profile_id)
+            applied = "profile retired (record deleted)"
+        elif proposal.kind == "tighten_markers":
+            if profile.markers_rejected:
+                raise ValueError(
+                    f"Profile {proposal.profile_id} already records "
+                    "markers_rejected — the tightening this proposal "
+                    "asks for is already in force; reject it as moot "
+                    "rather than applying it twice"
+                )
+            self.set_handoff_profile(
+                actor=actor,
+                scope=profile.scope,
+                supplier_name=profile.supplier_name,
+                currency=profile.currency,
+                format=profile.format,
+                lead_days=profile.lead_days,
+                markers_rejected=True,
+                batch_booking=profile.batch_booking,
+                note=(
+                    f"applied from proposal {proposal_id} "
+                    f"({proposal.proposed_by}'s draft, decided by "
+                    f"{actor}): the effectiveness grade's marker "
+                    "finding"
+                ),
+            )
+            applied = "markers_rejected set through the governed profile path"
+        else:  # a kind this build does not draft — refuse, never guess
+            raise ValueError(
+                f"Unknown profile-change proposal kind: {proposal.kind!r}"
+            )
+        proposal.status = "approved"
+        proposal.decided_by = actor
+        proposal.decided_at = stamp
+        proposal.decision_note = note
+        proposal.applied_at = stamp
+        proposal.history.append(
+            ProfileProposalEvent(
+                status="approved", actor=actor, at=stamp,
+                note=note or applied,
+            )
+        )
+        store.save_profile_change_proposal(proposal)
+        return proposal
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)

@@ -118,6 +118,12 @@
     </div>
     <span class="note" id="hpnote">No profiles loaded yet.</span>
     <div id="hpbody"></div>
+    <div class="gate" style="margin-top:12px">
+      <button id="hp-draft" class="secondary">Draft proposals from grades</button>
+      <button id="hp-proposals-load" class="secondary">Load proposals</button>
+      <span class="note" id="hppropnote">A grade that names configuration theatre — a profile governing no exports, or routing no safer than ungoverned with its marker flag off — becomes a governed proposal here: drafted from the evidence by one operator, decided by a second (drafter ≠ decider), applied only on approval. A retirement deletes the profile; a tightening sets markers_rejected through the profile's own path.</span>
+    </div>
+    <div id="hppropbody"></div>
   </section>
   <section id="sec-openitems">
     <h2>Approved, not yet posted (ERP loop open items)</h2>
@@ -652,6 +658,38 @@ async function loadProfiles() {
   $("hpbody").innerHTML = ps.length ? `<table><tr><th>Profile</th><th>Scope</th><th>Format</th><th>Lead</th><th>Markers</th><th>Batch</th><th>Set by</th><th>Audit trail</th></tr>${ps.map(p => `<tr><td>${esc(p.profile_id)}</td><td>${esc(p.scope)}: ${esc(p.scope === "supplier" ? p.supplier_name : p.currency)}</td><td>${pill(p.format, p.format === "pain001" ? "info" : "ok")}</td><td>${p.lead_days}d</td><td>${p.markers_rejected ? pill("rejected by bank", "bad") : "accepted"}</td><td>${p.batch_booking ? pill("per value date", "info") : "single PmtInf"}</td><td>${esc(p.updated_by || "—")}<br><span class="note">${esc((p.updated_at || "").slice(0, 10))}</span></td><td><span class="note">${(p.history || []).map(e => esc(e.action) + " by " + esc(e.actor) + " (" + esc((e.at || "").slice(0, 10)) + "): " + esc(e.detail)).join("<br>")}</span></td></tr>`).join("")}</table>` : "";
 }
 $("hp-load").onclick = loadProfiles;
+async function loadProposals() {
+  const res = await fetch("/handoff/profile-change-proposals", {headers: headers()});
+  const ps = await res.json();
+  if (!res.ok) { $("hppropnote").textContent = `Proposals failed to load (${res.status}): ${ps.detail || ""}`; return; }
+  const pending = ps.filter(p => p.status === "pending").length;
+  $("hppropnote").textContent = ps.length ? `${ps.length} proposal(s) on file · ${pending} pending a second operator's decision.` : "No proposals on file — draft from the grades when a grade names configuration theatre.";
+  $("hppropbody").innerHTML = ps.length ? `<table><tr><th>Proposal</th><th>Profile</th><th>Change</th><th>Basis (the grade's account)</th><th>State</th><th>Decide</th></tr>${ps.map(p => `<tr><td>${esc(p.proposal_id)}<br><span class="note">by ${esc(p.proposed_by || "—")} · ${esc((p.proposed_at || "").slice(0, 10))}</span></td><td>${esc(p.profile_id)}</td><td>${p.kind === "retire" ? pill("retire profile", "warn") : pill("set markers_rejected", "info")}</td><td><span class="note">${esc(p.basis)}</span></td><td>${p.status === "pending" ? pill("pending", "warn") : p.status === "approved" ? pill("approved · applied " + esc((p.applied_at || "").slice(0, 10)), "ok") + `<br><span class="note">by ${esc(p.decided_by || "—")}</span>` : pill("rejected", "bad") + `<br><span class="note">by ${esc(p.decided_by || "—")}${p.decision_note ? " — " + esc(p.decision_note) : ""}</span>`}</td><td>${p.status === "pending" ? `<button class="secondary" data-prop-approve="${esc(p.proposal_id)}">Approve + apply</button><br><button class="secondary" data-prop-reject="${esc(p.proposal_id)}" style="margin-top:4px">Reject</button>` : ""}</td></tr>`).join("")}</table>` : "";
+  $("hppropbody").querySelectorAll("button[data-prop-approve]").forEach(btn =>
+    btn.addEventListener("click", () => decideProposal(btn.dataset.propApprove, true)));
+  $("hppropbody").querySelectorAll("button[data-prop-reject]").forEach(btn =>
+    btn.addEventListener("click", () => decideProposal(btn.dataset.propReject, false)));
+}
+async function decideProposal(proposalId, approve) {
+  const actor = $("hp-actor").value.trim();
+  if (!actor) { $("hppropnote").textContent = "Enter your name in the profile form first — a decision is attributable, and the drafter cannot decide their own proposal."; return; }
+  const note = prompt((approve ? "Approve + apply " : "Reject ") + proposalId + " — decision note (goes on the record):") || "";
+  const res = await fetch(`/handoff/profile-change-proposals/${proposalId}/decide`, {method: "POST", headers: headers(), body: JSON.stringify({actor, approve, note})});
+  const body = await res.json();
+  if (!res.ok) { $("hppropnote").textContent = `Decision refused (${res.status}): ${body.detail || ""}`; return; }
+  $("hppropnote").textContent = `${proposalId} ${body.status} by ${body.decided_by}${body.applied_at ? " — applied " + body.applied_at.slice(0, 10) : ""}.`;
+  loadProposals(); loadProfiles();
+}
+$("hp-proposals-load").onclick = loadProposals;
+$("hp-draft").onclick = async () => {
+  const actor = $("hp-actor").value.trim();
+  if (!actor) { $("hppropnote").textContent = "Enter your name in the profile form first — a drafted proposal names its drafter."; return; }
+  const res = await fetch("/handoff/profile-change-proposals/draft", {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("hppropnote").textContent = `Drafting refused (${res.status}): ${body.detail || ""}`; return; }
+  $("hppropnote").textContent = body.length ? `Drafted ${body.length} proposal(s): ${body.map(p => p.proposal_id + " (" + p.profile_id + " — " + p.kind.replaceAll("_", " ") + ")").join(", ")}. Nothing was applied — each waits for a second operator.` : "No new proposals — no grade names configuration theatre, or its question is already open.";
+  loadProposals();
+};
 $("hp-set").onclick = async () => {
   const actor = $("hp-actor").value.trim();
   if (!actor) { $("hpnote").textContent = "Enter your name first — a profile is governed configuration; an unattributed set is refused."; return; }

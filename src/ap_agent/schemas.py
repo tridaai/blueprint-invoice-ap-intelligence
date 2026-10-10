@@ -1374,6 +1374,79 @@ class HandoffProfileRequest(BaseModel):
     note: str = ""
 
 
+class ProfileProposalEvent(BaseModel):
+    """One entry in a profile-change proposal's audit trail:
+    the drafting, and the decision that closed it."""
+
+    status: str = ""  # proposed | approved | rejected
+    actor: str = ""
+    at: str = ""  # ISO timestamp
+    note: str = ""
+
+
+class ProfileChangeProposal(BaseModel):
+    """A governed change to a hand-off routing profile, drafted
+    from the profile's effectiveness grade.
+
+    The grade (``handoff_profiles.profile_effectiveness``) names
+    configuration theatre plainly — a profile that governs no
+    exports, or whose exports carry the at-import marker at the
+    same rate as ungoverned ones — but a read changes nothing.
+    This is the governed path from the grade to the change,
+    mirroring the master-change discipline: the proposal is
+    *drafted* from the evidence (``basis`` carries the grade's
+    account and the profile's values as graded), a second
+    operator *decides* it (proposer ≠ decider), and only an
+    approval applies it — a retirement deletes the profile
+    record, a marker tightening sets the flag through the
+    profile's own governed path. Drafting applies nothing, and
+    the agent never applies on its own say-so: left undecided, a
+    proposal is a question, not a change."""
+
+    proposal_id: str  # PCP-0001 …
+    profile_id: str
+    kind: str  # retire | tighten_markers
+    basis: str = ""  # the grade's account the proposal answers
+    current: dict = Field(default_factory=dict)  # the profile's values as graded
+    # The values approval would put in force; None for a
+    # retirement (approval deletes the profile record instead).
+    proposed: Optional[dict] = None
+    proposed_by: str = ""
+    proposed_at: str = ""
+    status: str = "pending"  # pending | approved | rejected
+    decided_by: Optional[str] = None
+    decided_at: Optional[str] = None
+    decision_note: str = ""
+    applied_at: Optional[str] = None  # when approval landed the change
+    history: list[ProfileProposalEvent] = Field(default_factory=list)
+
+
+class ProfileProposalDraftRequest(BaseModel):
+    """Draft profile-change proposals from the effectiveness
+    grades: the operator running the drafting sweep."""
+
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class ProfileProposalDecisionRequest(BaseModel):
+    """The second operator's decision on a profile-change
+    proposal: proposer ≠ decider, as on master changes."""
+
+    approve: bool
+    note: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
 # ---------------------------------------------------------------------------
 # AP aging queue (a read model over the awaiting invoices)
 # ---------------------------------------------------------------------------

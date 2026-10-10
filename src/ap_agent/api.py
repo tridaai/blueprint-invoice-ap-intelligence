@@ -61,6 +61,9 @@ from .schemas import (
     OpenPostingItem,
     PaymentRun,
     PostingReceiptRequest,
+    ProfileChangeProposal,
+    ProfileProposalDecisionRequest,
+    ProfileProposalDraftRequest,
     PaymentRunRequest,
     QueueView,
     RecoveryPack,
@@ -577,6 +580,58 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 batch_booking=request.batch_booking,
                 note=request.note,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/handoff/profile-change-proposals/draft", response_model=list[ProfileChangeProposal], dependencies=_AUTH)
+    def draft_profile_change_proposals(request: ProfileProposalDraftRequest) -> list[ProfileChangeProposal]:
+        """Drafting sweep: turn the effectiveness grades that name
+        configuration theatre (a profile governing no exports; a
+        profile routing no safer than ungoverned with its marker
+        flag off) into governed profile-change proposals. One open
+        question per profile and kind — a profile with a pending
+        proposal of the same kind is not re-drafted. Drafting
+        applies nothing; a proposal changes the profile only when
+        a second operator approves it."""
+        actor = _decision_actor(request)
+        if not (actor or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Provide 'actor' — a profile-change proposal is governed configuration work; an unattributed draft is refused.",
+            )
+        try:
+            return svc.draft_profile_change_proposals(actor=actor)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/handoff/profile-change-proposals", response_model=list[ProfileChangeProposal], dependencies=_AUTH)
+    def list_profile_change_proposals(status: str = Query(default="")) -> list[ProfileChangeProposal]:
+        return svc.list_profile_change_proposals(status=status)
+
+    @app.get("/handoff/profile-change-proposals/{proposal_id}", response_model=ProfileChangeProposal, dependencies=_AUTH)
+    def get_profile_change_proposal(proposal_id: str) -> ProfileChangeProposal:
+        proposal = svc.get_profile_change_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Profile-change proposal not drafted yet.")
+        return proposal
+
+    @app.post("/handoff/profile-change-proposals/{proposal_id}/decide", response_model=ProfileChangeProposal, dependencies=_AUTH)
+    def decide_profile_change_proposal(proposal_id: str, request: ProfileProposalDecisionRequest) -> ProfileChangeProposal:
+        """The second operator's decision: proposer ≠ decider.
+        Approval applies the proposed change (a retirement deletes
+        the profile; a marker tightening sets the flag through the
+        governed profile path) — guarded against the grade having
+        moved since the draft. Rejection leaves the profile
+        exactly as it was."""
+        try:
+            return svc.decide_profile_change_proposal(
+                proposal_id,
+                actor=_decision_actor(request),
+                approve=request.approve,
+                note=request.note,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
