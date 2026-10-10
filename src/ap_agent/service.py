@@ -44,6 +44,7 @@ from .paymentruns import (
     discount_drift,
     grade_lag_statistics,
     handoff_metrics,
+    lag_grade_drift_watch,
     lag_statistics,
     wait_cost_budget_status,
 )
@@ -2667,6 +2668,7 @@ class InvoiceService:
             as_of=datetime.now(timezone.utc).date(),
             lag_segments=lag_statistics(runs),
             lag_grades=grade_lag_statistics(runs),
+            lag_drift_watch=lag_grade_drift_watch(runs),
             profile_id=profile.profile_id if profile else "",
         )
         run.drift_forecast = forecast

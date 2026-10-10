@@ -205,6 +205,7 @@ def drift_forecast(
     lag_stats: dict | None = None,
     lag_segments: dict | None = None,
     lag_grades: dict | None = None,
+    lag_drift_watch: dict | None = None,
     profile_id: str = "",
 ) -> tuple[list[PaymentRunForecast], str]:
     """Forecast, at confirmation, which of a run's discounted
@@ -226,10 +227,13 @@ def drift_forecast(
     global pool — by :func:`_select_lag_statistic`, which grades
     the candidates against the accuracy ledger (the recorded
     export outcomes, :func:`grade_lag_statistics`) and prefers
-    the statistic with the best recorded recall. The basis states
-    the statistic used and why it was chosen. The legacy flat
-    ``lag_stats`` argument (the global statistic, pre-selection)
-    remains for direct callers.
+    the statistic with the best recorded recall. The drift watch
+    (``lag_drift_watch``, :func:`lag_grade_drift_watch`) can
+    demote a candidate whose recent recall has decayed from its
+    record; the basis names the demotion when one shapes the
+    choice. The basis states the statistic used and why it was
+    chosen. The legacy flat ``lag_stats`` argument (the global
+    statistic, pre-selection) remains for direct callers.
 
     Returns (forecast entries, basis). The basis always says what
     the projection rests on — including the honest empty cases:
@@ -241,7 +245,7 @@ def drift_forecast(
     why = ""
     if lag_segments is not None:
         chosen, label, why = _select_lag_statistic(
-            run, lag_segments, lag_grades or {}, profile_id
+            run, lag_segments, lag_grades or {}, profile_id, lag_drift_watch
         )
         if chosen is None:
             return [], (
@@ -369,24 +373,16 @@ def lag_statistics(runs: list[PaymentRun]) -> dict:
     }
 
 
-def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
-    """Grade each candidate lag statistic against the accuracy
-    ledger — what the exports actually recorded.
-
-    The forecast's report card (:func:`forecast_accuracy`) scores
-    the forecasts that were made. This scores the *statistics*
-    that could have made them: for every exported run carrying
-    discounted members, each applicable statistic (global, the
-    run's currency, the run's governing profile) is recomputed
-    WITHOUT that run (leave-one-out — a statistic never grades
-    itself on its own evidence), the flag rule is replayed with
-    it, and the replayed flags are scored against the drift the
-    export actually measured, in the same two-by-two cells.
-    Returns ``{statistic_key: {cells…, precision, recall,
-    graded_members}}`` — the selection's evidence base. A
-    statistic with no graded members is absent, never dressed up
-    with a rate over zero cases. Pure.
-    """
+def _lag_grade_members(runs: list[PaymentRun]):
+    """The grading replay, per member: for every exported run
+    carrying discounted members, each applicable statistic
+    (global, the run's currency, the run's governing profile) is
+    recomputed WITHOUT that run (leave-one-out), its flag rule
+    replayed, and each member scored against the drift its
+    export actually measured. Yields one dict per graded member
+    per statistic — the shared evidence base the grades
+    (:func:`grade_lag_statistics`) aggregate and the drift watch
+    (:func:`lag_grade_drift_watch`) windows over time."""
     exported: list[tuple[PaymentRun, float]] = []
     for run in runs:
         if not run.handoff_generated_at:
@@ -394,7 +390,6 @@ def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
         lag = _lag_days(run.proposed_at, run.handoff_generated_at)
         if lag is not None:
             exported.append((run, lag))
-    cells: dict[str, dict] = {}
     for run, _own_lag in exported:
         discounted = [
             line for line in run.lines if line.discount_amount > 0
@@ -440,6 +435,7 @@ def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
             set(drifted)
             | {line.invoice_id for line in discounted}
         )
+        amounts = {line.invoice_id: line.discount_amount for line in discounted}
         for key, segment_lags in candidates:
             if not segment_lags:
                 continue
@@ -452,7 +448,6 @@ def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
                 is not None
                 and deadline < expected
             }
-            cell = cells.setdefault(key, _new_accuracy_cell())
             for invoice_id in members:
                 is_flagged = invoice_id in flagged
                 is_drifted = invoice_id in drifted
@@ -464,28 +459,47 @@ def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
                     bucket = "unflagged_drifted"
                 else:
                     bucket = "unflagged_saved"
-                cell[bucket] += 1
-                if is_flagged:
-                    cell["value_flagged"] = round(
-                        cell["value_flagged"]
-                        + next(
-                            line.discount_amount
-                            for line in discounted
-                            if line.invoice_id == invoice_id
-                        ),
-                        2,
-                    )
-                if is_drifted:
-                    value_key = (
-                        "value_lost_flagged"
-                        if is_flagged
-                        else "value_lost_unflagged"
-                    )
-                    cell[value_key] = round(
-                        cell[value_key]
-                        + drifted[invoice_id].discount_lost,
-                        2,
-                    )
+                yield {
+                    "statistic": key,
+                    "run": run,
+                    "invoice_id": invoice_id,
+                    "bucket": bucket,
+                    "discount_amount": amounts.get(invoice_id, 0.0),
+                    "discount_lost": (
+                        drifted[invoice_id].discount_lost if is_drifted else 0.0
+                    ),
+                }
+
+
+def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
+    """Grade each candidate lag statistic against the accuracy
+    ledger — what the exports actually recorded.
+
+    The forecast's report card (:func:`forecast_accuracy`) scores
+    the forecasts that were made. This scores the *statistics*
+    that could have made them: the per-member replay
+    (:func:`_lag_grade_members`) aggregated into the same
+    two-by-two cells. Returns ``{statistic_key: {cells…,
+    precision, recall, graded_members}}`` — the selection's
+    evidence base. A statistic with no graded members is absent,
+    never dressed up with a rate over zero cases. Pure.
+    """
+    cells: dict[str, dict] = {}
+    for member in _lag_grade_members(runs):
+        cell = cells.setdefault(member["statistic"], _new_accuracy_cell())
+        cell[member["bucket"]] += 1
+        if member["bucket"] in ("flagged_drifted", "flagged_saved"):
+            cell["value_flagged"] = round(
+                cell["value_flagged"] + member["discount_amount"], 2
+            )
+        if member["bucket"] == "flagged_drifted":
+            cell["value_lost_flagged"] = round(
+                cell["value_lost_flagged"] + member["discount_lost"], 2
+            )
+        elif member["bucket"] == "unflagged_drifted":
+            cell["value_lost_unflagged"] = round(
+                cell["value_lost_unflagged"] + member["discount_lost"], 2
+            )
     graded: dict[str, dict] = {}
     for key, cell in sorted(cells.items()):
         precision, recall = _accuracy_rates(cell)
@@ -517,6 +531,99 @@ def grade_lag_statistics(runs: list[PaymentRun]) -> dict:
     return graded
 
 
+# The drift watch's windows: the recent sample is the last few
+# exported runs (in export order) that carried graded members,
+# and a window with fewer graded members than this is an
+# anecdote, not a trend — the watch assesses nothing on it.
+_DRIFT_WATCH_RECENT_RUNS = 5
+_DRIFT_WATCH_MIN_WINDOW_MEMBERS = 3
+# A recall fall of this size, earlier record to recent window,
+# is the statistic losing the drift it used to catch — not noise.
+_DRIFT_WATCH_RECALL_DROP = 0.25
+
+
+def lag_grade_drift_watch(
+    runs: list[PaymentRun],
+    *,
+    recent_runs: int = _DRIFT_WATCH_RECENT_RUNS,
+    min_window_members: int = _DRIFT_WATCH_MIN_WINDOW_MEMBERS,
+    recall_drop: float = _DRIFT_WATCH_RECALL_DROP,
+) -> dict:
+    """Watch the grades for decay: is a statistic still catching
+    what its record says it catches?
+
+    The selection trusts a statistic's grade — one number over
+    the whole ledger. A bank that slows down does not announce
+    itself: the profile segment that used to flag every lapse
+    starts missing them, and the pooled grade dilutes the decay
+    for months. This watch windows the same per-member replay
+    (:func:`_lag_grade_members`) by export order: the members
+    graded from the most recent ``recent_runs`` exported runs
+    form the recent sample, the rest the earlier record, and a
+    statistic whose recent recall has fallen ``recall_drop`` or
+    more below its earlier recall is **degrading** — named in
+    ``/metrics`` and demoted by the forecast's selection until
+    its recent record recovers. A statistic is assessed only
+    with at least ``min_window_members`` graded members in BOTH
+    windows and a recall on both sides; anything thinner is
+    reported unassessed rather than dressed up as stable. Pure.
+    """
+    members = list(_lag_grade_members(runs))
+    graded_runs = sorted(
+        {member["run"].run_id: member["run"] for member in members}.values(),
+        key=lambda run: (run.handoff_generated_at or "", run.run_id),
+    )
+    recent_ids = {run.run_id for run in graded_runs[-recent_runs:]} if recent_runs else set()
+    windows: dict[str, dict[str, dict]] = {}
+    for member in members:
+        per_key = windows.setdefault(
+            member["statistic"],
+            {"overall": _new_accuracy_cell(), "earlier": _new_accuracy_cell(), "recent": _new_accuracy_cell()},
+        )
+        per_key["overall"][member["bucket"]] += 1
+        side = "recent" if member["run"].run_id in recent_ids else "earlier"
+        per_key[side][member["bucket"]] += 1
+
+    def _members(cell: dict) -> int:
+        return sum(
+            cell[name]
+            for name in (
+                "flagged_drifted",
+                "flagged_saved",
+                "unflagged_drifted",
+                "unflagged_saved",
+            )
+        )
+
+    watch: dict[str, dict] = {}
+    for key in sorted(windows):
+        per_key = windows[key]
+        overall_recall = _accuracy_rates(per_key["overall"])[1]
+        earlier_recall = _accuracy_rates(per_key["earlier"])[1]
+        recent_recall = _accuracy_rates(per_key["recent"])[1]
+        earlier_members = _members(per_key["earlier"])
+        recent_members = _members(per_key["recent"])
+        assessed = (
+            earlier_members >= min_window_members
+            and recent_members >= min_window_members
+            and earlier_recall is not None
+            and recent_recall is not None
+        )
+        degrading = bool(
+            assessed and earlier_recall - recent_recall >= recall_drop
+        )
+        watch[key] = {
+            "overall_recall": overall_recall,
+            "earlier_recall": earlier_recall,
+            "recent_recall": recent_recall,
+            "earlier_graded_members": earlier_members,
+            "recent_graded_members": recent_members,
+            "assessed": assessed,
+            "degrading": degrading,
+        }
+    return watch
+
+
 # A segment mean over one or two exports is an anecdote, not a
 # statistic; a grade over three members is a coin toss. The
 # selection requires both bars before it trusts either.
@@ -529,6 +636,7 @@ def _select_lag_statistic(
     segments: dict,
     grades: dict,
     profile_id: str,
+    drift_watch: dict | None = None,
 ) -> tuple[dict | None, str, str]:
     """Choose the lag statistic that projects this run's export,
     and say why — (stats, label, why); (None, "", "") when no
@@ -544,6 +652,14 @@ def _select_lag_statistic(
     adequately-measured segment at all, the global pool — the
     pre-selection behaviour — is the fallback, so a young ledger
     forecasts exactly as it did before segments existed.
+
+    The drift watch (``drift_watch``, :func:`lag_grade_drift_watch`)
+    can demote a graded candidate: a statistic whose RECENT
+    recall has fallen away from its record is not allowed to win
+    on the strength of the old record — the selection falls to
+    the best standing graded candidate, or, when every graded
+    candidate is demoted, to the most specific adequately-
+    measured segment — and the why names the demotion either way.
     """
     candidates: list[tuple[int, str, str, dict]] = []
     profile_stats = (
@@ -593,20 +709,55 @@ def _select_lag_statistic(
                 candidate[0],
             )
 
-        best = max(graded, key=rank)
-        grade = grades[best[1]]
-        precision_clause = (
-            f" (precision {grade['precision']:.2f})"
-            if grade["precision"] is not None
-            else ""
+        watch = drift_watch or {}
+        demoted = [
+            c for c in graded if (watch.get(c[1]) or {}).get("degrading")
+        ]
+        demoted_keys = {c[1] for c in demoted}
+        standing = [c for c in graded if c[1] not in demoted_keys]
+
+        def demotion_clause() -> str:
+            parts = []
+            for candidate in demoted:
+                entry = watch[candidate[1]]
+                parts.append(
+                    f"the {candidate[2]} statistic was demoted by "
+                    f"the lag-grade drift watch (recent recall "
+                    f"{entry['recent_recall']:.2f} over its latest "
+                    f"graded members, down from "
+                    f"{entry['earlier_recall']:.2f} on the earlier "
+                    "record)"
+                )
+            return "; ".join(parts)
+
+        if standing:
+            best = max(standing, key=rank)
+            grade = grades[best[1]]
+            precision_clause = (
+                f" (precision {grade['precision']:.2f})"
+                if grade["precision"] is not None
+                else ""
+            )
+            why = (
+                "selected on the accuracy ledger: recall "
+                f"{grade['recall']:.2f} over {grade['graded_members']} "
+                f"graded members{precision_clause}, the best recorded "
+                f"of {len(graded)} graded candidate(s)"
+            )
+            if demoted:
+                why = f"{why}; {demotion_clause()}"
+            return best[3], best[2], why
+        # Every graded candidate is demoted: the forecast falls
+        # back to the most specific adequately-measured segment,
+        # with the demotions named — never to a statistic the
+        # watch just caught decaying.
+        best = max(eligible, key=lambda c: c[0])
+        return (
+            best[3],
+            best[2],
+            f"{demotion_clause()}; no graded candidate stands, so "
+            "the most specific adequately-measured segment governs",
         )
-        why = (
-            "selected on the accuracy ledger: recall "
-            f"{grade['recall']:.2f} over {grade['graded_members']} "
-            f"graded members{precision_clause}, the best recorded "
-            f"of {len(graded)} graded candidate(s)"
-        )
-        return best[3], best[2], why
     best = max(eligible, key=lambda c: c[0])
     return (
         best[3],
@@ -1102,6 +1253,7 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
         },
         "forecast_accuracy": forecast_accuracy(runs),
         "lag_statistic_grades": grade_lag_statistics(runs),
+        "lag_grade_drift_watch": lag_grade_drift_watch(runs),
         "creditor_completion": creditor_completion_metrics(runs),
         "four_eyes_wait": {
             "runs_second_confirmed": second_confirmed_runs,
