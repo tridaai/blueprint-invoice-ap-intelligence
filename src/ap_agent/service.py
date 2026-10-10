@@ -61,6 +61,7 @@ from .schemas import (
     BundleResult,
     CreditNoteInput,
     CreditNoteMatch,
+    DigestHistory,
     EscalationDigest,
     InvoiceBundleInput,
     InvoiceInput,
@@ -1678,6 +1679,57 @@ class InvoiceService:
             queue=self.queue_view(as_of=anchor.isoformat()),
             runs=self._get_store().list_payment_runs(),
         )
+
+    def store_digest(self, as_of: str = "", actor: str = "") -> EscalationDigest:
+        """Store a day's digest: the audit-file copy.
+
+        The computed digest describes the records as they are at
+        read time, so yesterday's digest cannot be re-derived once
+        the records move — a case transitions, a posting closes,
+        and the day re-composes differently. Storing is an
+        operator action that pins the day's first-computed digest
+        in the store (migration 0010), stamped with who stored it
+        and when, provenance ``stored``.
+
+        First-computed wins: when a copy is already stored for the
+        date, it is returned unchanged — a later store attempt
+        never overwrites the copy a human may already have
+        forwarded. Recomputation stays available through
+        :meth:`escalation_digest`, labelled ``computed``.
+        """
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        existing = store.get_digest(anchor.isoformat())
+        if existing is not None:
+            return existing  # the first-computed copy is the record
+        digest = self.escalation_digest(as_of=anchor.isoformat())
+        digest.provenance = "stored"
+        digest.stored_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        digest.stored_by = actor
+        store.save_digest(digest)
+        return digest
+
+    def get_stored_digest(self, digest_date: str) -> EscalationDigest | None:
+        """Read back the stored digest for a date, verbatim — or
+        None when nobody stored that day. The returned digest is
+        the copy as stored (provenance ``stored``); it is never a
+        recomputation wearing the label."""
+        anchor = _parse_date(digest_date) if digest_date else None
+        if anchor is None:
+            raise ValueError(f"digest_date {digest_date!r} is not an ISO date")
+        return self._get_store().get_digest(anchor.isoformat())
+
+    def digest_history(self) -> DigestHistory:
+        """The stored digests as a day-over-day series: headline
+        counts per stored day, each with its changes against the
+        previous stored day (see ``digest.build_digest_history``).
+        Days nobody stored are absent, not interpolated."""
+        from .digest import build_digest_history
+
+        return build_digest_history(self._get_store().list_digests())
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)

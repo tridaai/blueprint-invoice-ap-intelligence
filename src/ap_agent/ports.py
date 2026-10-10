@@ -63,7 +63,7 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
         VisionResult,
     )
     from .schemas import BundleResult, MasterChangeRequest, PaymentRun, RecoveryPack
-    from .schemas import StatementReconciliation, SupplierMasterRecord
+    from .schemas import EscalationDigest, StatementReconciliation, SupplierMasterRecord
     from .store import ApprovalRecord
 
 
@@ -141,6 +141,12 @@ class Store(Protocol):
     def save_bundle(self, bundle: "BundleResult") -> None: ...
 
     def get_bundle(self, bundle_id: str) -> "BundleResult | None": ...
+
+    def save_digest(self, digest: "EscalationDigest") -> None: ...
+
+    def get_digest(self, digest_date: str) -> "EscalationDigest | None": ...
+
+    def list_digests(self) -> list["EscalationDigest"]: ...
 
     def prior_invoices(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
 

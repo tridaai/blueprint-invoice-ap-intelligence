@@ -43,6 +43,7 @@ from .schemas import (
     CreditNoteInput,
     CreditNoteMatch,
     DecisionRequest,
+    DigestHistory,
     EscalationDigest,
     InvoiceBundleInput,
     InvoiceInput,
@@ -378,6 +379,51 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         date) anchors the digest; default today."""
         try:
             return svc.escalation_digest(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/digest/history", response_model=DigestHistory, dependencies=_AUTH)
+    def digest_history() -> DigestHistory:
+        """The stored digests as a day-over-day series: headline
+        counts per stored day, each with its changes against the
+        previous stored day. Days nobody stored are absent — the
+        history interpolates nothing."""
+        return svc.digest_history()
+
+    @app.get("/digest/{digest_date}", response_model=EscalationDigest, dependencies=_AUTH)
+    def stored_digest(digest_date: str) -> EscalationDigest:
+        """Read back the stored digest for a date, verbatim — the
+        audit-file copy a human forwards. 404 when nobody stored
+        that day (store it with POST /digest/{date}/store);
+        GET /digest?as_of=… stays the live recomputation, labelled
+        ``computed`` either way."""
+        try:
+            digest = svc.get_stored_digest(digest_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if digest is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No digest stored for {digest_date} yet. Store the "
+                    "day's first-computed digest with POST "
+                    f"/digest/{digest_date}/store, or compute one live "
+                    "with GET /digest?as_of=" + digest_date + "."
+                ),
+            )
+        return digest
+
+    @app.post("/digest/{digest_date}/store", response_model=EscalationDigest, dependencies=_AUTH)
+    def store_digest(digest_date: str, request: DecisionRequest) -> EscalationDigest:
+        """Store the day's first-computed digest (operator
+        action): pinned verbatim with the operator's name and the
+        storage time, provenance ``stored``. First-computed wins
+        — storing a date that already has a copy returns that
+        copy unchanged."""
+        try:
+            return svc.store_digest(
+                as_of=digest_date, actor=_decision_actor(request)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

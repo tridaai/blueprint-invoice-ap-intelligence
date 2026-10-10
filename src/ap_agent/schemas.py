@@ -1107,6 +1107,48 @@ class EscalationDigest(BaseModel):
     forecast_value_by_currency: dict[str, float] = Field(default_factory=dict)
     drift_today: list[DigestDriftEntry] = Field(default_factory=list)
     drift_value_by_currency: dict[str, float] = Field(default_factory=dict)
+    # Provenance: a digest is "computed" at read time by default —
+    # fresh every call, and labelled as such. An operator can store
+    # a day's first-computed digest (POST /digest/{date}/store);
+    # the stored copy carries provenance "stored" with who stored
+    # it and when. The stored copy is the one a human forwards or
+    # files for audit: the records move on, and yesterday's digest
+    # cannot be re-derived from them — a recomputation never wears
+    # the "stored" label.
+    provenance: str = "computed"  # computed | stored
+    stored_at: str = ""  # ISO timestamp, when stored
+    stored_by: str = ""  # the operator who stored it
+
+
+class DigestHistoryEntry(BaseModel):
+    """One stored digest's headline counts, with the change
+    against the previous stored day: the digest series read as a
+    trend — is the building's escalation load growing or
+    shrinking? ``changes`` maps each headline count that *moved*
+    to this day minus the previous stored day (a count that held
+    is absent, not a zero); the earliest stored day has no
+    predecessor, so its changes are empty rather than dressed up
+    as deltas from zero."""
+
+    as_of: str = ""  # the digest's date
+    stored_at: str = ""
+    stored_by: str = ""
+    recovery_breach_count: int = 0
+    posting_escalation_count: int = 0
+    stuck_invoice_count: int = 0
+    four_eyes_pending_count: int = 0
+    forecast_lapse_count: int = 0
+    drift_run_count: int = 0
+    changes: dict[str, int] = Field(default_factory=dict)
+
+
+class DigestHistory(BaseModel):
+    """The stored digests in date order, headline counts only:
+    the day-over-day view over the audit-file copies. Days nobody
+    stored are absent — the history never invents a day."""
+
+    entries: list[DigestHistoryEntry] = Field(default_factory=list)
+    count: int = 0
 
 
 # ---------------------------------------------------------------------------

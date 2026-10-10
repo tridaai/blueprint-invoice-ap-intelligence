@@ -83,6 +83,13 @@
       <span class="note" id="digestnote">The day's escalations in one summary: recovery cases past their SLA, escalated postings, stuck invoices, four-eyes stalls, forecast lapses and realised drift. Composed from the records; the agent sends nothing.</span>
     </div>
     <div id="digestbody"></div>
+    <div class="gate" style="margin-top:10px">
+      <input type="text" id="digestactor" placeholder="Your name (to store)" size="20">
+      <button id="storedigest" class="secondary">Store digest</button>
+      <button id="loadhistory" class="secondary">Load history</button>
+      <span class="note" id="digeststore-note">Storing pins the day's first-computed digest verbatim — the copy a human forwards or files. First-computed wins: a stored day is never overwritten, and a live recomputation is always labelled "computed".</span>
+    </div>
+    <div id="digesthistory"></div>
   </section>
   <section id="sec-payruns">
     <h2>Payment runs (proposals — the agent never pays)</h2>
@@ -507,10 +514,12 @@ $("propose").onclick = async () => {
 };
 $("loadqueue").onclick = loadQueue;
 
+let digestDate = null;
 async function loadDigest() {
   const res = await fetch("/digest", {headers: headers()});
   const d = await res.json();
   if (!res.ok) { $("digestnote").textContent = `Digest failed to load (${res.status}).`; return; }
+  digestDate = d.as_of;
   const counts = [
     `${d.recovery_breach_count} recovery breach(es)`,
     `${d.posting_escalation_count} posting escalation(s)`,
@@ -519,10 +528,44 @@ async function loadDigest() {
     `${(d.forecast_lapses || []).length} forecast lapse(s)`,
     `${(d.drift_today || []).length} run(s) drifted today`,
   ].join(" · ");
-  $("digestnote").textContent = `Digest for ${d.as_of}: ${counts}.`;
+  $("digestnote").textContent = `Digest for ${d.as_of} (${esc(d.provenance || "computed")}): ${counts}.`;
   $("digestbody").innerHTML = `<pre>${esc(d.summary || "")}</pre>`;
 }
 $("loaddigest").onclick = loadDigest;
+
+async function storeDigest() {
+  const actor = $("digestactor").value.trim();
+  if (!actor) { $("digeststore-note").textContent = "Enter your name first — storing a digest is attributable."; return; }
+  if (!digestDate) await loadDigest();
+  if (!digestDate) { $("digeststore-note").textContent = "Load a digest first."; return; }
+  const res = await fetch(`/digest/${digestDate}/store`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("digeststore-note").textContent = `Store refused (${res.status}): ${body.detail || ""}`; return; }
+  $("digeststore-note").textContent = `Digest for ${body.as_of} stored by ${esc(body.stored_by)} at ${esc(body.stored_at)} — the first-computed copy is the record; read it back at GET /digest/${body.as_of}.`;
+  loadDigestHistory();
+}
+$("storedigest").onclick = storeDigest;
+
+const DIGEST_COUNT_LABELS = {
+  recovery_breach_count: "recovery breaches",
+  posting_escalation_count: "posting escalations",
+  stuck_invoice_count: "stuck invoices",
+  four_eyes_pending_count: "four-eyes stalls",
+  forecast_lapse_count: "forecast lapses",
+  drift_run_count: "drifted runs",
+};
+async function loadDigestHistory() {
+  const res = await fetch("/digest/history", {headers: headers()});
+  if (!res.ok) { $("digeststore-note").textContent = `History failed to load (${res.status}).`; return; }
+  const h = await res.json();
+  const entries = h.entries || [];
+  $("digesthistory").innerHTML = entries.length ? `<p class="kv" style="margin-top:12px"><b>Stored digests</b> — headline counts per stored day, with the change against the previous stored day. Days nobody stored are absent, not interpolated.</p>
+  <table><tr><th>Date</th><th>Recovery</th><th>Postings</th><th>Stuck</th><th>Four-eyes</th><th>Lapses</th><th>Drift</th><th>Change vs previous stored day</th><th>Stored by</th></tr>${entries.map(e => {
+    const changes = Object.entries(e.changes || {}).map(([k, v]) => `${v > 0 ? "+" : ""}${v} ${DIGEST_COUNT_LABELS[k] || k}`).join(" · ");
+    return `<tr><td>${esc(e.as_of)}</td><td>${e.recovery_breach_count}</td><td>${e.posting_escalation_count}</td><td>${e.stuck_invoice_count}</td><td>${e.four_eyes_pending_count}</td><td>${e.forecast_lapse_count}</td><td>${e.drift_run_count}</td><td>${changes ? esc(changes) : '<span class="note">—</span>'}</td><td>${esc(e.stored_by || "—")}<br><span class="note">${esc((e.stored_at || "").slice(0, 10))}</span></td></tr>`;
+  }).join("")}</table>` : `<p class="kv" style="margin-top:10px">No digests stored yet — store one to start the series.</p>`;
+}
+$("loadhistory").onclick = loadDigestHistory;
 
 loadSamples(); loadEvals(); loadRuns(); loadChanges();
 </script>

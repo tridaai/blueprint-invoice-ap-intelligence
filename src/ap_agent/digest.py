@@ -26,6 +26,15 @@ Composition is the reconciliation summary's discipline: computed
 in code from the stored records, every exception named, an
 explicit all-clear when nothing fired — no free-form drafting,
 and the summary says plainly that the agent sent nothing.
+
+A computed digest describes the records *as they are now*, so it
+cannot answer for yesterday once the records move. An operator
+can therefore store a day's first-computed digest (the service's
+``store_digest``, migration 0010): the stored copy is read back
+verbatim by date, labelled with its provenance, and the series of
+stored days forms a history — headline counts with day-over-day
+changes (:func:`build_digest_history`), so the escalation load is
+a trend, not a sequence of unrelated mornings.
 """
 
 from __future__ import annotations
@@ -37,10 +46,70 @@ from .matching import _parse_date
 from .schemas import (
     DigestDriftEntry,
     DigestForecastLapse,
+    DigestHistory,
+    DigestHistoryEntry,
     EscalationDigest,
     PaymentRun,
     QueueView,
 )
+
+# The counts a digest is summarised by in the history view, in
+# display order. A forecast lapse count and a drifted-run count
+# are list lengths on the digest — the rest are its count fields.
+HEADLINE_COUNTS = (
+    "recovery_breach_count",
+    "posting_escalation_count",
+    "stuck_invoice_count",
+    "four_eyes_pending_count",
+    "forecast_lapse_count",
+    "drift_run_count",
+)
+
+
+def headline_counts(digest: EscalationDigest) -> dict[str, int]:
+    """A digest's headline counts, keyed by the history fields."""
+    return {
+        "recovery_breach_count": digest.recovery_breach_count,
+        "posting_escalation_count": digest.posting_escalation_count,
+        "stuck_invoice_count": digest.stuck_invoice_count,
+        "four_eyes_pending_count": digest.four_eyes_pending_count,
+        "forecast_lapse_count": len(digest.forecast_lapses),
+        "drift_run_count": len(digest.drift_today),
+    }
+
+
+def build_digest_history(
+    digests: Iterable[EscalationDigest],
+) -> DigestHistory:
+    """The stored digests as a series: date order, headline
+    counts, and each day's change against the previous *stored*
+    day (calendar gaps are the operator's storage discipline —
+    the history reports stored days, it does not interpolate the
+    ones nobody stored). Pure over the digests given."""
+    entries: list[DigestHistoryEntry] = []
+    previous: dict[str, int] | None = None
+    for digest in sorted(digests, key=lambda d: d.as_of):
+        counts = headline_counts(digest)
+        changes = (
+            {
+                key: counts[key] - previous[key]
+                for key in HEADLINE_COUNTS
+                if counts[key] != previous[key]
+            }
+            if previous is not None
+            else {}
+        )
+        entries.append(
+            DigestHistoryEntry(
+                as_of=digest.as_of,
+                stored_at=digest.stored_at,
+                stored_by=digest.stored_by,
+                changes=changes,
+                **counts,
+            )
+        )
+        previous = counts
+    return DigestHistory(entries=entries, count=len(entries))
 
 
 def build_digest(

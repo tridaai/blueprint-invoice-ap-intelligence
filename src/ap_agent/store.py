@@ -28,6 +28,7 @@ from .config import env_str, load_dotenv
 from .schemas import (
     AgentResult,
     BundleResult,
+    EscalationDigest,
     MasterChangeRequest,
     PaymentRun,
     RecoveryPack,
@@ -196,6 +197,7 @@ class InMemoryStore:
         self._recovery_packs: dict[str, str] = {}
         self._master_changes: dict[str, str] = {}
         self._bundles: dict[str, str] = {}
+        self._digests: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
@@ -271,6 +273,20 @@ class InMemoryStore:
         with self._lock:
             payload = self._bundles.get(bundle_id)
         return BundleResult.model_validate_json(payload) if payload else None
+
+    def save_digest(self, digest: EscalationDigest) -> None:
+        with self._lock:
+            self._digests[digest.as_of] = digest.model_dump_json()
+
+    def get_digest(self, digest_date: str) -> EscalationDigest | None:
+        with self._lock:
+            payload = self._digests.get(digest_date)
+        return EscalationDigest.model_validate_json(payload) if payload else None
+
+    def list_digests(self) -> list[EscalationDigest]:
+        with self._lock:
+            payloads = [self._digests[k] for k in sorted(self._digests)]
+        return [EscalationDigest.model_validate_json(p) for p in payloads]
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -504,6 +520,26 @@ class PostgresStore:
     def get_bundle(self, bundle_id: str) -> BundleResult | None:
         data = self._get_blob("bundles", "bundle_id", bundle_id)
         return BundleResult.model_validate(data) if data is not None else None
+
+    # --- Round-10 artefacts: stored digests. Same blob pattern,
+    # keyed by the digest's date; the first-computed copy is the
+    # one kept (the service enforces first-wins on save).
+
+    def save_digest(self, digest: EscalationDigest) -> None:
+        self._save_blob(
+            "digests", "digest_date", digest.as_of, digest.model_dump_json()
+        )
+
+    def get_digest(self, digest_date: str) -> EscalationDigest | None:
+        data = self._get_blob("digests", "digest_date", digest_date)
+        return EscalationDigest.model_validate(data) if data is not None else None
+
+    def list_digests(self) -> list[EscalationDigest]:
+        digests = [
+            EscalationDigest.model_validate(d)
+            for d in self._all_blobs("digests")
+        ]
+        return sorted(digests, key=lambda d: d.as_of)
 
     def _all_payloads(self) -> list:
         with self._connect() as conn:
