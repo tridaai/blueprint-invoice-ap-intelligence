@@ -583,7 +583,20 @@ class MarkerWorklistItem(BaseModel):
     master held no approved bank details for it. This is the
     supplier-onboarding worklist's unit of work — onboard this
     supplier through the governed master-change path and the
-    marker (and the import risk it prices) goes away."""
+    marker (and the import risk it prices) goes away.
+
+    The row also carries the onboarding's *flow state*, joined
+    from the governed change pipeline (``worklist.py``): a
+    supplier whose latest master change is still live — pending,
+    or approved and awaiting its effective date — is
+    ``in_flight``, not open work: somebody is already on it, and
+    the row names the change, its proposer, and how long it has
+    been waiting (the decision is owed by a second operator). A
+    supplier whose latest change was *rejected* shows the
+    rejection — who decided, when, and the recorded note — so
+    re-proposing is a deliberate act against a visible refusal,
+    not a hopeful retry. An expired pending change is open
+    again: it decided nothing and covers nothing."""
 
     supplier_name: str = ""
     currency: str = "USD"
@@ -592,6 +605,16 @@ class MarkerWorklistItem(BaseModel):
     invoice_ids: list[str] = Field(default_factory=list)
     export_count: int = 0  # runs those members exported in
     last_export_date: str = ""  # ISO date of the latest marked export
+    # The onboarding flow state, from the supplier's latest
+    # governed master change (see the class docstring).
+    onboarding_state: str = "open"  # open | in_flight | rejected
+    in_flight_change_id: str = ""  # the live change's request id
+    in_flight_proposed_by: str = ""  # who proposed it (decision is owed by another)
+    in_flight_age_days: Optional[int] = None  # days since the live change was proposed
+    rejected_change_id: str = ""  # the rejected change's request id
+    rejected_by: str = ""  # who rejected it
+    rejected_at: str = ""  # ISO timestamp of the rejection
+    rejection_note: str = ""  # the decider's recorded note
 
 
 class MarkerWorklist(BaseModel):
@@ -602,13 +625,20 @@ class MarkerWorklist(BaseModel):
     biggest exposure first. Suppliers the master now covers with
     approved bank details are resolved: off the list, counted in
     ``resolved_supplier_count`` with their formerly-marked value,
-    so the queue's shrinkage is visible."""
+    so the queue's shrinkage is visible. Listed suppliers carry
+    their onboarding flow state: ``in_flight_count`` are already
+    being worked through the governed change pipeline (do not
+    chase them twice) and ``rejected_count`` had their latest
+    change refused (re-propose deliberately, against the recorded
+    rejection)."""
 
     items: list[MarkerWorklistItem] = Field(default_factory=list)
     supplier_count: int = 0
     totals_by_currency: dict[str, float] = Field(default_factory=dict)
     resolved_supplier_count: int = 0
     resolved_value_by_currency: dict[str, float] = Field(default_factory=dict)
+    in_flight_count: int = 0  # distinct listed suppliers with a live change
+    rejected_count: int = 0  # distinct listed suppliers whose latest change was rejected
 
 
 # ---------------------------------------------------------------------------

@@ -1871,12 +1871,17 @@ class InvoiceService:
         completion uses (a record exists AND carries an IBAN or an
         account number): onboarding is the governed master-change
         path, and the moment it lands, the marked exports become
-        history rather than work. A pure read — it onboards
-        nobody."""
+        history rather than work. Listed rows are joined with the
+        store's master-change requests, so a supplier already
+        being onboarded reads as in flight (its live change named,
+        with its age — not open work to chase a second time) and
+        a supplier whose change was rejected wears the rejection.
+        A pure read — it onboards nobody."""
         from .supplier_master import _iban_norm
         from .worklist import marker_worklist as _marker_worklist
 
-        runs = self._get_store().list_payment_runs()
+        store = self._get_store()
+        runs = store.list_payment_runs()
         master = self._get_supplier_master()
         candidates = {
             entry.supplier_name
@@ -1892,7 +1897,13 @@ class InvoiceService:
                 or (record.account_number or "").strip()
             ):
                 onboarded.add(name)
-        return _marker_worklist(runs, onboarded_suppliers=onboarded)
+        return _marker_worklist(
+            runs,
+            onboarded_suppliers=onboarded,
+            changes=store.list_master_changes(),
+            as_of=datetime.now(timezone.utc).date(),
+            expiry_days=master_change_expiry_days(),
+        )
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)

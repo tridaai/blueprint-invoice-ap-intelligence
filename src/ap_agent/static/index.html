@@ -531,8 +531,16 @@ async function loadWorklist() {
   const w = await res.json();
   if (!res.ok) { $("worklistnote").textContent = `Worklist failed to load (${res.status}): ${w.detail || ""}`; return; }
   const totals = Object.entries(w.totals_by_currency || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
-  $("worklistnote").textContent = `${w.supplier_count} supplier(s) still exporting marked${totals ? " · marked value " + totals : ""}${w.resolved_supplier_count ? ` · ${w.resolved_supplier_count} supplier(s) onboarded since (resolved)` : ""}.`;
-  $("worklistbody").innerHTML = (w.items || []).length ? `<table><tr><th>Supplier</th><th>Currency</th><th>Marked value</th><th>Invoices</th><th>Exports</th><th>Last marked export</th><th></th></tr>${w.items.map(i => `<tr><td>${esc(i.supplier_name)}</td><td>${esc(i.currency)}</td><td><b>${i.marked_value}</b></td><td>${i.invoice_count}<br><span class="note">${(i.invoice_ids || []).map(esc).join(", ")}</span></td><td>${i.export_count}</td><td>${esc(i.last_export_date || "—")}</td><td><button class="secondary" data-onboard="${esc(i.supplier_name)}">Propose master change</button></td></tr>`).join("")}</table>` : `<p class="kv">No supplier is exporting marked — every exported member's creditor account was completed from the master, or nothing has exported yet.</p>`;
+  $("worklistnote").textContent = `${w.supplier_count} supplier(s) still exporting marked${totals ? " · marked value " + totals : ""}${w.in_flight_count ? ` · ${w.in_flight_count} onboarding in flight (do not chase twice)` : ""}${w.rejected_count ? ` · ${w.rejected_count} with a rejected change on record` : ""}${w.resolved_supplier_count ? ` · ${w.resolved_supplier_count} supplier(s) onboarded since (resolved)` : ""}.`;
+  const stateCell = i => {
+    if (i.onboarding_state === "in_flight") return `<span class="pill info">Onboarding in flight</span><br><span class="note">${esc(i.in_flight_change_id)} proposed by ${esc(i.in_flight_proposed_by || "—")}${i.in_flight_age_days != null ? ` · ${i.in_flight_age_days}d waiting` : ""} · decision owed by a second operator</span>`;
+    if (i.onboarding_state === "rejected") return `<span class="pill bad">Change rejected</span><br><span class="note">${esc(i.rejected_change_id)} rejected by ${esc(i.rejected_by || "—")}${i.rejected_at ? " on " + esc(String(i.rejected_at).slice(0, 10)) : ""}${i.rejection_note ? " — " + esc(i.rejection_note) : ""} · re-propose deliberately</span>`;
+    return `<span class="pill warn">Open</span>`;
+  };
+  const actionCell = i => i.onboarding_state === "in_flight"
+    ? `<span class="note">Awaiting decision — no second proposal</span>`
+    : `<button class="secondary" data-onboard="${esc(i.supplier_name)}">${i.onboarding_state === "rejected" ? "Re-propose master change" : "Propose master change"}</button>`;
+  $("worklistbody").innerHTML = (w.items || []).length ? `<table><tr><th>Supplier</th><th>Currency</th><th>Marked value</th><th>Invoices</th><th>Exports</th><th>Last marked export</th><th>Onboarding state</th><th></th></tr>${w.items.map(i => `<tr><td>${esc(i.supplier_name)}</td><td>${esc(i.currency)}</td><td><b>${i.marked_value}</b></td><td>${i.invoice_count}<br><span class="note">${(i.invoice_ids || []).map(esc).join(", ")}</span></td><td>${i.export_count}</td><td>${esc(i.last_export_date || "—")}</td><td>${stateCell(i)}</td><td>${actionCell(i)}</td></tr>`).join("")}</table>` : `<p class="kv">No supplier is exporting marked — every exported member's creditor account was completed from the master, or nothing has exported yet.</p>`;
   document.querySelectorAll("[data-onboard]").forEach(btn => btn.onclick = () => {
     $("mc-supplier").value = btn.dataset.onboard;
     $("sec-master").scrollIntoView({behavior: "smooth"});

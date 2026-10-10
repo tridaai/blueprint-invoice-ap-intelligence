@@ -26,33 +26,109 @@ bank:
   Runs exported before receipts existed contribute nothing:
   there is no receipt to rank from, and the worklist invents
   none.
+- The listed rows also know where the onboarding *flow* stands,
+  joined from the governed change pipeline: a supplier whose
+  latest master change is still live — pending inside its
+  decision window, or approved and awaiting its effective date —
+  is ``in_flight``: the change's id, proposer, and age ride the
+  row, so the queue does not chase work already being worked
+  (the decision is owed by a second operator, and the row says
+  who proposed, so it also says who may *not* decide it). A
+  supplier whose latest change was rejected returns to the list
+  wearing the rejection — decider, date, and the recorded note —
+  so re-proposing is deliberate. An expired pending change is
+  neither: it decided nothing, and the row reads open again.
 
-Pure over the runs given: the service supplies the store's runs
-and the set of suppliers the master now covers. It writes
-nothing, onboards nobody — onboarding is the governed
-master-change path, one click away in the console, and it stays
-a human's governed act.
+Pure over the inputs given: the service supplies the store's
+runs, the set of suppliers the master now covers, and the
+store's master-change requests. It writes nothing, onboards
+nobody — onboarding is the governed master-change path, one
+click away in the console, and it stays a human's governed act.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Iterable
 
+from .master_changes import change_age_days, is_change_expired
 from .matching import _parse_date
-from .schemas import MarkerWorklist, MarkerWorklistItem, PaymentRun
+from .schemas import (
+    MarkerWorklist,
+    MarkerWorklistItem,
+    MasterChangeRequest,
+    PaymentRun,
+)
+
+
+def _flow_state(
+    change: MasterChangeRequest | None,
+    *,
+    as_of: date,
+    expiry_days: int,
+) -> dict:
+    """One supplier's onboarding flow state, from its latest
+    governed master change. Live means the change can still
+    land: pending inside its decision window, or approved and
+    not yet applied (its effective date is still ahead — once
+    applied with bank details the supplier resolves off the
+    worklist entirely, so a listed approved change is by
+    construction an unapplied one)."""
+    if change is None:
+        return {"onboarding_state": "open"}
+    if change.status == "pending" and not is_change_expired(
+        change, as_of, expiry_days
+    ):
+        return {
+            "onboarding_state": "in_flight",
+            "in_flight_change_id": change.request_id,
+            "in_flight_proposed_by": change.proposed_by,
+            "in_flight_age_days": change_age_days(change, as_of),
+        }
+    if change.status == "approved" and not change.applied_at:
+        return {
+            "onboarding_state": "in_flight",
+            "in_flight_change_id": change.request_id,
+            "in_flight_proposed_by": change.proposed_by,
+            "in_flight_age_days": change_age_days(change, as_of),
+        }
+    if change.status == "rejected":
+        return {
+            "onboarding_state": "rejected",
+            "rejected_change_id": change.request_id,
+            "rejected_by": change.decided_by or "",
+            "rejected_at": change.decided_at or "",
+            "rejection_note": change.decision_note or "",
+        }
+    # Expired (or a decided change that never applied bank
+    # details the master now shows): open work again.
+    return {"onboarding_state": "open"}
 
 
 def marker_worklist(
     runs: Iterable[PaymentRun],
     *,
     onboarded_suppliers: Iterable[str] = (),
+    changes: Iterable[MasterChangeRequest] = (),
+    as_of: date | None = None,
+    expiry_days: int = 30,
 ) -> MarkerWorklist:
     """Rank suppliers by marked export value, from the runs'
     completion receipts. ``onboarded_suppliers`` names suppliers
     the master now covers with approved bank details (the service
     checks the master with the same has-details rule the export
-    completion uses); they are resolved, not work."""
+    completion uses); they are resolved, not work. ``changes``
+    are the governed master-change requests (store order — the
+    last one per supplier is its latest), joined onto the listed
+    rows as the onboarding flow state; ``as_of`` anchors change
+    ages and the pending-expiry check, against the configured
+    ``expiry_days`` decision window."""
     onboarded = set(onboarded_suppliers)
+    as_of = as_of or date.today()
+    latest_change: dict[str, MasterChangeRequest] = {}
+    for change in changes:
+        if change.supplier_name:
+            latest_change[change.supplier_name] = change
     cells: dict[tuple[str, str], dict] = {}
     resolved_cells: dict[tuple[str, str], dict] = {}
     resolved_suppliers: set[str] = set()
@@ -107,6 +183,11 @@ def marker_worklist(
                 if cell["last_export_date"] is not None
                 else ""
             ),
+            **_flow_state(
+                latest_change.get(supplier),
+                as_of=as_of,
+                expiry_days=expiry_days,
+            ),
         )
         for (supplier, currency), cell in cells.items()
     ]
@@ -132,4 +213,18 @@ def marker_worklist(
         totals_by_currency=totals,
         resolved_supplier_count=len(resolved_suppliers),
         resolved_value_by_currency=resolved_value,
+        in_flight_count=len(
+            {
+                item.supplier_name
+                for item in items
+                if item.onboarding_state == "in_flight"
+            }
+        ),
+        rejected_count=len(
+            {
+                item.supplier_name
+                for item in items
+                if item.onboarding_state == "rejected"
+            }
+        ),
     )
