@@ -860,8 +860,13 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         request: which missing items it supplied (canonical keys),
         when it arrived, and a note. The resolution — answered,
         partially answered with the still-missing items named —
-        is computed in code and lands on the record; nothing is
-        decided, re-run, or sent."""
+        is computed in code and lands on the record. When the
+        reply carries the supplied documents and closes the gap,
+        the case is re-analysed with them merged as a named
+        overlay (the stored invoice is never rewritten) and the
+        new outcome supersedes, with the supersession in the
+        case's re-analysis chain; a keys-only reply, or a decided
+        case's, stays bookkeeping. Nothing is decided or sent."""
         try:
             return svc.record_information_reply(
                 invoice_id,
@@ -869,6 +874,9 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 supplied_items=request.supplied_items,
                 note=request.note,
                 received_at=request.received_at,
+                purchase_order=request.purchase_order,
+                goods_receipt=request.goods_receipt,
+                documents=request.documents,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

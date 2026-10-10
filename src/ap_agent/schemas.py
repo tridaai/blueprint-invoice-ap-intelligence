@@ -429,6 +429,49 @@ class InformationRequest(BaseModel):
     reply_still_missing: list[str] = Field(default_factory=list)
     reply_note: str = ""
     reply_recorded_by: str = ""
+    # The supplied documents themselves, accumulated across this
+    # request's replies (clarify.merge_supplied_facts): the PO,
+    # the GRN, the legible copy. They ride on the request until a
+    # reply closes the gap; then the case is re-analysed with
+    # them merged over the stored invoice as the named overlay,
+    # and they move into the re-analysis chain entry that the
+    # supersession records. The stored invoice is never rewritten.
+    overlay_purchase_order: Optional["PurchaseOrder"] = None
+    overlay_goods_receipt: Optional["GoodsReceipt"] = None
+    overlay_documents: list["DocumentInput"] = Field(default_factory=list)
+
+
+class ReanalysisEntry(BaseModel):
+    """One supersession in a case's analysis chain: the case was
+    re-run because an information reply closed the gap it was
+    blocked on, and the new run's outcome replaced the blocked
+    one.
+
+    The entry is the whole account of the supersession: the
+    outcome it replaced and the outcome that replaced it, the
+    items the completing reply supplied, the overlay the re-run
+    ran on (the supplied documents, named — the full payloads
+    ride below, so original invoice + overlay reconstructs the
+    re-run's input exactly), and the request as the reply closed
+    it. The stored invoice itself is never rewritten by a
+    re-analysis: the overlay rides here, not there, so the
+    original extraction stands untouched and every link of the
+    chain stays auditable."""
+
+    trigger: str = "information_reply"
+    previous_outcome: str = ""
+    new_outcome: str = ""
+    supplied_items: list[str] = Field(default_factory=list)
+    # The overlay components the re-run carried, by canonical
+    # item key (purchase_order | goods_receipt | legible_invoice).
+    overlay: list[str] = Field(default_factory=list)
+    overlay_purchase_order: Optional["PurchaseOrder"] = None
+    overlay_goods_receipt: Optional["GoodsReceipt"] = None
+    overlay_documents: list["DocumentInput"] = Field(default_factory=list)
+    closed_request: Optional["InformationRequest"] = None
+    at: str = ""  # ISO timestamp of the re-analysis
+    by: str = ""  # the operator who recorded the completing reply
+    note: str = ""
 
 
 class AutonomyRecommendation(BaseModel):
@@ -495,6 +538,12 @@ class AgentResult(BaseModel):
     original_validation: Optional[Validation] = None
     information_request: Optional[InformationRequest] = None
     needs_information: bool = False
+    # The supersession chain: each entry is one re-analysis that
+    # replaced this case's earlier outcome (see ReanalysisEntry).
+    # Empty for a case analysed once; the current result is the
+    # chain's head, and its outcome is the last entry's
+    # new_outcome.
+    reanalysis_history: list["ReanalysisEntry"] = Field(default_factory=list)
     autonomy: AutonomyRecommendation = Field(default_factory=AutonomyRecommendation)
     telemetry: Optional[RunTelemetry] = None
     trace: list[TraceStep] = Field(default_factory=list)
@@ -995,11 +1044,22 @@ class InformationReplyRequest(BaseModel):
     which of the missing items it supplied (canonical keys —
     purchase_order | goods_receipt | legible_invoice), when it
     arrived, and a note. The analysis (what it resolved, what is
-    still missing) is computed in code, never asserted here."""
+    still missing) is computed in code, never asserted here.
+
+    The reply may also carry the supplied documents themselves
+    (the PO, the GRN, the legible copy as a replacement
+    document). When a reply carrying documents closes the gap,
+    the case is re-analysed with those documents merged over
+    the stored invoice as a named overlay — the stored invoice
+    is never rewritten — and the new outcome supersedes the
+    blocked one, with the supersession on the record."""
 
     supplied_items: list[str] = Field(default_factory=list)
     note: str = ""
     received_at: str = ""  # ISO date/datetime; "" = now
+    purchase_order: Optional[PurchaseOrder] = None
+    goods_receipt: Optional[GoodsReceipt] = None
+    documents: list[DocumentInput] = Field(default_factory=list)
     actor: Optional[str] = None
     approver: Optional[str] = None
     reviewer: Optional[str] = None

@@ -27,6 +27,16 @@ the reply is recorded against the open request and analysed in code
 (:func:`analyse_information_reply`) — which of the missing items it
 supplied, which are still missing, and whether the gap is closed —
 so the resolution lives on the record, not in someone's inbox.
+
+And when the reply carries the documents themselves and closes the
+gap, the case does not sit at its blocked triage: the service
+re-runs it with the supplied facts merged over the stored invoice
+(:func:`merge_supplied_facts` — the overlay fills gaps and replaces
+the illegible, never rewrites what the case already carries), and
+the new outcome supersedes the blocked one with the supersession
+recorded in the case's re-analysis chain. The stored invoice is
+never rewritten: original + recorded overlay is the re-run's input,
+reconstructible exactly.
 """
 
 from __future__ import annotations
@@ -36,9 +46,12 @@ from datetime import datetime, timezone
 from .guardrails import repair_directive, validate_information_request
 from .model_backends import DraftContext
 from .schemas import (
+    DocumentInput,
+    GoodsReceipt,
     InformationRequest,
     InvoiceInput,
     MatchFacts,
+    PurchaseOrder,
     Validation,
 )
 
@@ -237,6 +250,117 @@ def build_information_request(
         draft_source=draft_source,
         rejected_draft_checks=rejected,
     )
+
+
+def apply_supplied_overlay(
+    invoice: InvoiceInput,
+    *,
+    purchase_order: PurchaseOrder | None = None,
+    goods_receipt: GoodsReceipt | None = None,
+    documents: list[DocumentInput] | None = None,
+) -> InvoiceInput:
+    """Apply an already-validated overlay to a copy of the
+    invoice: the PO / GRN set, each supplied document replacing
+    the stored document with its ``document_id``. No refusals
+    here — validation is :func:`merge_supplied_facts`' job; this
+    is the fold the service uses to layer a request's accumulated
+    overlay (and earlier chain entries' overlays) over the stored
+    invoice before a re-run."""
+    merged = invoice.model_copy(deep=True)
+    if purchase_order is not None:
+        merged.purchase_order = purchase_order.model_copy(deep=True)
+    if goods_receipt is not None:
+        merged.goods_receipt = goods_receipt.model_copy(deep=True)
+    if documents:
+        replacements = {doc.document_id: doc for doc in documents}
+        merged.documents = [
+            replacements.get(doc.document_id, doc).model_copy(deep=True)
+            for doc in merged.documents
+        ]
+    return merged
+
+
+def merge_supplied_facts(
+    invoice: InvoiceInput,
+    *,
+    supplied_keys: list[str],
+    purchase_order: PurchaseOrder | None = None,
+    goods_receipt: GoodsReceipt | None = None,
+    documents: list[DocumentInput] | None = None,
+) -> tuple[InvoiceInput, list[str]]:
+    """Merge a reply's supplied documents over the stored invoice:
+    the overlay a re-analysis runs on.
+
+    The overlay fills gaps and replaces the illegible — it never
+    rewrites what the case already carries. A purchase order or
+    goods receipt rides only where the stored invoice has none
+    (a reply that tries to *replace* one is refused by name:
+    that is a correction to the case, not an answer to the
+    request, and it does not travel this path). A supplied
+    document is the legible copy of a document already on the
+    invoice — it replaces the stored document with the same
+    ``document_id`` (an id the invoice does not carry is refused
+    by name, for the same reason). And every payload must be
+    accounted for: its canonical key must ride in
+    ``supplied_keys`` — a document the reply did not record
+    supplying is not merged on its own say-so.
+
+    Returns ``(merged_invoice, overlay_keys)``: a deep copy of
+    the invoice with the overlay applied, and the canonical keys
+    the overlay carried (in request vocabulary order). The
+    stored invoice is untouched — the caller keeps it as the
+    original and records the overlay beside the re-run.
+    """
+    carried: list[tuple[str, object]] = []
+    if purchase_order is not None:
+        carried.append(("purchase_order", purchase_order))
+    if goods_receipt is not None:
+        carried.append(("goods_receipt", goods_receipt))
+    if documents:
+        carried.append(("legible_invoice", documents))
+    for key, _payload in carried:
+        if key not in supplied_keys:
+            raise ValueError(
+                f"the reply carries {humanize_item(key)} but does not "
+                f"record supplying it — add '{key}' to supplied_items; "
+                "a document is merged only for an item the reply "
+                "accounts for"
+            )
+    if purchase_order is not None and invoice.purchase_order is not None:
+        raise ValueError(
+            "the reply carries a purchase order, but the case "
+            "already has one on file — a reply fills the gap the "
+            "request named; it does not replace the document the "
+            "case was analysed with"
+        )
+    if goods_receipt is not None and invoice.goods_receipt is not None:
+        raise ValueError(
+            "the reply carries a goods receipt, but the case "
+            "already has one on file — a reply fills the gap the "
+            "request named; it does not replace the document the "
+            "case was analysed with"
+        )
+    if documents:
+        held = {doc.document_id for doc in invoice.documents}
+        for doc in documents:
+            if doc.document_id not in held:
+                raise ValueError(
+                    f"the reply carries a legible copy for document "
+                    f"{doc.document_id or '(no id)'}, which the case "
+                    "does not hold — a legible copy replaces the "
+                    "document that could not be read; it is not a new "
+                    "document for the file"
+                )
+    merged = apply_supplied_overlay(
+        invoice,
+        purchase_order=purchase_order,
+        goods_receipt=goods_receipt,
+        documents=documents,
+    )
+    applied = [key for key, _payload in carried]
+    order = {key: i for i, key in enumerate(INFORMATION_ITEM_KEYS)}
+    applied.sort(key=lambda key: order.get(key, len(order)))
+    return merged, applied
 
 
 def analyse_information_reply(

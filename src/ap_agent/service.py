@@ -72,7 +72,9 @@ from .schemas import (
     DigestHistory,
     DigestStoreSweep,
     DigestStoreSweepEntry,
+    DocumentInput,
     EscalationDigest,
+    GoodsReceipt,
     HandoffProfile,
     HandoffProfileEvent,
     MarkerWorklist,
@@ -84,6 +86,7 @@ from .schemas import (
     PaymentRun,
     PostingEscalation,
     PostingReceipt,
+    PurchaseOrder,
     QueueView,
     RecoveryEscalation,
     RecoveryPack,
@@ -952,6 +955,9 @@ class InvoiceService:
         supplied_items: list[str],
         note: str = "",
         received_at: str = "",
+        purchase_order: PurchaseOrder | None = None,
+        goods_receipt: GoodsReceipt | None = None,
+        documents: list[DocumentInput] | None = None,
     ) -> AgentResult:
         """Record a reply to the invoice's open information
         request, and analyse it against the gap.
@@ -966,10 +972,22 @@ class InvoiceService:
         supplied items close against the missing list, the
         resolution (answered / partially answered / still
         awaiting) and the still-missing items are named on the
-        record, and replies accumulate across answers. Recording
-        is bookkeeping: it decides nothing, re-runs nothing, and
-        sends nothing — the approver still works the case at the
-        gate with the gap's state in front of them.
+        record, and replies accumulate across answers.
+
+        The reply may also carry the supplied documents
+        themselves. They accumulate on the request as its
+        overlay (validated by clarify.merge_supplied_facts:
+        a payload must be accounted for by a supplied key, fills
+        only a gap the case actually has, and a legible copy
+        replaces only a document the case holds). When a reply
+        closes the gap AND the accumulated overlay carries
+        documents AND the case is still at the gate, the case is
+        re-analysed — :meth:`_reanalyse_from_reply` — and the
+        new outcome supersedes the blocked one. A keys-only
+        completion stays bookkeeping, as it always was: the
+        assertion is recorded, but there is nothing new to run
+        the match against. A decided case's reply is bookkeeping
+        too — re-analysis never unmakes a human's decision.
 
         Guards: the invoice must be carrying an open request
         (a case that never asked, or whose request is already
@@ -977,8 +995,15 @@ class InvoiceService:
         be the request's vocabulary — an unknown key is refused
         by name; and a reply must carry something (an item or a
         note) — an empty recording is a keystroke, not an answer.
+        An overlay refusal refuses the whole recording: the
+        record is left exactly as it stood.
         """
-        from .clarify import INFORMATION_ITEM_KEYS, analyse_information_reply
+        from .clarify import (
+            INFORMATION_ITEM_KEYS,
+            analyse_information_reply,
+            merge_supplied_facts,
+        )
+        from .schemas import ReanalysisEntry
 
         unknown = [key for key in supplied_items if key not in INFORMATION_ITEM_KEYS]
         if unknown:
@@ -986,7 +1011,12 @@ class InvoiceService:
                 f"Unknown information item(s): {', '.join(unknown)} — "
                 f"a reply supplies one of: {', '.join(INFORMATION_ITEM_KEYS)}"
             )
-        if not supplied_items and not note.strip():
+        carried = (
+            purchase_order is not None
+            or goods_receipt is not None
+            or bool(documents)
+        )
+        if not supplied_items and not note.strip() and not carried:
             raise ValueError(
                 "a reply must record something — the item(s) it "
                 "supplied, or a note saying what arrived"
@@ -1018,15 +1048,135 @@ class InvoiceService:
             received = received_at
         else:
             received = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        result.information_request = analyse_information_reply(
+        updated = analyse_information_reply(
             request,
             list(supplied_items),
             received_at=received,
             note=note.strip(),
             recorded_by=actor,
         )
-        store.save(record)
-        return result
+        if carried:
+            # Validate this reply's documents against the case as
+            # it effectively stands — stored invoice, earlier
+            # chain overlays, this request's accumulated overlay —
+            # then fold them into the request's overlay. A refusal
+            # here refuses the recording whole (nothing saved yet).
+            original = InvoiceInput.model_validate(record.invoice)
+            working = self._overlay_invoice(result, updated, original)
+            _merged, applied = merge_supplied_facts(
+                working,
+                supplied_keys=list(supplied_items),
+                purchase_order=purchase_order,
+                goods_receipt=goods_receipt,
+                documents=list(documents or []),
+            )
+            fold: dict = {}
+            if "purchase_order" in applied:
+                fold["overlay_purchase_order"] = purchase_order
+            if "goods_receipt" in applied:
+                fold["overlay_goods_receipt"] = goods_receipt
+            if "legible_invoice" in applied:
+                by_id = {d.document_id: d for d in updated.overlay_documents}
+                for doc in documents or []:
+                    by_id[doc.document_id] = doc
+                fold["overlay_documents"] = list(by_id.values())
+            if fold:
+                updated = updated.model_copy(update=fold)
+        overlay_ready = bool(
+            updated.overlay_purchase_order
+            or updated.overlay_goods_receipt
+            or updated.overlay_documents
+        )
+        if not (
+            updated.reply_status == "answered"
+            and overlay_ready
+            and result.status == "awaiting_approver"
+        ):
+            result.information_request = updated
+            store.save(record)
+            return result
+        # The gap is closed and the documents are in hand: run
+        # the case again on the overlay. The re-run happens
+        # BEFORE the reply is saved — if the pipeline refuses,
+        # the record still stands as it was and the operator can
+        # retry the recording whole.
+        original = InvoiceInput.model_validate(record.invoice)
+        merged = self._overlay_invoice(result, updated, original)
+        previous_outcome = result.triage.outcome
+        previous_history = list(result.reanalysis_history)
+        arrival_shape = record.arrival_shape
+        cluster_decisions = list(record.cluster_decisions)
+        backend = self.backend or get_backend()
+        if self.retriever is None:
+            self.retriever = get_retriever()
+        new_result = self._analyze_model(merged, backend, self.retriever)
+        overlay_keys: list[str] = []
+        if updated.overlay_purchase_order is not None:
+            overlay_keys.append("purchase_order")
+        if updated.overlay_goods_receipt is not None:
+            overlay_keys.append("goods_receipt")
+        if updated.overlay_documents:
+            overlay_keys.append("legible_invoice")
+        entry = ReanalysisEntry(
+            trigger="information_reply",
+            previous_outcome=previous_outcome,
+            new_outcome=new_result.triage.outcome,
+            supplied_items=list(updated.reply_supplied_items),
+            overlay=overlay_keys,
+            overlay_purchase_order=updated.overlay_purchase_order,
+            overlay_goods_receipt=updated.overlay_goods_receipt,
+            overlay_documents=list(updated.overlay_documents),
+            closed_request=updated,
+            at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            by=actor,
+            note=note.strip(),
+        )
+        new_result.reanalysis_history = [*previous_history, entry]
+        if new_result.information_request is None:
+            # The re-run needs nothing further: the closed loop
+            # stays on the case, so the record reads as one
+            # account — request, replies, resolution, re-run.
+            new_result.information_request = updated
+            new_result.needs_information = True
+        new_record = store.get(invoice_id)
+        if new_record is not None:
+            # The re-run saved its own record (over the merged
+            # input): restore the case's identity — the ORIGINAL
+            # stored invoice, its arrival shape, its cluster
+            # stamps. The overlay lives in the chain entry, not
+            # in the stored invoice.
+            new_record.invoice = record.invoice
+            new_record.arrival_shape = arrival_shape
+            new_record.cluster_decisions = cluster_decisions
+            new_record.result = new_result
+            store.save(new_record)
+        return new_result
+
+    @staticmethod
+    def _overlay_invoice(result, request, original):
+        """The invoice a re-analysis runs on: the stored original
+        with every overlay the case has accumulated applied in
+        order — earlier re-analysis chain entries first (their
+        overlays are part of the case's effective facts now),
+        then the open request's own accumulated overlay. The
+        overlays were each validated when recorded
+        (clarify.merge_supplied_facts); this is the pure fold."""
+        from .clarify import apply_supplied_overlay
+
+        merged = original
+        for entry in result.reanalysis_history:
+            merged = apply_supplied_overlay(
+                merged,
+                purchase_order=entry.overlay_purchase_order,
+                goods_receipt=entry.overlay_goods_receipt,
+                documents=entry.overlay_documents,
+            )
+        return apply_supplied_overlay(
+            merged,
+            purchase_order=request.overlay_purchase_order,
+            goods_receipt=request.overlay_goods_receipt,
+            documents=request.overlay_documents,
+        )
 
     def record_posting_receipt(
         self,

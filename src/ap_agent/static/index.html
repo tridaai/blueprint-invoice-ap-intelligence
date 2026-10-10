@@ -237,7 +237,7 @@ function render(r) {
     <p class="kv"><b>Subject:</b> ${esc(dr.subject || "")}</p>
     <b class="note">SUPPLIER QUERY LETTER</b><pre>${esc(dr.supplier_letter || "")}</pre>
     <b class="note">AP PACKET (internal)</b><pre>${esc(dr.ap_packet || "")}</pre>
-    ${r.needs_information && r.information_request ? `<b class="note">INFORMATION REQUEST (composed, not sent)</b><pre>${esc(r.information_request.message || "")}</pre>${infoReplyHtml(r.information_request)}` : ""}`;
+    ${r.needs_information && r.information_request ? `<b class="note">INFORMATION REQUEST (composed, not sent)</b><pre>${esc(r.information_request.message || "")}</pre>${infoReplyHtml(r.information_request)}` : ""}${reanalysisHtml(r)}`;
   const replyBtn = $("recordreply");
   if (replyBtn) replyBtn.onclick = recordReply;
 
@@ -345,6 +345,11 @@ async function recordReceipt() {
 }
 
 const INFO_ITEM_LABELS = {purchase_order: "Purchase order", goods_receipt: "Goods receipt (GRN)", legible_invoice: "Legible invoice copy"};
+function reanalysisHtml(r) {
+  const chain = r.reanalysis_history || [];
+  if (!chain.length) return "";
+  return `<p class="kv" style="margin-top:10px"><b class="note">RE-ANALYSIS</b><br>${chain.map(e => `Re-analysed ${esc((e.at || "").slice(0, 10))} by ${esc(e.by || "—")}: <b>${esc(e.previous_outcome)}</b> → <b>${esc(e.new_outcome)}</b> — the information reply supplied ${(e.supplied_items || []).map(esc).join("; ") || "—"}, merged as overlay: ${(e.overlay || []).map(k => esc(INFO_ITEM_LABELS[k] || k)).join(", ") || "—"}. The stored invoice was not rewritten; the overlay rides on this record.`).join("<br>")}</p>`;
+}
 function infoReplyHtml(req) {
   const state = req.reply_status === "answered"
     ? `<p class="kv">Reply: <b>answered</b>${req.reply_received_at ? " · received " + esc(req.reply_received_at.slice(0, 10)) : ""} — supplied: ${(req.reply_supplied_items || []).map(esc).join("; ") || "—"}. The information gap is closed on the record.</p>`
