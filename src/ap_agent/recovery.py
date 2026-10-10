@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 from .guardrails import validate_drafts
 from .matching import format_match_summary
-from .schemas import Drafts, InvoiceInput, RecoveryPack
+from .schemas import Drafts, InvoiceInput, RecoveryCaseEvent, RecoveryPack
 from .store import ApprovalRecord
 from .verify import verify_drafts
 
@@ -212,6 +212,7 @@ def build_recovery_pack(
     validation = validate_drafts(
         invoice, drafts, citations, allowed_amounts=facts_view["allowed_amounts"]
     )
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return RecoveryPack(
         pack_id=f"REC-{dup_result.invoice_id}",
         duplicate_invoice_id=dup_result.invoice_id,
@@ -226,5 +227,14 @@ def build_recovery_pack(
         verification=verification,
         validation=validation,
         status="ready" if validation.passed else "blocked",
-        created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        created_at=created,
+        case_status="opened",
+        case_history=[
+            RecoveryCaseEvent(
+                status="opened",
+                actor="agent",
+                at=created,
+                note="recovery pack drafted — the case is a human's from here",
+            )
+        ],
     )

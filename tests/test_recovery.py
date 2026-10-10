@@ -60,6 +60,90 @@ def test_recovery_drafts_pass_the_standard_guardrails(service):
     assert "[AP-DUP-01]" in letter + memo
 
 
+# --- the case lifecycle: opened → supplier_contacted → credit_received → closed ---
+
+def test_case_opens_with_the_pack(service):
+    pack = service.draft_duplicate_recovery("INV-1013")
+    assert pack.case_status == "opened"
+    assert len(pack.case_history) == 1
+    opened = pack.case_history[0]
+    assert opened.status == "opened" and opened.at == pack.created_at
+
+
+def test_case_walks_the_lifecycle_with_an_audit_trail(service):
+    service.draft_duplicate_recovery("INV-1013")
+    pack = service.transition_recovery_case(
+        "INV-1013", to_status="supplier_contacted",
+        actor="Priya Nair", note="letter sent via supplier portal",
+    )
+    assert pack.case_status == "supplier_contacted"
+    pack = service.transition_recovery_case(
+        "INV-1013", to_status="credit_received", actor="Priya Nair"
+    )
+    pack = service.transition_recovery_case(
+        "INV-1013", to_status="closed", actor="Tomas Reid", note="credit CN-88 on file"
+    )
+    assert pack.case_status == "closed"
+    history = service.get_recovery_pack("INV-1013").case_history
+    assert [h.status for h in history] == [
+        "opened", "supplier_contacted", "credit_received", "closed",
+    ]
+    assert history[1].actor == "Priya Nair"
+    assert "supplier portal" in history[1].note
+    assert history[3].actor == "Tomas Reid"
+
+
+def test_case_cannot_skip_or_go_backwards(service):
+    service.draft_duplicate_recovery("INV-1013")
+    with pytest.raises(ValueError, match="next step is supplier_contacted"):
+        service.transition_recovery_case(
+            "INV-1013", to_status="credit_received", actor="Priya Nair"
+        )
+    with pytest.raises(ValueError, match="Unknown case status"):
+        service.transition_recovery_case(
+            "INV-1013", to_status="refunded", actor="Priya Nair"
+        )
+    for step in ("supplier_contacted", "credit_received", "closed"):
+        service.transition_recovery_case("INV-1013", to_status=step, actor="P")
+    with pytest.raises(ValueError, match=r"none \(the case is closed\)"):
+        service.transition_recovery_case(
+            "INV-1013", to_status="closed", actor="Priya Nair"
+        )
+
+
+def test_case_transition_requires_a_pack(service):
+    with pytest.raises(KeyError):
+        service.transition_recovery_case(
+            "INV-1001", to_status="supplier_contacted", actor="Priya Nair"
+        )
+
+
+def test_case_transition_endpoints(service):
+    client = TestClient(create_app(service))
+    client.post("/invoices/INV-1013/recovery-pack")
+    moved = client.post(
+        "/invoices/INV-1013/recovery-case/transition",
+        json={"actor": "Priya Nair", "to_status": "supplier_contacted"},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["case_status"] == "supplier_contacted"
+    skip = client.post(
+        "/invoices/INV-1013/recovery-case/transition",
+        json={"actor": "Priya Nair", "to_status": "closed"},
+    )
+    assert skip.status_code == 422
+    unknown = client.post(
+        "/invoices/INV-9999/recovery-case/transition",
+        json={"actor": "Priya Nair", "to_status": "supplier_contacted"},
+    )
+    assert unknown.status_code == 404
+    no_actor = client.post(
+        "/invoices/INV-1013/recovery-case/transition",
+        json={"to_status": "credit_received"},
+    )
+    assert no_actor.status_code == 422
+
+
 def test_recovery_is_idempotent_and_changes_no_invoice_state(service):
     first = service.draft_duplicate_recovery("INV-1013")
     second = service.draft_duplicate_recovery("INV-1013")

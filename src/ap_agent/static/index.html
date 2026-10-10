@@ -66,6 +66,7 @@
     <section id="sec-drafts"></section>
     <section id="sec-checks"></section>
     <section id="sec-gate"></section>
+    <section id="sec-recovery" class="hidden"></section>
   </div>
   <section id="sec-queue">
     <h2>AP aging queue (awaiting approver)</h2>
@@ -191,7 +192,50 @@ function render(r) {
     <p class="note">Approving records the decision only — it never pays the invoice. Drafts that fail guardrails cannot be approved (the API returns 422).</p>`;
   $("approve").onclick = () => decide("approve");
   $("reject").onclick = () => decide("reject");
+  renderRecovery(r);
   $("out").classList.remove("hidden");
+}
+
+const CASE_FLOW = ["opened", "supplier_contacted", "credit_received", "closed"];
+function renderRecovery(r) {
+  const sec = $("sec-recovery");
+  if (!r.facts || !r.facts.duplicate_suspected) { sec.classList.add("hidden"); sec.innerHTML = ""; return; }
+  sec.classList.remove("hidden");
+  sec.innerHTML = `<h2>Duplicate-payment recovery case</h2>
+    <p class="kv">This invoice duplicates <b>${esc(r.facts.duplicate_of || "—")}</b>. If the original was already approved, the recovery pack drafts the supplier letter + internal memo (verified, guardrail-checked) and opens a case an operator walks: opened → supplier contacted → credit received → closed.</p>
+    <div class="gate"><button id="draftpack" class="secondary">Draft / load recovery pack</button><span class="note" id="recnote"></span></div>
+    <div id="recbody"></div>`;
+  $("draftpack").onclick = loadPack;
+}
+async function loadPack() {
+  let res = await fetch(`/invoices/${currentId}/recovery-pack`, {headers: headers()});
+  if (res.status === 404) {
+    res = await fetch(`/invoices/${currentId}/recovery-pack`, {method: "POST", headers: headers()});
+  }
+  const pack = await res.json();
+  if (!res.ok) { $("recnote").textContent = `Pack refused (${res.status}): ${pack.detail || ""}`; return; }
+  renderPack(pack);
+}
+function renderPack(pack) {
+  const next = CASE_FLOW[CASE_FLOW.indexOf(pack.case_status) + 1];
+  $("recnote").textContent = `${pack.pack_id} · ${esc(pack.exposure_status)} · case ${pack.case_status}`;
+  $("recbody").innerHTML = `
+    <p class="kv" style="margin-top:10px">Amount <b>${esc(pack.currency)} ${pack.amount}</b> · duplicate of ${esc(pack.original_invoice_id)} · pack ${pill(pack.status, pack.status === "ready" ? "ok" : "bad")}</p>
+    <ul>${(pack.evidence || []).map(e => `<li>${esc(e)}</li>`).join("")}</ul>
+    <b class="note">SUPPLIER RECOVERY LETTER (draft — a human sends it)</b><pre>${esc((pack.drafts || {}).supplier_letter || "")}</pre>
+    <p class="kv"><b>Case history</b></p>
+    <ul>${(pack.case_history || []).map(h => `<li><b>${esc(h.status)}</b> — ${esc(h.actor)} · ${esc(h.at)}${h.note ? " · " + esc(h.note) : ""}</li>`).join("")}</ul>
+    ${next ? `<div class="gate"><input type="text" id="recactor" placeholder="Your name (operator)" size="20"><input type="text" id="recnote2" placeholder="Note (optional)" size="30"><button id="recnext">Record: ${esc(next.replaceAll("_", " "))}</button></div>` : `<p class="kv">Case closed.</p>`}`;
+  const btn = $("recnext");
+  if (btn) btn.onclick = () => transitionCase(next);
+}
+async function transitionCase(toStatus) {
+  const actor = $("recactor").value.trim();
+  if (!actor) { $("recnote").textContent = "Enter your name first — case transitions are attributable."; return; }
+  const res = await fetch(`/invoices/${currentId}/recovery-case/transition`, {method: "POST", headers: headers(), body: JSON.stringify({actor, to_status: toStatus, note: $("recnote2").value.trim()})});
+  const body = await res.json();
+  if (!res.ok) { $("recnote").textContent = `Transition refused (${res.status}): ${body.detail || ""}`; return; }
+  renderPack(body);
 }
 
 async function decide(kind) {

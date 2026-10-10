@@ -712,6 +712,24 @@ class QueueView(BaseModel):
 # Duplicate-payment recovery packs
 # ---------------------------------------------------------------------------
 
+class RecoveryCaseEvent(BaseModel):
+    """One operator transition on a recovery case: the audit entry.
+    The lifecycle is worked by humans (the agent contacts nobody and
+    books no credit); each transition records who moved the case,
+    when, and an optional note."""
+
+    status: str  # the case status this transition moved TO
+    actor: str = ""
+    at: str = ""  # ISO timestamp
+    note: str = ""
+
+
+# The recovery-case lifecycle, in order. A case opens when its pack
+# is drafted; an operator walks it forward one step at a time as the
+# supplier is contacted and the credit lands.
+RECOVERY_CASE_FLOW = ["opened", "supplier_contacted", "credit_received", "closed"]
+
+
 class RecoveryPack(BaseModel):
     """The recovery case for a duplicate whose original was already
     approved: the duplicate evidence (computed), a supplier recovery
@@ -733,6 +751,24 @@ class RecoveryPack(BaseModel):
     validation: Optional[Validation] = None
     status: str = "ready"  # ready | blocked (guardrails failed)
     created_at: str = ""
+    # The case lifecycle: opened on drafting, then walked forward by
+    # operators — supplier_contacted → credit_received → closed.
+    # ``case_history`` is the audit trail of those transitions.
+    case_status: str = "opened"
+    case_history: list[RecoveryCaseEvent] = Field(default_factory=list)
+
+
+class RecoveryTransitionRequest(BaseModel):
+    """An operator transition on a recovery case."""
+
+    to_status: str
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
 
 
 # ---------------------------------------------------------------------------

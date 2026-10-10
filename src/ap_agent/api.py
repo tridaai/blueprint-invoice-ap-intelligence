@@ -48,6 +48,7 @@ from .schemas import (
     PaymentRunRequest,
     QueueView,
     RecoveryPack,
+    RecoveryTransitionRequest,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -451,6 +452,24 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         if pack is None:
             raise HTTPException(status_code=404, detail="No recovery pack drafted for this invoice.")
         return pack
+
+    @app.post("/invoices/{invoice_id}/recovery-case/transition", response_model=RecoveryPack, dependencies=_AUTH)
+    def transition_recovery_case(invoice_id: str, request: RecoveryTransitionRequest) -> RecoveryPack:
+        """Walk the recovery case one step forward (opened →
+        supplier_contacted → credit_received → closed). The operator
+        records work done outside the system; the transition joins
+        the case's audit history on the pack record."""
+        try:
+            return svc.transition_recovery_case(
+                invoice_id,
+                to_status=request.to_status,
+                actor=_decision_actor(request),
+                note=request.note or "",
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/invoices/{invoice_id}/approve", response_model=AgentResult, dependencies=_AUTH)
     def approve(invoice_id: str, request: DecisionRequest) -> AgentResult:

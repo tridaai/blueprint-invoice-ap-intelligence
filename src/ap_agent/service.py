@@ -788,6 +788,65 @@ class InvoiceService:
     def get_recovery_pack(self, invoice_id: str) -> RecoveryPack | None:
         return self._get_store().get_recovery_pack(invoice_id)
 
+    def transition_recovery_case(
+        self, invoice_id: str, to_status: str, actor: str, note: str = ""
+    ) -> RecoveryPack:
+        """Walk a recovery case one step forward in its lifecycle
+        (opened → supplier_contacted → credit_received → closed).
+
+        Operator bookkeeping on the pack record only: the transition
+        and its actor/note are appended to the case's audit history.
+        The agent still recovers nothing itself — the operator is
+        recording work they did outside the system (sent the letter,
+        received the credit). A blocked pack (guardrails failed) has
+        no workable case: its letter may not be sent, so it cannot
+        be walked.
+        """
+        from .schemas import RECOVERY_CASE_FLOW, RecoveryCaseEvent
+
+        store = self._get_store()
+        pack = store.get_recovery_pack(invoice_id)
+        if pack is None:
+            raise KeyError(
+                f"No recovery pack for invoice {invoice_id} "
+                "(draft it first)"
+            )
+        if pack.status != "ready":
+            raise ValueError(
+                f"Recovery case for {invoice_id} is blocked — the "
+                "pack's drafts failed the guardrails, so there is no "
+                "letter to work until the pack is redrafted clean"
+            )
+        current = pack.case_status
+        if to_status not in RECOVERY_CASE_FLOW:
+            raise ValueError(
+                f"Unknown case status: {to_status!r} — the lifecycle is "
+                + " → ".join(RECOVERY_CASE_FLOW)
+            )
+        expected = (
+            RECOVERY_CASE_FLOW[RECOVERY_CASE_FLOW.index(current) + 1]
+            if current in RECOVERY_CASE_FLOW
+            and RECOVERY_CASE_FLOW.index(current) + 1 < len(RECOVERY_CASE_FLOW)
+            else None
+        )
+        if to_status != expected:
+            raise ValueError(
+                f"Recovery case for {invoice_id} is {current} — the "
+                f"next step is {expected or 'none (the case is closed)'}, "
+                f"not {to_status}"
+            )
+        pack.case_status = to_status
+        pack.case_history.append(
+            RecoveryCaseEvent(
+                status=to_status,
+                actor=actor,
+                at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                note=note,
+            )
+        )
+        store.save_recovery_pack(pack)
+        return pack
+
     def queue_view(self, as_of: str = "") -> QueueView:
         """The AP aging queue: invoices still at the gate, aged by
         due date, overdue first, with the triage mix. A pure read
