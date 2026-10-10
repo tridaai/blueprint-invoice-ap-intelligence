@@ -40,6 +40,7 @@ to their deterministic paths once cumulative usage crosses the budget
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional, TypedDict
 
@@ -56,7 +57,7 @@ from .discounts import evaluate_discount, format_discount_line
 from .errors import ProviderError
 from .events import NullSink, RunEvent
 from .extractor import extract_documents, extraction_discrepancies
-from .guardrails import validate_drafts
+from .guardrails import repair_directive, validate_drafts
 from .matching import compute_match, format_match_summary
 from .model_backends import DraftContext, estimate_cost_usd
 from .ocr import get_ocr_engine, run_ocr
@@ -381,9 +382,51 @@ def _draft_context(
 
 
 def _failed_checks_text(validation: Validation) -> str:
-    return "\n".join(
-        f"- {check.name}: {check.detail}" for check in validation.checks if not check.passed
-    )
+    """The repair prompt's account of a failed draft: WHICH
+    guardrail checks failed, what each one found, and the fix each
+    one requires — the redraft is told the failed checks by name
+    and the required element for each, not left to infer the fix
+    from the failure wording."""
+    lines = []
+    for check in validation.checks:
+        if check.passed:
+            continue
+        line = f"- {check.name}: {check.detail}"
+        directive = repair_directive(check.name)
+        if directive:
+            line += f" — fix: {directive}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+_CITATION_IN_TEXT = re.compile(r"\[(AP-[A-Z]+-\d+)\]")
+
+
+def _carry_policy_citations(packet: str, citations: list[str]) -> str:
+    """Carry the diagnosis's policies into the AP packet —
+    deterministically, from the retrieved set the diagnosis rests
+    on, never from the drafting model's memory.
+
+    The diagnosis cites the retrieved policies; the packet is the
+    document the approver reads, so a packet that drops them is
+    incomplete however good its prose is — on the 2026-10-10 live
+    Nemotron run the model's packet carried NONE of them and the
+    independent reviewer blocked the draft. Composition, not
+    prompting, closes that hole: any retrieved policy the packet
+    does not already cite is appended on a ``Policy citations:``
+    line at draft time (and on repair candidates), in retrieval
+    order. A packet that already carries them — the offline
+    template's, by construction — is returned byte-identical, and
+    only retrieved policies are ever added, so the composition
+    cannot trip ``citations_within_retrieved``.
+    """
+    present = set(_CITATION_IN_TEXT.findall(packet or ""))
+    missing = [c for c in citations if c not in present]
+    if not missing:
+        return packet
+    line = "Policy citations: " + " ".join(f"[{c}]" for c in missing)
+    body = (packet or "").rstrip()
+    return f"{body}\n{line}" if body else line
 
 
 def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, vision_engine=None, object_store=None, supplier_master=None):
@@ -634,6 +677,12 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
     def _draft(state: AgentState) -> dict[str, Any]:
         sub = InvoiceInput.model_validate(state["invoice"])
         subject, letter, packet = backend.draft_documents(_draft_context(state, sub))
+        # Composition, not memory: the packet carries the policies
+        # the diagnosis rests on (the retrieved set) whether or not
+        # the drafter remembered to cite them.
+        packet = _carry_policy_citations(
+            packet, [g["policy_id"] for g in state.get("policies", [])]
+        )
         return {
             "drafts": Drafts(
                 subject=subject, supplier_letter=letter, ap_packet=packet
@@ -703,7 +752,11 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
                 )
             except Exception:
                 break  # a failed redraft keeps the original drafts + failures
-            candidate = Drafts(subject=subject, supplier_letter=letter, ap_packet=packet)
+            candidate = Drafts(
+                subject=subject,
+                supplier_letter=letter,
+                ap_packet=_carry_policy_citations(packet, citations),
+            )
             candidate_validation = validate_drafts(
                 sub, candidate, citations, allowed_amounts=allowed
             )

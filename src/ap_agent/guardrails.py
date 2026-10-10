@@ -165,6 +165,60 @@ def _find_card(text: str) -> str | None:
     return None
 
 
+# What a repair redraft must DO about each failed check, in the
+# drafter's own terms. The repair prompt names the failed checks
+# (``graph._failed_checks_text``) and appends the directive for
+# each — a bare "the drafts never state the next step" left a live
+# Nemotron redraft describing the next step in fresh prose and
+# failing the same check a second time; the directive names the
+# required element itself, so the fix is mechanical, not a guess.
+CHECK_REPAIR_DIRECTIVES = {
+    "references_invoice_id": (
+        "name the invoice id in the subject, the letter, or the "
+        "packet — the drafts must say which case they belong to"
+    ),
+    "no_payment_language": (
+        "remove every statement that a payment was made or will be "
+        "made, and any bank-detail content — bank changes are "
+        "verified out-of-band, never echoed in a draft"
+    ),
+    "no_prohibited_promises": (
+        "remove every promised outcome or timing — describe the "
+        "process, never commit to a result or a date"
+    ),
+    "no_pii_in_draft": (
+        "remove the personal identifier — drafts never carry SSN, "
+        "card, or passport numbers"
+    ),
+    "policy_citations_present": (
+        "cite the governing policies in the packet, in [AP-...] "
+        "form, from the retrieved set in the facts"
+    ),
+    "citations_within_retrieved": (
+        "cite only policies from the retrieved set in the facts — "
+        "remove every citation that was not retrieved for this case"
+    ),
+    "figures_must_trace": (
+        "take the amounts out of the letter body — figures live in "
+        "the packet's tables; the letter refers to them, it does "
+        "not restate arithmetic in prose"
+    ),
+    "states_next_step": (
+        'add a line beginning "Next step:" to the supplier letter, '
+        "saying what happens now and what (if anything) AP still "
+        "needs — describing the next step in other words does not "
+        "satisfy the check"
+    ),
+}
+
+
+def repair_directive(check_name: str) -> str:
+    """The fix a repair redraft is told to make for one failed
+    check ("" when the check has no directive — the check's own
+    detail then carries the instruction)."""
+    return CHECK_REPAIR_DIRECTIVES.get(check_name, "")
+
+
 def validate_drafts(
     invoice: InvoiceInput,
     drafts: Drafts,

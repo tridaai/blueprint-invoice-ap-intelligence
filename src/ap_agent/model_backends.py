@@ -414,12 +414,14 @@ class _BaseLLMBackend:
         feedback = context.get("repair_feedback")
         if feedback:
             # Bounded-repair redraft: the previous attempt failed
-            # validation — hand the model exactly what to fix.
+            # named guardrail checks — hand the model exactly which
+            # checks failed and the fix each one requires.
             prompt += (
                 "\n\nCORRECTION REQUIRED — a previous draft of these "
-                "documents failed validation. Rewrite both documents, "
-                "fixing every problem below, and introduce no claim the "
-                f"facts above do not support:\n{feedback}"
+                "documents failed the guardrail checks listed below. "
+                "Rewrite both documents, fixing every failed check "
+                "exactly as its fix line directs, and introduce no "
+                f"claim the facts above do not support:\n{feedback}"
             )
         return prompt
 
