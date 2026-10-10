@@ -49,7 +49,7 @@ a trend, not a sequence of unrelated mornings.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Iterable
 
 from .matching import _parse_date
@@ -87,6 +87,65 @@ def headline_counts(digest: EscalationDigest) -> dict[str, int]:
         "four_eyes_pending_count": digest.four_eyes_pending_count,
         "forecast_lapse_count": len(digest.forecast_lapses),
         "drift_run_count": len(digest.drift_today),
+    }
+
+
+def digest_store_coverage(
+    digests: Iterable[EscalationDigest],
+    *,
+    as_of: date,
+    lookback_days: int,
+) -> dict:
+    """The stored digests' completeness, audited: how many days
+    are stored, who stored them (a human's morning ritual vs the
+    auto-store sweep's ``system`` backfill vs an unattributed
+    legacy copy), the stored range's bounds, and the holes
+    inside it.
+
+    A gap inside the stored range is a morning nobody can
+    re-derive — the records have moved on. Some gaps are still
+    healable: the sweep anchored today reaches back
+    ``lookback_days``, so a gap on or after ``sweep_reach_start``
+    can still be pinned by running it. A gap *before* that date
+    predates the lookback and can never backfill now — the
+    coverage says which days those are, so an auditor reading
+    the trend knows exactly which days are missing and why,
+    instead of mistaking a hole for a quiet day. Pure over the
+    digests given."""
+    digests = list(digests)
+    by_attribution = {"human": 0, "system": 0, "unattributed": 0}
+    for digest in digests:
+        if digest.stored_by == "system":
+            by_attribution["system"] += 1
+        elif digest.stored_by:
+            by_attribution["human"] += 1
+        else:
+            by_attribution["unattributed"] += 1
+    stored_dates = sorted({d.as_of for d in digests if d.as_of})
+    gap_dates: list[str] = []
+    if len(stored_dates) >= 2:
+        first = _parse_date(stored_dates[0])
+        last = _parse_date(stored_dates[-1])
+        if first is not None and last is not None:
+            have = set(stored_dates)
+            day = first + timedelta(days=1)
+            while day < last:
+                if day.isoformat() not in have:
+                    gap_dates.append(day.isoformat())
+                day += timedelta(days=1)
+    reach_start = (as_of - timedelta(days=max(1, lookback_days) - 1)).isoformat()
+    unrecoverable = [g for g in gap_dates if g < reach_start]
+    return {
+        "stored_days": len(stored_dates),
+        "by_attribution": by_attribution,
+        "oldest_stored_date": stored_dates[0] if stored_dates else "",
+        "latest_stored_date": stored_dates[-1] if stored_dates else "",
+        "gap_dates": gap_dates,
+        "gap_count": len(gap_dates),
+        "unrecoverable_gap_dates": unrecoverable,
+        "unrecoverable_gap_count": len(unrecoverable),
+        "sweep_reach_start": reach_start,
+        "lookback_days": lookback_days,
     }
 
 

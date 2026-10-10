@@ -1018,6 +1018,7 @@ class InvoiceService:
                 output_tokens += telemetry.output_tokens or 0
             if telemetry.estimated_cost_usd is not None:
                 costs.append(telemetry.estimated_cost_usd)
+        from .digest import digest_store_coverage
         from .posting import approved_not_posted
         from .supplier_master import master_coverage
 
@@ -1112,6 +1113,15 @@ class InvoiceService:
                 self._get_store().list_payment_runs(),
                 four_eyes_wait_budgets(),
                 month=datetime.now(timezone.utc).strftime("%Y-%m"),
+            ),
+            # The stored digests' completeness: stored days by
+            # attribution, the stored range, and the gaps inside
+            # it — split into gaps the sweep can still backfill
+            # and gaps that predate its lookback and never will.
+            "digest_store": digest_store_coverage(
+                self._get_store().list_digests(),
+                as_of=datetime.now(timezone.utc).date(),
+                lookback_days=digest_store_lookback_days(),
             ),
         }
 
