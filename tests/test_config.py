@@ -46,8 +46,8 @@ def test_samples_are_valid_and_complete():
     from ap_agent.samples import load_sample_invoices, sample_invoice_models
 
     raw = load_sample_invoices()
-    assert len(raw) == 13
+    assert len(raw) == 14
     models = sample_invoice_models()  # every sample validates against the schema
     ids = [m.invoice_id for m in models]
-    assert len(set(ids)) == 13
+    assert len(set(ids)) == 14
     assert "INV-1010" in ids and "INV-1011" in ids  # the adversarial pair

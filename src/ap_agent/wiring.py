@@ -18,6 +18,7 @@ from .retriever import get_retriever
 from .service import InvoiceService
 from .storage import get_object_store
 from .store import default_store
+from .supplier_master import get_supplier_master
 from .vision import get_vision_engine
 
 
@@ -49,6 +50,10 @@ def build_object_store():
     return get_object_store()
 
 
+def build_supplier_master():
+    return get_supplier_master()
+
+
 def build_service_from_env(
     *,
     backend: ModelBackend | None = None,
@@ -58,6 +63,7 @@ def build_service_from_env(
     ocr_engine: OcrEngine | None = None,
     vision_engine: DocVision | None = None,
     object_store=None,
+    supplier_master=None,
 ) -> InvoiceService:
     """A service wired from the environment, with any collaborator
     overridable (tests and the CLI batch path inject doubles here).
@@ -74,4 +80,5 @@ def build_service_from_env(
         ocr_engine=ocr_engine or build_ocr_engine(),
         vision_engine=vision_engine or build_vision_engine(),
         object_store=build_object_store() if object_store is None else (object_store or None),
+        supplier_master=supplier_master,
     )

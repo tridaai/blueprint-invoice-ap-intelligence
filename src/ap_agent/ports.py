@@ -23,6 +23,12 @@ having the methods, not by inheriting):
 - :class:`ObjectStore` — document blobs (scans, attachments) in
   S3-compatible object storage. Documents reference object keys,
   never local paths. Implementations live in ``storage.py``.
+- :class:`SupplierMaster` — supplier master data: the approved bank
+  details + terms AP verified out-of-band. The bank-change fraud
+  screen checks document-stated details against this record — a
+  mismatch is the fraud signal, a match is evidence. Implementations
+  live in ``supplier_master.py`` (PostgreSQL in production, an
+  in-memory double for tests/offline).
 - :class:`EventSink` — where structured run events go (streaming,
   tracing). Implementations live in ``events.py``.
 - :class:`Checkpointer` — LangGraph graph-state persistence behind
@@ -57,7 +63,7 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
         VisionResult,
     )
     from .schemas import BundleResult, PaymentRun, RecoveryPack
-    from .schemas import StatementReconciliation
+    from .schemas import StatementReconciliation, SupplierMasterRecord
     from .store import ApprovalRecord
 
 
@@ -131,6 +137,18 @@ class Store(Protocol):
     def prior_invoices(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
 
     def decision_feedback(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
+
+
+class SupplierMaster(Protocol):
+    """The supplier master-data seam: the out-of-band source of truth
+    for a supplier's approved bank details and terms (AP-BANK-01).
+    Documents state details; this port says what is on file."""
+
+    name: str
+
+    def get_supplier(self, supplier_name: str) -> "SupplierMasterRecord | None": ...
+
+    def upsert_supplier(self, record: "SupplierMasterRecord") -> None: ...
 
 
 class ObjectStore(Protocol):

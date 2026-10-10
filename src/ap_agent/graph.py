@@ -66,6 +66,7 @@ from .retriever import get_retriever
 from .reviewer import review_drafts
 from .schemas import (
     AgentResult,
+    BankMasterCheck,
     CrossCheck,
     Diagnosis,
     DiscountEvaluation,
@@ -84,6 +85,7 @@ from .schemas import (
     VisionResult,
 )
 from .screening import fraud_flag_label, sanitized_notes, screen_fraud, screen_invoice
+from .supplier_master import compare_bank_details, mismatch_flag
 from .tools_agent import DiagnosisToolBox
 from .triage import classify_invoice
 from .verify import verify_drafts
@@ -195,6 +197,7 @@ class AgentState(TypedDict, total=False):
     injection_flags: list[str]
     fraud_flags: list[str]
     bank_change_blocked: bool
+    bank_master_check: Optional[dict[str, Any]]
     extractions: list[dict[str, Any]]
     facts: dict[str, Any]
     triage: dict[str, Any]
@@ -383,7 +386,7 @@ def _failed_checks_text(validation: Validation) -> str:
     )
 
 
-def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, vision_engine=None, object_store=None):
+def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, vision_engine=None, object_store=None, supplier_master=None):
     """Compile the pipeline graph around one run's collaborators."""
     ocr_engine = ocr_engine or get_ocr_engine()
     vision_engine = vision_engine or get_vision_engine()
@@ -451,11 +454,31 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
     def _screen(state: AgentState) -> dict[str, Any]:
         sub = InvoiceInput.model_validate(state["invoice"])
         fraud = screen_fraud(sub)
-        return {
+        update: dict[str, Any] = {
             "injection_flags": screen_invoice(sub),
             "fraud_flags": fraud,
             "bank_change_blocked": bool(fraud),
         }
+        if supplier_master is not None:
+            # The master-data check (AP-BANK-01's out-of-band record):
+            # document-stated bank details vs the approved master.
+            # A mismatch is the fraud signal; a match downgrades a
+            # pattern hit whose details are the ones already on file.
+            record = supplier_master.get_supplier(sub.supplier_name)
+            check = compare_bank_details(
+                sub,
+                record,
+                source=getattr(supplier_master, "name", "") or "",
+            )
+            update["bank_master_check"] = check.model_dump()
+            if check.status == "checked_mismatch":
+                fraud = [*fraud, mismatch_flag(check)]
+                update["fraud_flags"] = fraud
+                update["bank_change_blocked"] = True
+            elif check.status == "checked_match" and fraud:
+                update["fraud_flags"] = []
+                update["bank_change_blocked"] = False
+        return update
 
     @node("extract", "Field extraction + cross-check")
     def _extract(state: AgentState) -> dict[str, Any]:
@@ -856,6 +879,14 @@ def _build_trace(state: AgentState) -> list[TraceStep]:
     ] if vision else ["vision check not run"]
     screen_details = list(state.get("injection_flags") or [])
     screen_details += [f"FRAUD: {f}" for f in state.get("fraud_flags") or []]
+    master_check = state.get("bank_master_check") or {}
+    if master_check.get("status"):
+        master_line = f"supplier master check: {master_check['status']}"
+        if master_check.get("matched"):
+            master_line += f" — on file: {', '.join(master_check['matched'])}"
+        if master_check.get("mismatched"):
+            master_line += f" — NOT on file: {', '.join(master_check['mismatched'])}"
+        screen_details.append(master_line)
     if not screen_details:
         screen_details = ["no injection or fraud patterns found in supplier text"]
     if state.get("bank_change_blocked"):
@@ -1053,6 +1084,7 @@ def run_invoice(
     ocr_engine=None,
     vision_engine=None,
     object_store=None,
+    supplier_master=None,
     duplicate_of: str = "",
 ) -> AgentResult:
     """Run one invoice through the pipeline to the approver gate.
@@ -1083,6 +1115,7 @@ def run_invoice(
         ocr_engine=ocr_engine,
         vision_engine=vision_engine,
         object_store=object_store,
+        supplier_master=supplier_master,
     )
     initial: AgentState = {
         "invoice": invoice.model_dump(),
@@ -1139,6 +1172,11 @@ def run_invoice(
         injection_flags=state.get("injection_flags", []),
         fraud_flags=state.get("fraud_flags", []),
         bank_change_blocked=bool(state.get("bank_change_blocked")),
+        bank_master_check=(
+            BankMasterCheck.model_validate(state["bank_master_check"])
+            if state.get("bank_master_check")
+            else None
+        ),
         triage=Triage.model_validate(state["triage"]),
         cross_check=(
             CrossCheck.model_validate(state["cross_check"])

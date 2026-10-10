@@ -180,7 +180,12 @@ class InvoiceService:
     ocr_engine: OcrEngine | None = None
     vision_engine: DocVision | None = None
     object_store: object | None = None
+    # The supplier master-data port (bank details on file): the fraud
+    # screen checks document-stated details against it. None = resolve
+    # from the environment on first use.
+    supplier_master: object | None = None
     _resolved_store: Store | None = field(default=None, repr=False)
+    _resolved_supplier_master: object | None = field(default=None, repr=False)
     _resolved_checkpointer: Checkpointer | None = field(default=None, repr=False)
     _checkpointer_resolved: bool = field(default=False, repr=False)
 
@@ -188,6 +193,16 @@ class InvoiceService:
         if self._resolved_store is None:
             self._resolved_store = self.store or default_store()
         return self._resolved_store
+
+    def _get_supplier_master(self):
+        if self._resolved_supplier_master is None:
+            if self.supplier_master is not None:
+                self._resolved_supplier_master = self.supplier_master
+            else:
+                from .supplier_master import get_supplier_master
+
+                self._resolved_supplier_master = get_supplier_master()
+        return self._resolved_supplier_master
 
     def _get_checkpointer(self) -> Checkpointer | None:
         if not self._checkpointer_resolved:
@@ -272,6 +287,7 @@ class InvoiceService:
             ocr_engine=self.ocr_engine or get_ocr_engine(),
             vision_engine=self.vision_engine or get_vision_engine(),
             object_store=self.object_store,
+            supplier_master=self._get_supplier_master(),
             duplicate_of=duplicate_of,
         )
         self._get_store().save(

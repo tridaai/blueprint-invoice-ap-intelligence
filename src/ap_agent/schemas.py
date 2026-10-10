@@ -439,6 +439,7 @@ class AgentResult(BaseModel):
     injection_flags: list[str] = Field(default_factory=list)
     fraud_flags: list[str] = Field(default_factory=list)
     bank_change_blocked: bool = False
+    bank_master_check: Optional[BankMasterCheck] = None
     triage: Triage = Field(default_factory=Triage)
     cross_check: Optional[CrossCheck] = None
     policies: list[RetrievedPolicy] = Field(default_factory=list)
@@ -574,6 +575,42 @@ class StatementReconciliation(BaseModel):
     summary_source: str = "template"  # the deterministic composer; never an LLM figure
     confirmed_by: Optional[str] = None
     confirmed_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Supplier master data (the out-of-band record AP-BANK-01 checks against)
+# ---------------------------------------------------------------------------
+
+class SupplierMasterRecord(BaseModel):
+    """One supplier's approved master record: the bank details AP
+    verified out-of-band, plus terms and tax id. This is the record
+    document-stated bank details are checked AGAINST — a document
+    that states details matching it is evidence; one that states
+    different details is the fraud signal. Master data is internal:
+    it never appears in drafts (the guardrails forbid bank content
+    there), and comparisons report masked labels only."""
+
+    supplier_name: str
+    bank_name: str = ""
+    account_number: str = ""  # full identifier — internal master data
+    iban: str = ""
+    sort_code: str = ""
+    payment_terms: str = ""  # e.g. "2/10 net 30"
+    tax_id: str = ""
+
+
+class BankMasterCheck(BaseModel):
+    """The supplier-master comparison for one invoice, computed in
+    code at screening time: the bank identifiers the documents state
+    vs the master record. ``matched`` / ``mismatched`` carry masked
+    labels only (kind + last four) — full identifiers never leave
+    the master record."""
+
+    status: str = "not_checked"  # checked_match | checked_mismatch | no_master_record | no_details_in_documents | not_checked
+    supplier_name: str = ""
+    source: str = ""  # which master implementation answered: memory | postgres
+    matched: list[str] = Field(default_factory=list)
+    mismatched: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
