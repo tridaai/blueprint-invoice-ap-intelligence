@@ -747,6 +747,13 @@ class PaymentRun(BaseModel):
     proposed_at: str = ""
     confirmed_by: Optional[str] = None
     confirmed_at: Optional[str] = None
+    # Four-eyes on large runs: a run whose net total exceeded
+    # PAYMENT_RUN_FOUR_EYES_THRESHOLD when proposed needs a second
+    # confirmation — from a different person than the first — before
+    # the hand-off file can be generated.
+    four_eyes_required: bool = False
+    second_confirmed_by: Optional[str] = None
+    second_confirmed_at: Optional[str] = None
     note: str = ""
     # The execution hand-off: the confirmed run rendered as a
     # bank-ready CSV and stored through the object-store port. The

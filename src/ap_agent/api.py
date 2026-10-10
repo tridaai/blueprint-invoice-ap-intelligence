@@ -396,6 +396,18 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/payment-runs/{run_id}/confirm-second", response_model=PaymentRun, dependencies=_AUTH)
+    def confirm_payment_run_second(run_id: str, request: DecisionRequest) -> PaymentRun:
+        """Record the second confirmation a large run requires
+        (four-eyes: a different person from the first confirmer).
+        Unlocks the hand-off export; pays nothing."""
+        try:
+            return svc.confirm_payment_run_second(run_id, actor=_decision_actor(request))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/payment-runs/{run_id}/handoff", response_model=PaymentRun, dependencies=_AUTH)
     def export_payment_run_handoff(run_id: str, request: DecisionRequest) -> PaymentRun:
         """Generate the confirmed run's bank-ready hand-off file

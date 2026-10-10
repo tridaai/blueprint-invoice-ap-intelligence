@@ -17,6 +17,10 @@ confirms. The agent's part stops exactly where its authority stops:
   human's acceptance of the proposal; it pays nothing, moves no
   money, and changes no invoice's state — the customer's AP system
   of record executes the run, as with everything this agent drafts.
+- Large runs carry a four-eyes rule: a net total above the
+  configured threshold stamps the run ``four_eyes_required``, and
+  the hand-off export (service layer) refuses it until a second,
+  different confirmer has also confirmed the run.
 """
 
 from __future__ import annotations
@@ -69,11 +73,17 @@ def propose_payment_runs(
     window_days: int = DEFAULT_WINDOW_DAYS,
     as_of: date | None = None,
     exclude_invoice_ids: set[str] | None = None,
+    four_eyes_threshold: float | None = None,
 ) -> list[PaymentRun]:
     """Group the approved, not-yet-run records into proposed runs.
 
     Pure over the records it is given — the service layer supplies
-    the store's records and the membership of confirmed runs.
+    the store's records and the membership of confirmed runs. When
+    ``four_eyes_threshold`` is given, a run whose net total is
+    *above* it is stamped ``four_eyes_required``: the hand-off then
+    waits for a second confirmer, different from the first (the
+    service enforces it). A total exactly at the threshold is not
+    above it.
     """
     as_of = as_of or date.today()
     window_days = max(1, int(window_days))
@@ -116,6 +126,8 @@ def propose_payment_runs(
             total_discount=round(sum(line.discount_amount for line in lines), 2),
             total_net=round(sum(line.net_amount for line in lines), 2),
         )
+        if four_eyes_threshold is not None and run.total_net > four_eyes_threshold:
+            run.four_eyes_required = True
         run.note = (
             f"{run.invoice_count} approved invoice(s), {currency} "
             f"{run.total_net:.2f} net payable in the window ending "
@@ -128,6 +140,13 @@ def propose_payment_runs(
             )
             + ". A proposal only: a finance lead confirms the run; "
             "payment itself happens in the AP system of record."
+            + (
+                " This run is above the four-eyes threshold: a second "
+                "confirmer, different from the first, must also confirm "
+                "it before the hand-off file can be generated."
+                if run.four_eyes_required
+                else ""
+            )
         )
         runs.append(run)
     return runs

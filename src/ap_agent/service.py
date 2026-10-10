@@ -105,6 +105,21 @@ AUDIT_COLUMNS = [
 from .ports import Store  # noqa: E402,F401
 
 
+# Default four-eyes threshold for payment runs: a run whose net
+# total is above this needs a second, different confirmer before
+# its hand-off file can be generated (PAYMENT_RUN_FOUR_EYES_THRESHOLD
+# overrides it).
+PAYMENT_RUN_FOUR_EYES_DEFAULT = 25_000.0
+
+
+def payment_run_four_eyes_threshold() -> float:
+    """The configured four-eyes threshold for payment runs."""
+    load_dotenv()
+    return env_float(
+        "PAYMENT_RUN_FOUR_EYES_THRESHOLD", PAYMENT_RUN_FOUR_EYES_DEFAULT
+    )
+
+
 @dataclass
 class BatchItem:
     """One outcome of a batch analysis: a result, or the error that
@@ -667,6 +682,7 @@ class InvoiceService:
             window_days=window_days,
             as_of=anchor,
             exclude_invoice_ids=confirmed_members,
+            four_eyes_threshold=payment_run_four_eyes_threshold(),
         )
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         saved: list[PaymentRun] = []
@@ -1120,6 +1136,49 @@ class InvoiceService:
         store.save_payment_run(run)
         return run
 
+    def confirm_payment_run_second(self, run_id: str, actor: str) -> PaymentRun:
+        """Record the second confirmation a large run requires.
+
+        Four-eyes: the second confirmer must be a different person
+        from the first. Only a run stamped ``four_eyes_required``
+        (net total above ``PAYMENT_RUN_FOUR_EYES_THRESHOLD`` when
+        proposed) takes a second confirmation, and only after the
+        first — the confirmations are a pair, in order, both named
+        on the run record. Like the first confirmation, this pays
+        nothing; it unlocks the hand-off export.
+        """
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        if not run.four_eyes_required:
+            raise ValueError(
+                f"Payment run {run_id} totals {run.currency} "
+                f"{run.total_net:.2f} — not above the four-eyes "
+                "threshold, so no second confirmation is required"
+            )
+        if run.status != "confirmed":
+            raise ValueError(
+                f"Payment run {run_id} is {run.status} — the first "
+                "confirmation comes before the second"
+            )
+        if run.second_confirmed_by:
+            raise ValueError(
+                f"Payment run {run_id} was already second-confirmed by "
+                f"{run.second_confirmed_by}"
+            )
+        if actor == run.confirmed_by:
+            raise ValueError(
+                "four-eyes on payment runs: the second confirmer must "
+                f"differ from the first confirmer ({run.confirmed_by})"
+            )
+        run.second_confirmed_by = actor
+        run.second_confirmed_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        store.save_payment_run(run)
+        return run
+
     def export_payment_run_handoff(self, run_id: str, actor: str) -> PaymentRun:
         """Render a confirmed run's hand-off file and store it
         through the object-store port.
@@ -1139,6 +1198,15 @@ class InvoiceService:
             raise ValueError(
                 f"Payment run {run_id} is {run.status} — only a confirmed "
                 "run is handed off; confirm it first"
+            )
+        if run.four_eyes_required and not run.second_confirmed_by:
+            raise ValueError(
+                f"Payment run {run_id} totals {run.currency} "
+                f"{run.total_net:.2f} — above the four-eyes threshold — "
+                f"and has only been confirmed by {run.confirmed_by}: "
+                "a second confirmer, different from the first, must "
+                "confirm the run before the hand-off file can be "
+                "generated"
             )
         object_store = self.object_store
         if object_store is None:
