@@ -76,6 +76,14 @@
     </div>
     <div id="queuebody"></div>
   </section>
+  <section id="sec-digest">
+    <h2>Escalation digest (today's escalations, composed — never sent)</h2>
+    <div class="gate">
+      <button id="loaddigest" class="secondary">Load digest</button>
+      <span class="note" id="digestnote">The day's escalations in one summary: recovery cases past their SLA, escalated postings, stuck invoices, four-eyes stalls, forecast lapses and realised drift. Composed from the records; the agent sends nothing.</span>
+    </div>
+    <div id="digestbody"></div>
+  </section>
   <section id="sec-payruns">
     <h2>Payment runs (proposals — the agent never pays)</h2>
     <div class="gate">
@@ -498,6 +506,23 @@ $("propose").onclick = async () => {
   loadRuns();
 };
 $("loadqueue").onclick = loadQueue;
+
+async function loadDigest() {
+  const res = await fetch("/digest", {headers: headers()});
+  const d = await res.json();
+  if (!res.ok) { $("digestnote").textContent = `Digest failed to load (${res.status}).`; return; }
+  const counts = [
+    `${d.recovery_breach_count} recovery breach(es)`,
+    `${d.posting_escalation_count} posting escalation(s)`,
+    `${d.stuck_invoice_count} stuck invoice(s)`,
+    `${d.four_eyes_pending_count} four-eyes stall(s)`,
+    `${(d.forecast_lapses || []).length} forecast lapse(s)`,
+    `${(d.drift_today || []).length} run(s) drifted today`,
+  ].join(" · ");
+  $("digestnote").textContent = `Digest for ${d.as_of}: ${counts}.`;
+  $("digestbody").innerHTML = `<pre>${esc(d.summary || "")}</pre>`;
+}
+$("loaddigest").onclick = loadDigest;
 
 loadSamples(); loadEvals(); loadRuns(); loadChanges();
 </script>

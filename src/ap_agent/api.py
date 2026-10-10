@@ -43,6 +43,7 @@ from .schemas import (
     CreditNoteInput,
     CreditNoteMatch,
     DecisionRequest,
+    EscalationDigest,
     InvoiceBundleInput,
     InvoiceInput,
     MasterChangeDecisionRequest,
@@ -365,6 +366,20 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         by due date (overdue first), with the triage mix. Read-only.
         ``as_of`` (ISO date) anchors the aging; default today."""
         return svc.queue_view(as_of=as_of)
+
+    @app.get("/digest", response_model=EscalationDigest, dependencies=_AUTH)
+    def escalation_digest(as_of: str = Query(default="")) -> EscalationDigest:
+        """The day's escalation digest: recovery cases past their
+        SLA, escalated open postings, invoices stuck at the gate,
+        four-eyes runs waiting on a second confirmer, plus the
+        day's forecast lapses and realised drift — composed into
+        one operator summary. Computed at read time from the
+        stored records; the agent sends nothing. ``as_of`` (ISO
+        date) anchors the digest; default today."""
+        try:
+            return svc.escalation_digest(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/reconciliation/approved-not-posted", response_model=ApprovedNotPostedReport, dependencies=_AUTH)
     def approved_not_posted(as_of: str = Query(default=""), grace_days: int | None = Query(default=None)) -> ApprovedNotPostedReport:

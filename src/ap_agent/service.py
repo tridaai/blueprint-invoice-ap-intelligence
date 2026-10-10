@@ -61,6 +61,7 @@ from .schemas import (
     BundleResult,
     CreditNoteInput,
     CreditNoteMatch,
+    EscalationDigest,
     InvoiceBundleInput,
     InvoiceInput,
     MasterChangeEvent,
@@ -1655,6 +1656,27 @@ class InvoiceService:
             posting_escalation_days=escalation,
             payment_runs=store.list_payment_runs(),
             four_eyes_aging_days=four_eyes_aging_days(),
+        )
+
+    def escalation_digest(self, as_of: str = "") -> EscalationDigest:
+        """The day's escalation digest: the queue's action items
+        (recovery SLA breaches, escalated open postings, overdue
+        invoices, four-eyes stalls) plus the day's payment-run news
+        (forecast lapses on runs confirmed today, drift realised on
+        runs exported today), composed into one operator summary
+        by ``digest.build_digest``. Computed at read time from the
+        stored records and sent nowhere — the push counterpart to
+        the queue's pull, left for a human to read or forward."""
+        from .digest import build_digest
+
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        return build_digest(
+            as_of=anchor,
+            queue=self.queue_view(as_of=anchor.isoformat()),
+            runs=self._get_store().list_payment_runs(),
         )
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:

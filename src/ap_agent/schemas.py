@@ -1049,6 +1049,67 @@ class QueueView(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Escalation digest (the day's escalations, composed — never sent)
+# ---------------------------------------------------------------------------
+
+class DigestForecastLapse(BaseModel):
+    """One discount projected to lapse, on a run confirmed on the
+    digest's day: the forecast section of the digest. Carries the
+    run it belongs to (``PaymentRunForecast`` itself does not)."""
+
+    run_id: str
+    invoice_id: str
+    supplier_name: str = ""
+    currency: str = "USD"
+    discount_amount: float = 0.0
+    discount_deadline: str = ""
+    expected_export_date: str = ""
+
+
+class DigestDriftEntry(BaseModel):
+    """One run exported on the digest's day with discount drift:
+    the realised counterpart of the forecast section — what the
+    drift cost, in the end, on the day it was measured."""
+
+    run_id: str
+    currency: str = "USD"
+    members_drifted: int = 0
+    value_lost: float = 0.0
+
+
+class EscalationDigest(BaseModel):
+    """The day's escalations in one operator summary: the queue's
+    action items (recovery cases past their SLA, open postings past
+    escalation, overdue invoices stuck at the gate, four-eyes runs
+    waiting on a second confirmer) plus the day's payment-run news
+    (discounts forecast to lapse on runs confirmed today, drift
+    realised on runs exported today).
+
+    Composed deterministically from the stored records, like the
+    reconciliation summary — the agent drafts nothing free-form
+    here and sends nothing: ``summary`` is the text a human reads
+    (or forwards), and the sections beneath it are the same facts
+    in structured form."""
+
+    as_of: str = ""  # ISO date the digest covers
+    summary: str = ""  # the composed operator text
+    recovery_breaches: list[RecoveryCaseAgingItem] = Field(default_factory=list)
+    recovery_breach_count: int = 0
+    recovery_amount_by_currency: dict[str, float] = Field(default_factory=dict)
+    posting_escalations: list[OpenPostingItem] = Field(default_factory=list)
+    posting_escalation_count: int = 0
+    stuck_items: list[QueueItem] = Field(default_factory=list)
+    stuck_invoice_count: int = 0
+    most_overdue_days: Optional[int] = None
+    four_eyes_pending: list[FourEyesAgingItem] = Field(default_factory=list)
+    four_eyes_pending_count: int = 0
+    forecast_lapses: list[DigestForecastLapse] = Field(default_factory=list)
+    forecast_value_by_currency: dict[str, float] = Field(default_factory=dict)
+    drift_today: list[DigestDriftEntry] = Field(default_factory=list)
+    drift_value_by_currency: dict[str, float] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Duplicate-payment recovery packs
 # ---------------------------------------------------------------------------
 
