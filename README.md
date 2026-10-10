@@ -130,6 +130,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 77. **Bank silence ages like the other waits** — an answer that never comes was the feedback loop's blind spot: the file went out, the other groups booked, and one group's members hung unbooked and unbounced. Past `GROUP_RECEIPT_AGING_DAYS` (default 5) an unanswered group joins the approver queue with its run, members, value and age named; the escalation digest announces it as bank silence; and `/metrics` counts the loop's coverage (`payment_runs.group_answers`: accepted / rejected / unanswered / re-exported). The clock runs from the file the bank is currently answering — a re-presented group ages from its solo re-export, and the item says so. An answered group never ages: an acceptance closes it, and a rejection is the re-export's work, not the queue's.
 78. **The lag watch announces itself in the digest** — the drift watch demotes a decaying lag statistic inside the forecast's selection, automatically and silently. The escalation digest now names it as the ops event it is: each degrading segment with both windows' recalls and graded-member counts, the segments standing excluded from the candidate set by governed decision (an exclusion nobody can see is its own silence), and how many of the day's confirmations the demotions actually shaped — read off the forecast basis the selection stamped on each run. A quiet watch announces nothing, and stored digests keep their announcements verbatim.
 79. **The unblocking pattern becomes a governed onboarding change** — the re-analysis analytics name the suppliers whose replies never move their cases; asking for the settling document mid-dispute, round after round, is the process failing politely. `POST /suppliers/contact-proposals/draft` turns the pattern into proposals under the same discipline as the lag-segment rulings: a supplier with two or more unchanged re-analyses drafts a collect-documents-up-front proposal; a second operator decides (drafter ≠ decider); approval puts the supplier on the documents-up-front list — derived from the proposal ledger (migration 0014), never a second store — and their information waits in the queue read `documents_upfront`. A listed supplier whose every re-analysis since listing moved its case drafts its release, and an approval is refused when a re-analysis has landed unchanged since the draft: stale evidence does not release a checklist.
+80. **The bank silence is graded, not just aged** — the ageing named the batch groups the bank left unanswered; nothing said whether the wait ended in anything. `/metrics` now grades each aged (group, file) episode — the whole-file export opens one, each solo re-export the next — against what happened next: `group_answer_follow_through` counts the episodes answered after ageing (accepted and rejected apart), the ones the answer ended by re-presenting the group alone, and the ones still silent, with the median days from file to answer and a `silence_ended_rate`. The chase now has a measured effect beside its queue, the information waits' follow-through grading applied to the bank loop.
+81. **The re-exports read back as a population** — a corrected group re-presented alone was a stamped record, never a read. `group_reexports` in `/metrics` grades each re-presented group by its standing receipt — accepted, rejected again, or still awaiting — with the acceptance rate of the corrections, the groups that bounced twice, the bank's rejection reasons counted as patterns, the suppliers whose groups were rejected more than once across the whole feedback loop, and the discount drift the second files re-priced, per currency. A bank whose groups keep bouncing for one reason is a profile conversation; this is the read that starts it.
+82. **The documents-up-front listings are graded — and a listing that fails drafts its own release** — a listing is an intervention, and round 19 left it judged only by the re-analysis pattern. `documents_upfront_effectiveness` in `/metrics` reads each listed supplier's information waits and clarification loops per case, before vs after the listing moment: `working` (both rates fell, or one fell and the other held), `no_effect` (measured, and neither moved), or `unmeasured` (no cases since, or no pre-listing pattern to compare). A `no_effect` listing drafts a release proposal on the grade's evidence through the same governed discipline, and approval is re-graded at decision time — a listing that started working since the draft is refused, in the grade's own terms. The loop the collect opened is closed by measurement.
+83. **The posting ladder is graded by the rung the posting followed** — the escalation ledger recorded that a crossing was pushed; `/metrics`' `escalation_ladder` now reads each escalated episode against the record as it stands: a posted receipt after rung 1 (before rung 2) credits rung 1, one after rung 2 credits rung 2 — the first shout had its window, which is why the second exists — an episode closed by a failure or a posting that didn't follow the push credits neither, and an episode with no resolution stands open, named. Days-to-post runs from the resolving rung. The two waiting loops (the supplier's, the ERP's) now carry the same follow-through grading in one read.
 
 ## Quickstart
 
@@ -160,7 +164,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 631 tests
+make test        # 660 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -231,7 +235,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            631 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            660 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -239,7 +243,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 631 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 660 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)

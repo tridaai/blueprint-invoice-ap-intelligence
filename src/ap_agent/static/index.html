@@ -133,7 +133,7 @@
     <div class="gate" style="margin-top:12px">
       <button id="sc-draft" class="secondary">Draft supplier-contact proposals</button>
       <button id="sc-proposals-load" class="secondary">Load supplier-contact proposals</button>
-      <span class="note" id="scpropnote">The re-analysis analytics name the suppliers whose replies never move their cases — the settling document was never collected. A governed proposal here answers the pattern: a supplier repeatedly not unblocked drafts a collect-documents-up-front change to their onboarding checklist; a listed supplier whose re-analyses since listing all moved their cases drafts its release. Drafter ≠ decider; who stands listed is derived from the decided proposals themselves, and a listed supplier's information waits say so in the queue.</span>
+      <span class="note" id="scpropnote">The re-analysis analytics name the suppliers whose replies never move their cases — the settling document was never collected. A governed proposal here answers the pattern: a supplier repeatedly not unblocked drafts a collect-documents-up-front change to their onboarding checklist; a listed supplier whose re-analyses since listing all moved their cases drafts its release. The listings are graded in /metrics — information waits and clarification loops per case, before vs after the listing moment — and a listing that moved nothing drafts its own release on the grade's evidence; approving that release re-grades first, so a listing that started working is never released on a stale grade. Drafter ≠ decider; who stands listed is derived from the decided proposals themselves, and a listed supplier's information waits say so in the queue.</span>
     </div>
     <div id="scpropbody"></div>
   </section>
@@ -142,7 +142,7 @@
     <div class="gate">
       <button id="loadopen" class="secondary">Load open items</button>
       <button id="escalateopen" class="secondary">Escalate open postings</button>
-      <span class="note" id="openote">Approved invoices with no posted receipt past the grace window — the postings the ERP still owes an answer for. A failed receipt keeps its item open, with the ERP's reason. Escalating climbs the ladder: the signed posting_escalation webhook past the escalation threshold, then posting_escalation_urgent past twice it if the posting is still open — once per rung per open episode, recorded on the invoice record.</span>
+      <span class="note" id="openote">Approved invoices with no posted receipt past the grace window — the postings the ERP still owes an answer for. A failed receipt keeps its item open, with the ERP's reason. Escalating climbs the ladder: the signed posting_escalation webhook past the escalation threshold, then posting_escalation_urgent past twice it if the posting is still open — once per rung per open episode, recorded on the invoice record. /metrics grades the ladder: which rung a posting followed (a posted receipt after rung 1 credits rung 1; after rung 2, rung 2 — the first shout had its window), which episodes closed without it, and which stand open exactly as they stood when the last rung fired.</span>
     </div>
     <div id="openbody"></div>
   </section>
@@ -452,7 +452,7 @@ async function loadQueue() {
   }
   const groupWaits = q.group_receipt_waits || [];
   if (groupWaits.length) {
-    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Bank silence — unanswered batch groups</b> — PmtInf groups of batch-booked exports with no bank answer past the ${q.group_receipt_aging_days}-day aging threshold. The file went out, the other groups answered; these members hang unbooked and unbounced. An answered group is never listed: an acceptance closes it, a rejection is the re-export's work (payment runs panel).</p>
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Bank silence — unanswered batch groups</b> — PmtInf groups of batch-booked exports with no bank answer past the ${q.group_receipt_aging_days}-day aging threshold. The file went out, the other groups answered; these members hang unbooked and unbounced. An answered group is never listed: an acceptance closes it, a rejection is the re-export's work (payment runs panel). /metrics grades the aged silences against what happened next — a late answer, a re-presentation, or silence still standing — and reads the re-exports as a population: the corrected groups' acceptance rate, the bank's rejection reasons as patterns, and the suppliers whose groups keep bouncing.</p>
     <table><tr><th>Run · group</th><th>Members</th><th>Value</th><th>File sent</th><th>Unanswered</th></tr>${groupWaits.map(g => `<tr><td>${esc(g.run_id)}<br><span class="note">${esc(g.pmt_inf_id)}</span></td><td>${(g.member_invoice_ids || []).map(esc).join(", ")}</td><td>${esc(g.currency)} ${g.group_value}</td><td>${esc((g.file_sent_at || "").slice(0, 10))}${g.reexported ? `<br>${pill("the solo re-export", "info")}` : ""}</td><td>${pill((g.waiting_days ?? "—") + "d", "bad")}</td></tr>`).join("")}</table>`;
   }
 }
