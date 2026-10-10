@@ -1,0 +1,35 @@
+# Local-development override: adds a local Ollama for sovereign /
+# offline model runs, and publishes the database + object storage
+# ports for inspection.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local-llm up --build
+#
+# For self-hosted NVIDIA NIM, run the NIM containers on the host (or
+# another compose project) and point the *_BASE_URL variables in .env
+# at them — NIM services are OpenAI-compatible, so no code changes:
+#   OPENAI_BASE_URL=http://host.docker.internal:8000/v1   (Nemotron LLM NIM)
+#   OCR_BASE_URL=http://host.docker.internal:8001/v1      (Nemotron OCR NIM)
+#   VISION_BASE_URL=http://host.docker.internal:8002/v1   (Nemotron VL NIM)
+
+services:
+  api:
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  minio:
+    ports:
+      - "9000:9000"
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-llm"]
+    volumes:
+      - ollamadata:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollamadata:

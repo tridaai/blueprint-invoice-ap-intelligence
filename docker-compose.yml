@@ -1,0 +1,78 @@
+# Production-shaped stack for the Invoice / AP Document Intelligence Agent.
+#
+#   docker compose up --build
+#
+# brings up the REAL components — this is not a toy local mode:
+#   api       the agent service (stateless; scales horizontally)
+#   postgres  PostgreSQL 16 + pgvector: approvals store, LangGraph
+#             checkpointer, and policy embeddings in ONE database
+#   minio     S3-compatible object storage for document blobs
+#
+# State lives in the services (named volumes). The api container holds
+# nothing. Schema is versioned: numbered SQL migrations under
+# migrations/ run at service startup.
+#
+# Model backends are configured via .env (copy .env.example). The lead
+# profile is NVIDIA NIM (hosted endpoint or self-hosted containers);
+# the default below is the offline fallback so the stack boots with no
+# keys at all.
+#
+# NOTE: not yet build-verified in the blueprint's dev sandbox (no
+# Docker daemon there) — the first `docker compose up --build` is the
+# verification run (see the README QA checklist).
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_BACKEND: ${MODEL_BACKEND:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      DATABASE_URL: postgresql://ap:ap@postgres:5432/ap
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ap-documents
+      S3_ACCESS_KEY: apminio
+      S3_SECRET_KEY: apminio-secret
+      S3_REGION: us-east-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ap
+      POSTGRES_PASSWORD: ap
+      POSTGRES_DB: ap
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ap -d ap"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: apminio
+      MINIO_ROOT_PASSWORD: apminio-secret
+    ports:
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:
