@@ -2774,10 +2774,14 @@ class InvoiceService:
         (recovery SLA breaches, escalated open postings, overdue
         invoices, four-eyes stalls) plus the day's payment-run news
         (forecast lapses on runs confirmed today, drift realised on
-        runs exported today), composed into one operator summary
-        by ``digest.build_digest``. Computed at read time from the
-        stored records and sent nowhere — the push counterpart to
-        the queue's pull, left for a human to read or forward."""
+        runs exported today) and the standing governance lines —
+        among them the lag drift watch's announcements: a
+        statistic quietly degrading, or standing excluded, is an
+        ops event and the digest names it — composed into one
+        operator summary by ``digest.build_digest``. Computed at
+        read time from the stored records and sent nowhere — the
+        push counterpart to the queue's pull, left for a human
+        to read or forward."""
         from .digest import build_digest
         from .schemas import DigestOnboardingEntry, DigestWaitBudgetEntry
 
@@ -2819,12 +2823,53 @@ class InvoiceService:
             for item in self.marker_worklist(as_of=anchor.isoformat()).items
             if item.in_flight_expiring_soon
         ]
+        # The lag watch's announcements: the drift watch demotes
+        # a decaying statistic silently, inside the forecast's
+        # selection — the digest is where that becomes an event.
+        # Entries are the segments with something to announce
+        # (degrading, or standing excluded by governed decision);
+        # the demotion count is the day's confirmations whose
+        # forecast basis the watch actually shaped.
+        from .paymentruns import lag_grade_drift_watch
+        from .schemas import DigestLagWatchEntry
+
+        excluded = self._excluded_lag_segments()
+        watch_entries = [
+            DigestLagWatchEntry(
+                segment=segment,
+                earlier_recall=row["earlier_recall"],
+                recent_recall=row["recent_recall"],
+                earlier_graded_members=row["earlier_graded_members"],
+                recent_graded_members=row["recent_graded_members"],
+                degrading=bool(row["degrading"]),
+                excluded=segment in excluded,
+            )
+            for segment, row in lag_grade_drift_watch(runs).items()
+            if row["degrading"] or segment in excluded
+        ]
+        # An excluded segment the watch has never graded still
+        # stands excluded — announced with no readings rather
+        # than silently absent.
+        announced = {entry.segment for entry in watch_entries}
+        watch_entries += [
+            DigestLagWatchEntry(segment=segment, excluded=True)
+            for segment in sorted(excluded - announced)
+        ]
+        demotions_today = sum(
+            1
+            for run in runs
+            if _parse_date(run.confirmed_at or "") == anchor
+            and "was demoted by" in (run.drift_forecast_basis or "")
+        )
         return build_digest(
             as_of=anchor,
             queue=self.queue_view(as_of=anchor.isoformat()),
             runs=runs,
             wait_budget_breaches=breaches,
             onboarding_expiring=onboarding,
+            lag_watch=watch_entries,
+            lag_watch_excluded_segments=sorted(excluded),
+            lag_watch_demotions_today=demotions_today,
         )
 
     def store_digest(self, as_of: str = "", actor: str = "") -> EscalationDigest:

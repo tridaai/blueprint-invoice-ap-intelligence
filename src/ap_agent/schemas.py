@@ -1963,6 +1963,31 @@ class DigestWaitBudgetEntry(BaseModel):
     excess: float = 0.0  # wait_cost − budget
 
 
+class DigestLagWatchEntry(BaseModel):
+    """One lag statistic the drift watch has something to say
+    about, announced in the digest.
+
+    The watch grades each lag segment's recall over two windows
+    of export history and demotes a decaying statistic inside
+    the forecast's selection — silently, run by run. A forecast
+    quietly degrading is an operations event, so the digest
+    announces it: a segment whose recent recall fell away from
+    its earlier record (``degrading``), and the segments that
+    stand excluded from the candidate set by governed decision
+    (``excluded`` — announced so the exclusion itself never
+    becomes invisible). The recalls and graded-member counts
+    ride along: the announcement carries its evidence, in the
+    digest's discipline."""
+
+    segment: str = ""  # e.g. "currency:EUR", "profile:...", "global"
+    earlier_recall: Optional[float] = None
+    recent_recall: Optional[float] = None
+    earlier_graded_members: int = 0
+    recent_graded_members: int = 0
+    degrading: bool = False
+    excluded: bool = False
+
+
 class EscalationDigest(BaseModel):
     """The day's escalations in one operator summary: the queue's
     action items (recovery cases past their SLA, open postings past
@@ -2010,6 +2035,17 @@ class EscalationDigest(BaseModel):
         default_factory=list
     )
     group_receipt_wait_count: int = 0
+    # The lag drift watch's announcements: segments whose
+    # statistic is degrading (recent recall fallen away from
+    # the earlier record) and segments standing excluded from
+    # the forecast's candidate set by governed decision — plus
+    # how many of the day's confirmations the watch's demotions
+    # actually shaped. A forecast quietly degrading is an ops
+    # event; the digest is where ops events are announced.
+    lag_watch: list[DigestLagWatchEntry] = Field(default_factory=list)
+    lag_watch_degrading_count: int = 0
+    lag_watch_excluded_segments: list[str] = Field(default_factory=list)
+    lag_watch_demotions_today: int = 0
     # Provenance: a digest is "computed" at read time by default —
     # fresh every call, and labelled as such. An operator can store
     # a day's first-computed digest (POST /digest/{date}/store);

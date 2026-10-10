@@ -37,6 +37,15 @@ that crossed a line, as of a day.
   answered, and this group's members hang unbooked and
   unbounced. Named with the run, the members, and the value
   riding on the answer.
+- **Lag-watch announcements** — the drift watch's demotions,
+  announced: a lag statistic whose recent recall has fallen
+  away from its earlier record is quietly changing which
+  forecast every confirmation is priced against, and a
+  segment standing excluded by governed decision should not
+  itself become invisible. The digest names the segment, both
+  recalls with their graded-member counts, the exclusions in
+  force, and how many of the day's confirmations the
+  demotions shaped.
 
 Composition is the reconciliation summary's discipline: computed
 in code from the stored records, every exception named, an
@@ -62,6 +71,7 @@ from .matching import _parse_date
 from .schemas import (
     DigestDriftEntry,
     DigestForecastLapse,
+    DigestLagWatchEntry,
     DigestHistory,
     DigestHistoryEntry,
     DigestOnboardingEntry,
@@ -196,6 +206,9 @@ def build_digest(
     runs: Iterable[PaymentRun],
     wait_budget_breaches: Iterable[DigestWaitBudgetEntry] = (),
     onboarding_expiring: Iterable[DigestOnboardingEntry] = (),
+    lag_watch: Iterable[DigestLagWatchEntry] = (),
+    lag_watch_excluded_segments: Iterable[str] = (),
+    lag_watch_demotions_today: int = 0,
 ) -> EscalationDigest:
     """Compose the digest for one day from the queue view (built
     for the same day by the service) and the stored payment runs.
@@ -208,7 +221,12 @@ def build_digest(
     warnings (pending master changes inside their expiry
     warning band), aged against the digest's day by the
     service — decisions owed while the window can still be
-    rescued."""
+    rescued. ``lag_watch`` are the drift watch's announcements
+    the service composed (degrading statistics and excluded
+    segments, with their evidence), and
+    ``lag_watch_demotions_today`` how many of the day's
+    confirmations the watch's demotions shaped — the forecast's
+    quiet degradation, announced as the ops event it is."""
     breaches = [case for case in queue.recovery_cases if case.sla_breached]
     recovery_amounts: dict[str, float] = {}
     for case in breaches:
@@ -304,6 +322,14 @@ def build_digest(
         onboarding_expiring_count=len(onboarding_sorted),
         group_receipt_waits=list(queue.group_receipt_waits),
         group_receipt_wait_count=len(queue.group_receipt_waits),
+        lag_watch=sorted(
+            lag_watch, key=lambda e: (not e.degrading, e.segment)
+        ),
+        lag_watch_degrading_count=sum(
+            1 for entry in lag_watch if entry.degrading
+        ),
+        lag_watch_excluded_segments=sorted(lag_watch_excluded_segments),
+        lag_watch_demotions_today=lag_watch_demotions_today,
     )
     digest.summary = _compose_summary(digest, queue)
     return digest
@@ -474,6 +500,31 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
             "answered: chase the bank for its answer, or "
             "re-present the group if the file itself was at fault."
         )
+    if digest.lag_watch:
+        named = "; ".join(
+            f"{entry.segment} — recall "
+            f"{entry.earlier_recall if entry.earlier_recall is not None else '—'} "
+            f"earlier ({entry.earlier_graded_members} graded) → "
+            f"{entry.recent_recall if entry.recent_recall is not None else '—'} "
+            f"recent ({entry.recent_graded_members} graded)"
+            + (" — excluded from the candidate set" if entry.excluded else "")
+            for entry in digest.lag_watch
+        )
+        parts.append(
+            f"Lag watch — {digest.lag_watch_degrading_count} "
+            f"statistic(s) degrading: {named}. A demoted statistic "
+            "changes which forecast tomorrow's confirmations are "
+            "priced against; retire a segment that keeps decaying "
+            "through its governed proposal, and expect the drift "
+            "forecast to read differently while it does."
+            + (
+                f" The watch's demotions shaped "
+                f"{digest.lag_watch_demotions_today} of today's "
+                "confirmation(s)."
+                if digest.lag_watch_demotions_today
+                else ""
+            )
+        )
     if (
         digest.recovery_breach_count == 0
         and digest.posting_escalation_count == 0
@@ -484,6 +535,7 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
         and not digest.wait_budget_breaches
         and not digest.onboarding_expiring
         and not digest.group_receipt_waits
+        and not digest.lag_watch
     ):
         parts.append(
             "All clear: nothing crossed a line today — no breaches, no "
