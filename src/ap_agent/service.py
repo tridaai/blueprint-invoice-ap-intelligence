@@ -53,7 +53,11 @@ from .paymentruns import price_four_eyes_wait as _price_four_eyes_wait
 from .paymentruns import drift_forecast as _drift_forecast
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
-from .queue import build_queue, recovery_case_aging
+from .queue import (
+    build_queue,
+    information_escalation_follow_through,
+    recovery_case_aging,
+)
 from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
@@ -1462,6 +1466,14 @@ class InvoiceService:
                 "escalation_days": information_wait_escalation_days(),
                 "escalations_recorded": sum(
                     len(r.result.information_escalations) for r in records
+                ),
+                # The pushes, graded: a reply that followed the
+                # firing (the chase landed), a wait closed without
+                # one (the push claims no credit), and the waits
+                # still open exactly as they were — plus how long
+                # the answered ones took to answer.
+                "escalation_follow_through": (
+                    information_escalation_follow_through(records)
                 ),
             },
             # The re-analysis chains, read back: how often a

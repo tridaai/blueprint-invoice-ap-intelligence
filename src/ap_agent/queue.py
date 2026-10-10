@@ -74,7 +74,10 @@ that, the wait stops being a list line: the service's sweep
 fires the signed ``information_wait_escalation`` webhook, once
 per wait episode (a partial reply starts a new episode; a
 complete reply is the reset), and the item here reads
-``escalated``.
+``escalated``. The firings are graded in turn
+(:func:`information_escalation_follow_through`): a reply that
+followed the push, a wait closed without one, or a wait still
+open exactly as it was — the escalation's effect, measured.
 """
 
 from __future__ import annotations
@@ -422,6 +425,93 @@ def information_wait_items(
         )
     items.sort(key=lambda item: (-(item.waiting_days or 0), item.invoice_id))
     return items
+
+
+def information_escalation_follow_through(records: list[ApprovalRecord]) -> dict:
+    """Grade the recorded information-wait escalations against
+    what happened next: did the push work?
+
+    The escalation ledger (``result.information_escalations``)
+    records that a wait was pushed — once per episode, at twice
+    the aging threshold. This reads each firing against the
+    record as it now stands and grades the episode:
+
+    - ``answered_after_push`` — a reply arrived at or after the
+      dispatch (the request's latest reply stamp is the
+      evidence): whole or partial, the chase landed. A partial
+      reply starts a new episode, so an old episode followed by
+      ANY later reply reads as answered — the push was the last
+      thing that happened before the supplier moved.
+    - ``closed_otherwise`` — no reply followed the push, but the
+      wait is over anyway: the case was decided at the gate, or
+      the request left the record. The push cannot claim it, and
+      the grade does not let it.
+    - ``still_open`` — no reply, no decision: the wait is open
+      exactly as it was when the webhook fired. A chase failing
+      in public, counted.
+
+    Answered episodes also carry their days-to-answer (dispatch
+    date → reply date), aggregated as count / median / mean /
+    max: the push's price in days, not just its hit rate.
+    ``answer_rate`` is answered over graded — None when nothing
+    has been graded, never a dressed-up zero. Pure over the
+    records.
+    """
+    graded = 0
+    answered = 0
+    still_open = 0
+    closed_otherwise = 0
+    answer_days: list[int] = []
+    still_open_ids: list[str] = []
+    for record in records:
+        result = record.result
+        for entry in result.information_escalations:
+            graded += 1
+            dispatched = _parse_date(entry.dispatched_at)
+            request = result.information_request
+            reply_at = (
+                _parse_date(request.reply_received_at)
+                if request is not None
+                else None
+            )
+            if (
+                request is not None
+                and reply_at is not None
+                and dispatched is not None
+                and reply_at >= dispatched
+                and request.reply_status in ("partially_answered", "answered")
+            ):
+                answered += 1
+                answer_days.append((reply_at - dispatched).days)
+            elif (
+                result.status != "awaiting_approver"
+                or request is None
+                or not result.needs_information
+            ):
+                closed_otherwise += 1
+            else:
+                still_open += 1
+                still_open_ids.append(result.invoice_id)
+    days_block = None
+    if answer_days:
+        ordered = sorted(answer_days)
+        days_block = {
+            "count": len(ordered),
+            "median": ordered[len(ordered) // 2]
+            if len(ordered) % 2 == 1
+            else round((ordered[len(ordered) // 2 - 1] + ordered[len(ordered) // 2]) / 2, 2),
+            "mean": round(sum(ordered) / len(ordered), 2),
+            "max": ordered[-1],
+        }
+    return {
+        "escalations_graded": graded,
+        "answered_after_push": answered,
+        "still_open": still_open,
+        "closed_otherwise": closed_otherwise,
+        "answer_rate": round(answered / graded, 4) if graded else None,
+        "days_to_answer": days_block,
+        "still_open_invoice_ids": sorted(set(still_open_ids)),
+    }
 
 
 def _bucket(days_overdue: int | None, due: date | None, as_of: date) -> str:
