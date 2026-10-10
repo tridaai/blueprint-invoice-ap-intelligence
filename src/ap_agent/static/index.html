@@ -386,7 +386,7 @@ function runControls(run) {
 }
 function renderRuns(runs) {
   $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
-    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b>${run.four_eyes_threshold ? ` · four-eyes threshold ${esc(run.currency)} ${run.four_eyes_threshold}` : ""} · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || "") + (run.second_confirmed_by ? " + " + run.second_confirmed_by : ""), "ok") : pill("proposed", "info")} ${runControls(run)}</p>
+    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b>${run.four_eyes_threshold ? ` · four-eyes threshold ${esc(run.currency)} ${run.four_eyes_threshold}` : ""}${run.second_confirmed_by ? ` · four-eyes wait cost ${esc(run.currency)} ${run.four_eyes_wait_cost || 0}${(run.four_eyes_wait_lapses || []).length ? ` (${run.four_eyes_wait_lapses.length} discount(s) lapsed during the wait: ${run.four_eyes_wait_lapses.map(l => esc(l.invoice_id) + " " + l.discount_amount).join(", ")})` : " (no discount lapsed during the wait)"}` : ""} · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || "") + (run.second_confirmed_by ? " + " + run.second_confirmed_by : ""), "ok") : pill("proposed", "info")} ${runControls(run)}</p>
     ${(run.handoff_drift || []).map(d => `<p class="note" style="margin:2px 0">${pill("discount drift", "warn")} ${esc(d.invoice_id)} — ${esc(run.currency)} ${d.discount_lost} of discount lost: ${esc(d.reason)}</p>`).join("")}
     ${(run.drift_forecast || []).map(f => `<p class="note" style="margin:2px 0">${pill("drift forecast", "warn")} ${esc(f.invoice_id)} — ${esc(f.message)}</p>`).join("")}
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
@@ -402,7 +402,7 @@ async function confirmSecond(runId) {
   const res = await fetch(`/payment-runs/${runId}/confirm-second`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
   const body = await res.json();
   if (!res.ok) { $("paynote").textContent = `Second confirmation refused (${res.status}): ${body.detail || ""}`; return; }
-  $("paynote").textContent = `Run ${runId} second-confirmed by ${body.second_confirmed_by} (first: ${body.confirmed_by}). The hand-off export is unlocked — it still pays nothing.`;
+  $("paynote").textContent = `Run ${runId} second-confirmed by ${body.second_confirmed_by} (first: ${body.confirmed_by}) — the wait is priced on the run: ${body.currency} ${body.four_eyes_wait_cost || 0} of discount value lapsed while it waited. The hand-off export is unlocked — it still pays nothing.`;
   loadRuns();
 }
 async function exportHandoff(runId, format) {

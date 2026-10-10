@@ -931,6 +931,21 @@ class PaymentRunDrift(BaseModel):
     discount_at_proposal: float = 0.0
     discount_at_export: float = 0.0  # what is still capturable at export
     discount_lost: float = 0.0  # proposal − export, the drift amount
+
+
+class PaymentRunWaitLapse(BaseModel):
+    """One run member whose early-payment discount lapsed *while
+    the run waited for its second confirmation*: capturable when
+    the first confirmer signed, gone when the second did. This is
+    the priced unit of the four-eyes wait (see
+    ``PaymentRun.four_eyes_wait_cost``) — the discount the control
+    itself cost, as opposed to drift, which prices the whole
+    confirm-to-export span whatever caused it."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    discount_amount: float = 0.0  # the discount lost to the wait
+    discount_deadline: str = ""  # the deadline that closed mid-wait
     reason: str = ""
 
 
@@ -1049,6 +1064,17 @@ class PaymentRun(BaseModel):
     # rests on — or why there is none (no exported runs yet).
     drift_forecast: list[PaymentRunForecast] = Field(default_factory=list)
     drift_forecast_basis: str = ""
+    # The priced four-eyes wait, stamped when the second
+    # confirmation lands (four-eyes runs only): the member
+    # discounts that were capturable at the first confirmation
+    # and lapsed before the second — the value the wait itself
+    # destroyed, itemised in four_eyes_wait_lapses and totalled
+    # here. A discount already gone before the first confirmation
+    # is not the wait's fault and is never charged to it; one
+    # still capturable at the second confirmation cost nothing.
+    # Zero on runs that needed no second confirmer.
+    four_eyes_wait_lapses: list[PaymentRunWaitLapse] = Field(default_factory=list)
+    four_eyes_wait_cost: float = 0.0
 
 
 class PaymentRunRequest(BaseModel):

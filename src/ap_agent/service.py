@@ -41,6 +41,7 @@ from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
 from .paymentruns import discount_drift, handoff_metrics
+from .paymentruns import price_four_eyes_wait as _price_four_eyes_wait
 from .paymentruns import drift_forecast as _drift_forecast
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
@@ -2112,7 +2113,11 @@ class InvoiceService:
         proposed) takes a second confirmation, and only after the
         first — the confirmations are a pair, in order, both named
         on the run record. Like the first confirmation, this pays
-        nothing; it unlocks the hand-off export.
+        nothing; it unlocks the hand-off export. Landing the
+        second confirmation also closes the wait, so the run is
+        priced for it: the discounts capturable at the first
+        confirmation that lapsed during the wait are stamped on
+        the run as its four-eyes wait cost.
         """
         store = self._get_store()
         run = store.get_payment_run(run_id)
@@ -2149,6 +2154,17 @@ class InvoiceService:
         run.second_confirmed_by = actor
         run.second_confirmed_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
+        )
+        # The wait is now over — price it before the record is
+        # saved: the member discounts that were capturable at the
+        # first confirmation and lapsed while the run sat waiting
+        # are the control's measured cost, stamped on the run
+        # (paymentruns.price_four_eyes_wait) and aggregated in
+        # /metrics beside the forecast accuracy. The export still
+        # re-prices every member itself; this stamp never changes
+        # what gets paid — it prices the delay, nothing else.
+        run.four_eyes_wait_cost, run.four_eyes_wait_lapses = _price_four_eyes_wait(
+            run
         )
         store.save_payment_run(run)
         return run

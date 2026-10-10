@@ -52,6 +52,7 @@ from .schemas import (
     PaymentRunDrift,
     PaymentRunForecast,
     PaymentRunLine,
+    PaymentRunWaitLapse,
 )
 from .store import ApprovalRecord
 
@@ -552,6 +553,56 @@ def creditor_completion_metrics(runs: list[PaymentRun]) -> dict:
     }
 
 
+def price_four_eyes_wait(
+    run: PaymentRun,
+) -> tuple[float, list[PaymentRunWaitLapse]]:
+    """Price a four-eyes run's second-confirmation wait: the
+    member discounts that were capturable when the first
+    confirmer signed and had lapsed by the time the second did.
+
+    The wait was previously a feeling — the run sat, the queue
+    aged it, the digest flagged the stall — but nobody could say
+    what the stall *cost*. This is the number: for each line
+    carrying a capturable discount, the discount is charged to
+    the wait exactly when its deadline falls inside the wait —
+    on or after the first confirmation's date (so it was still
+    takeable when the run entered the wait) and before the
+    second confirmation's date (so it was gone when the run
+    left it), under the same capturable-on-the-deadline-day rule
+    the proposal and the drift check use. A discount that died
+    before the first confirmation is the calendar's fault, not
+    the wait's, and is never charged here (the drift machinery
+    prices the whole confirm-to-export span separately); a
+    discount still alive at the second confirmation cost the
+    wait nothing.
+
+    Pure over the run record: the service stamps the result onto
+    the run when the second confirmation lands. Runs without
+    both confirmations — including every run that never needed
+    a second confirmer — price at zero."""
+    first = _parse_date(run.confirmed_at)
+    second = _parse_date(run.second_confirmed_at)
+    if first is None or second is None:
+        return 0.0, []
+    lapses: list[PaymentRunWaitLapse] = []
+    for line in run.lines:
+        if line.discount_amount <= 0:
+            continue
+        deadline = _parse_date(line.discount_deadline)
+        if deadline is None:
+            continue
+        if first <= deadline < second:
+            lapses.append(
+                PaymentRunWaitLapse(
+                    invoice_id=line.invoice_id,
+                    supplier_name=line.supplier_name,
+                    discount_amount=line.discount_amount,
+                    discount_deadline=line.discount_deadline,
+                )
+            )
+    return round(sum(lapse.discount_amount for lapse in lapses), 2), lapses
+
+
 def handoff_metrics(runs: list[PaymentRun]) -> dict:
     """The hand-off story, aggregated over the stored runs — the
     ``payment_runs`` section of ``/metrics``.
@@ -563,8 +614,12 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
     process leak that causes drift, so the two are reported side
     by side. The confirmation-time forecast is scored in the same
     section (:func:`forecast_accuracy`): a projection that is
-    never graded is just a decoration. Pure over the runs given;
-    runs exported before the receipt fields existed simply
+    never graded is just a decoration. The four-eyes wait is
+    priced in the same section too (``four_eyes_wait``): the
+    discounts the second-confirmation wait itself destroyed,
+    aggregated from the stamps on the runs — the control's cost,
+    next to the leaks it exists to prevent. Pure over the runs
+    given; runs exported before the receipt fields existed simply
     contribute what they carry.
     """
     by_status: dict[str, int] = {}
@@ -575,8 +630,26 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
     drift_value: dict[str, float] = {}
     confirm_lags: list[float] = []
     proposal_lags: list[float] = []
+    # The priced four-eyes wait, aggregated from the stamps the
+    # second confirmations left on the runs: how many runs have
+    # been through the wait, what the waits cost per currency,
+    # and how many member discounts died inside them. A run is
+    # counted from its second confirmation onward, exported or
+    # not; runs that never waited carry no stamp.
+    second_confirmed_runs = 0
+    wait_cost_value: dict[str, float] = {}
+    wait_lapsed_members = 0
     for run in runs:
         by_status[run.status] = by_status.get(run.status, 0) + 1
+        if run.second_confirmed_at:
+            second_confirmed_runs += 1
+            wait_lapsed_members += len(run.four_eyes_wait_lapses)
+            if run.four_eyes_wait_cost:
+                wait_cost_value[run.currency] = round(
+                    wait_cost_value.get(run.currency, 0.0)
+                    + run.four_eyes_wait_cost,
+                    2,
+                )
         if run.handoff_drift:
             runs_with_drift += 1
             drift_members += len(run.handoff_drift)
@@ -611,6 +684,11 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
         },
         "forecast_accuracy": forecast_accuracy(runs),
         "creditor_completion": creditor_completion_metrics(runs),
+        "four_eyes_wait": {
+            "runs_second_confirmed": second_confirmed_runs,
+            "cost_by_currency": wait_cost_value,
+            "discounts_lapsed": wait_lapsed_members,
+        },
     }
 
 
