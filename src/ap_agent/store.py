@@ -25,7 +25,7 @@ import threading
 from dataclasses import dataclass, field
 
 from .config import env_str, load_dotenv
-from .schemas import AgentResult
+from .schemas import AgentResult, StatementReconciliation
 
 
 @dataclass
@@ -146,11 +146,27 @@ class InMemoryStore:
 
     def __init__(self) -> None:
         self._records: dict[str, ApprovalRecord] = {}
+        self._reconciliations: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
         with self._lock:
             self._records[record.result.invoice_id] = record
+
+    def save_reconciliation(self, report: StatementReconciliation) -> None:
+        with self._lock:
+            self._reconciliations[report.statement_id] = report.model_dump_json()
+
+    def get_reconciliation(
+        self, statement_id: str
+    ) -> StatementReconciliation | None:
+        with self._lock:
+            payload = self._reconciliations.get(statement_id)
+        return (
+            StatementReconciliation.model_validate_json(payload)
+            if payload
+            else None
+        )
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -242,6 +258,41 @@ class PostgresStore:
 
     def list_records(self) -> list[ApprovalRecord]:
         return [_load_record(payload) for payload in self._all_payloads()]
+
+    def save_reconciliation(self, report: StatementReconciliation) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO reconciliations "
+                    "(statement_id, payload, confirmed, updated_at) "
+                    "VALUES (%s, %s::jsonb, %s, now()) "
+                    "ON CONFLICT (statement_id) DO UPDATE SET "
+                    "payload = EXCLUDED.payload, "
+                    "confirmed = EXCLUDED.confirmed, updated_at = now()",
+                    (
+                        report.statement_id,
+                        report.model_dump_json(),
+                        report.confirmed_by is not None,
+                    ),
+                )
+            conn.commit()
+
+    def get_reconciliation(
+        self, statement_id: str
+    ) -> StatementReconciliation | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT payload FROM reconciliations WHERE statement_id = %s",
+                    (statement_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        payload = row["payload"]
+        return StatementReconciliation.model_validate(
+            json.loads(payload) if isinstance(payload, str) else payload
+        )
 
     def _all_payloads(self) -> list:
         with self._connect() as conn:

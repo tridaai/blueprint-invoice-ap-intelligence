@@ -56,6 +56,7 @@ if TYPE_CHECKING:  # annotation-only imports (no runtime cycles)
         RetrievedPolicy,
         VisionResult,
     )
+    from .schemas import StatementReconciliation
     from .store import ApprovalRecord
 
 
@@ -105,6 +106,12 @@ class Store(Protocol):
     def get(self, invoice_id: str) -> "ApprovalRecord | None": ...
 
     def list_records(self) -> list["ApprovalRecord"]: ...
+
+    def save_reconciliation(self, report: "StatementReconciliation") -> None: ...
+
+    def get_reconciliation(
+        self, statement_id: str
+    ) -> "StatementReconciliation | None": ...
 
     def prior_invoices(self, exclude_invoice_id: str | None = None) -> list[dict]: ...
 

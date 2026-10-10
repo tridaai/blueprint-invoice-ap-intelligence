@@ -515,6 +515,67 @@ class CreditNoteMatch(BaseModel):
     note: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Supplier statements (reconciled against the processed invoices)
+# ---------------------------------------------------------------------------
+
+class StatementLine(BaseModel):
+    invoice_number: str
+    amount: Optional[float] = None
+    date: str = ""
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _num_opt(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        return _to_float(v)
+
+
+class SupplierStatement(BaseModel):
+    """A supplier's statement of account: the invoices they believe
+    are open. Reconciliation compares it against what AP processed —
+    report only; it changes no invoice's state."""
+
+    statement_id: str
+    supplier_name: str = ""
+    statement_date: str = ""
+    currency: str = "USD"
+    lines: list[StatementLine] = Field(default_factory=list)
+
+
+class StatementLineResult(BaseModel):
+    invoice_number: str
+    status: str = "missing_from_ap"  # matched | amount_differs | missing_from_ap
+    statement_amount: Optional[float] = None
+    ap_amount: Optional[float] = None
+    ap_invoice_id: str = ""
+    difference: Optional[float] = None  # statement - AP, when both known
+
+
+class StatementReconciliation(BaseModel):
+    """The reconciliation report: line-by-line outcome, the invoices
+    AP processed that the statement omits, totals, and the drafted
+    summary a human confirms."""
+
+    statement_id: str
+    supplier_name: str = ""
+    statement_date: str = ""
+    currency: str = "USD"
+    lines: list[StatementLineResult] = Field(default_factory=list)
+    missing_from_statement: list[dict] = Field(default_factory=list)
+    matched_count: int = 0
+    differs_count: int = 0
+    missing_from_ap_count: int = 0
+    missing_from_statement_count: int = 0
+    statement_total: float = 0.0
+    ap_total: float = 0.0
+    summary: str = ""
+    summary_source: str = "template"  # the deterministic composer; never an LLM figure
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+
+
 class AnalyzeRequest(BaseModel):
     invoice: InvoiceInput
 

@@ -27,18 +27,27 @@ from __future__ import annotations
 import json
 import threading
 import urllib.request
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .checkpoints import get_checkpointer
 from .config import env_float, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
+from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
 from .model_backends import ModelBackend, get_backend
 from .ocr import get_ocr_engine
 from .ports import Checkpointer, DocVision, EventSink, OcrEngine
 from .retriever import Retriever, get_retriever
-from .schemas import AgentResult, CreditNoteInput, CreditNoteMatch, InvoiceInput
+from .schemas import (
+    AgentResult,
+    CreditNoteInput,
+    CreditNoteMatch,
+    InvoiceInput,
+    StatementReconciliation,
+    SupplierStatement,
+)
 from .store import ApprovalRecord, default_store, find_duplicate, supplier_summary
 from .vision import get_vision_engine
 
@@ -440,3 +449,55 @@ class InvoiceService:
             else CreditNoteInput.model_validate(note)
         )
         return evaluate_credit_note(model, self._get_store().list_records())
+
+    def reconcile_statement(
+        self, statement: SupplierStatement | dict
+    ) -> StatementReconciliation:
+        """Reconcile a supplier statement against the processed
+        invoices and store the report for confirmation.
+
+        The comparison itself is computed in ``reconciliation.py``
+        over the store's history projection. The report is stored so
+        a human can confirm it later; reconciliation writes nothing
+        to any invoice record.
+        """
+        model = (
+            statement
+            if isinstance(statement, SupplierStatement)
+            else SupplierStatement.model_validate(statement)
+        )
+        history = self._get_store().prior_invoices(exclude_invoice_id="")
+        report = _reconcile(model, history)
+        self._get_store().save_reconciliation(report)
+        return report
+
+    def get_reconciliation(
+        self, statement_id: str
+    ) -> StatementReconciliation | None:
+        return self._get_store().get_reconciliation(statement_id)
+
+    def confirm_reconciliation(
+        self, statement_id: str, actor: str
+    ) -> StatementReconciliation:
+        """Record a human's confirmation of a reconciliation report.
+
+        Confirmation touches the report record only — the invoices it
+        describes keep whatever state their own gate decisions gave
+        them."""
+        store = self._get_store()
+        report = store.get_reconciliation(statement_id)
+        if report is None:
+            raise KeyError(
+                f"Unknown statement_id: {statement_id} (reconcile it first)"
+            )
+        if report.confirmed_by:
+            raise ValueError(
+                f"Statement {statement_id} was already confirmed by "
+                f"{report.confirmed_by}"
+            )
+        report.confirmed_by = actor
+        report.confirmed_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        store.save_reconciliation(report)
+        return report

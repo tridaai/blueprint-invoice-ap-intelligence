@@ -34,7 +34,15 @@ from .events import CallbackSink, RunEvent
 from .logging_config import configure_logging, new_request_id, request_id_var
 from .policies_data import POLICIES
 from .samples import load_sample_invoices
-from .schemas import AgentResult, CreditNoteInput, CreditNoteMatch, DecisionRequest, InvoiceInput
+from .schemas import (
+    AgentResult,
+    CreditNoteInput,
+    CreditNoteMatch,
+    DecisionRequest,
+    InvoiceInput,
+    StatementReconciliation,
+    SupplierStatement,
+)
 from .service import InvoiceService
 from .wiring import build_service_from_env
 
@@ -261,6 +269,33 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         it settle a variance the pipeline computed? Report only — the
         call changes no invoice's state."""
         return svc.match_credit_note(note)
+
+    @app.post("/statements/reconcile", response_model=StatementReconciliation, dependencies=_AUTH)
+    def reconcile(statement: SupplierStatement) -> StatementReconciliation:
+        """Reconcile a supplier statement against the processed
+        invoices. The report is stored for confirmation; no invoice
+        record changes."""
+        return svc.reconcile_statement(statement)
+
+    @app.get("/statements/{statement_id}", response_model=StatementReconciliation, dependencies=_AUTH)
+    def get_reconciliation(statement_id: str) -> StatementReconciliation:
+        report = svc.get_reconciliation(statement_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="Statement not reconciled yet.")
+        return report
+
+    @app.post("/statements/{statement_id}/confirm", response_model=StatementReconciliation, dependencies=_AUTH)
+    def confirm_reconciliation(statement_id: str, request: DecisionRequest) -> StatementReconciliation:
+        """Record the human confirmation of a reconciliation report
+        (the report record only — never an invoice)."""
+        try:
+            return svc.confirm_reconciliation(
+                statement_id, actor=_decision_actor(request)
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/invoices/{invoice_id}", response_model=AgentResult, dependencies=_AUTH)
     def get_result(invoice_id: str) -> AgentResult:
