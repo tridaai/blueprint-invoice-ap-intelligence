@@ -228,10 +228,31 @@ async function loadQueue() {
 
 function renderRuns(runs) {
   $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
-    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b> · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || ""), "ok") : pill("proposed", "info")} ${run.status !== "confirmed" ? `<button class="secondary" data-confirm="${esc(run.run_id)}">Confirm run</button>` : ""}</p>
+    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b> · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || ""), "ok") : pill("proposed", "info")} ${run.status !== "confirmed" ? `<button class="secondary" data-confirm="${esc(run.run_id)}">Confirm run</button>` : run.handoff_key ? `<span class="note">hand-off: ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…</span> <button class="secondary" data-download="${esc(run.run_id)}">Download CSV</button>` : ` <button class="secondary" data-handoff="${esc(run.run_id)}">Generate hand-off file</button>`}</p>
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
+  document.querySelectorAll("[data-handoff]").forEach(btn => btn.onclick = () => exportHandoff(btn.dataset.handoff));
+  document.querySelectorAll("[data-download]").forEach(btn => btn.onclick = () => downloadHandoff(btn.dataset.download));
+}
+async function exportHandoff(runId) {
+  const actor = $("lead").value.trim();
+  if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — hand-off generation is attributable."; return; }
+  const res = await fetch(`/payment-runs/${runId}/handoff`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("paynote").textContent = `Hand-off refused (${res.status}): ${body.detail || ""}`; return; }
+  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.`;
+  loadRuns();
+}
+async function downloadHandoff(runId) {
+  const res = await fetch(`/payment-runs/${runId}/handoff`, {headers: headers()});
+  if (!res.ok) { $("paynote").textContent = `Download failed (${res.status}).`; return; }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${runId}-handoff.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 async function loadRuns() {
   const res = await fetch("/payment-runs", {headers: headers()});

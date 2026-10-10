@@ -391,6 +391,39 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/payment-runs/{run_id}/handoff", response_model=PaymentRun, dependencies=_AUTH)
+    def export_payment_run_handoff(run_id: str, request: DecisionRequest) -> PaymentRun:
+        """Generate the confirmed run's bank-ready hand-off file
+        (CSV, layout in handoff.py) into object storage. The run
+        gains the export receipt (object key + content hash);
+        generating the file changes no payment state."""
+        try:
+            return svc.export_payment_run_handoff(
+                run_id, actor=_decision_actor(request)
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/payment-runs/{run_id}/handoff", dependencies=_AUTH)
+    def download_payment_run_handoff(run_id: str) -> PlainTextResponse:
+        """Download the stored hand-off CSV. 404 until a hand-off
+        has been generated for the run."""
+        data = svc.get_payment_run_handoff(run_id)
+        if data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No hand-off file generated for this run yet.",
+            )
+        return PlainTextResponse(
+            data.decode("utf-8"),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={run_id}-handoff.csv"
+            },
+        )
+
     @app.get("/invoices/{invoice_id}", response_model=AgentResult, dependencies=_AUTH)
     def get_result(invoice_id: str) -> AgentResult:
         result = svc.get(invoice_id)

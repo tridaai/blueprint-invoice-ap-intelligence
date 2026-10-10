@@ -655,6 +655,16 @@ class PaymentRun(BaseModel):
     confirmed_by: Optional[str] = None
     confirmed_at: Optional[str] = None
     note: str = ""
+    # The execution hand-off: the confirmed run rendered as a
+    # bank-ready CSV and stored through the object-store port. The
+    # file is the routing adapter to the customer's banking / ERP
+    # system — generating it changes no payment state. These fields
+    # are the export's receipt: where the file lives, who generated
+    # it, and the sha256 of the exact bytes stored.
+    handoff_key: Optional[str] = None
+    handoff_sha256: Optional[str] = None
+    handoff_generated_at: Optional[str] = None
+    handoff_generated_by: Optional[str] = None
 
 
 class PaymentRunRequest(BaseModel):

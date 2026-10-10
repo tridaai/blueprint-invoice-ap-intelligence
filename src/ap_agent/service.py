@@ -822,6 +822,69 @@ class InvoiceService:
         store.save_payment_run(run)
         return run
 
+    def export_payment_run_handoff(self, run_id: str, actor: str) -> PaymentRun:
+        """Render a confirmed run's hand-off file and store it
+        through the object-store port.
+
+        The file (``handoff.py``, layout v1) is the routing adapter
+        to the customer's banking/ERP system. Generating it changes
+        no payment state — the run stays confirmed, its invoices
+        stay approved; the run record gains only the export receipt
+        (object key + sha256 of the stored bytes). Re-exporting
+        renders the same bytes and refreshes the receipt.
+        """
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        if run.status != "confirmed":
+            raise ValueError(
+                f"Payment run {run_id} is {run.status} — only a confirmed "
+                "run is handed off; confirm it first"
+            )
+        object_store = self.object_store
+        if object_store is None:
+            from .storage import get_object_store
+
+            object_store = get_object_store()
+        if object_store is None:
+            raise ValueError(
+                "Object storage is not configured (set S3_BUCKET, or "
+                "inject an object store): the hand-off file has nowhere "
+                "to live"
+            )
+        from .handoff import handoff_key, render_handoff_csv
+
+        data = render_handoff_csv(run)
+        key = handoff_key(run.run_id)
+        object_store.put(key, data, content_type="text/csv")
+        run.handoff_key = key
+        run.handoff_sha256 = hashlib.sha256(data).hexdigest()
+        run.handoff_generated_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        run.handoff_generated_by = actor
+        store.save_payment_run(run)
+        return run
+
+    def get_payment_run_handoff(self, run_id: str) -> bytes | None:
+        """The stored hand-off bytes for a run, or None when no
+        hand-off has been generated (or the object is gone)."""
+        run = self._get_store().get_payment_run(run_id)
+        if run is None or not run.handoff_key:
+            return None
+        object_store = self.object_store
+        if object_store is None:
+            from .storage import get_object_store
+
+            object_store = get_object_store()
+        if object_store is None:
+            return None
+        try:
+            return object_store.get(run.handoff_key)
+        except Exception:
+            return None
+
     def confirm_reconciliation(
         self, statement_id: str, actor: str
     ) -> StatementReconciliation:
