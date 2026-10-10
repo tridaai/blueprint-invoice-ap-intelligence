@@ -39,6 +39,7 @@ from .samples import load_sample_invoices
 from .schemas import (
     AgentResult,
     BundleResult,
+    ApprovedNotPostedReport,
     CreditNoteInput,
     CreditNoteMatch,
     DecisionRequest,
@@ -364,6 +365,18 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         by due date (overdue first), with the triage mix. Read-only.
         ``as_of`` (ISO date) anchors the aging; default today."""
         return svc.queue_view(as_of=as_of)
+
+    @app.get("/reconciliation/approved-not-posted", response_model=ApprovedNotPostedReport, dependencies=_AUTH)
+    def approved_not_posted(as_of: str = Query(default=""), grace_days: int | None = Query(default=None)) -> ApprovedNotPostedReport:
+        """The ERP loop's open items: approved invoices with no
+        posted receipt after the grace window
+        (POSTING_RECEIPT_GRACE_DAYS, default 7; ``grace_days``
+        overrides for one call). Read-only — ``as_of`` (ISO date)
+        anchors the aging; default today."""
+        try:
+            return svc.approved_not_posted_report(as_of=as_of, grace_days=grace_days)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/payment-runs/propose", response_model=list[PaymentRun], dependencies=_AUTH)
     def propose_payment_runs(request: PaymentRunRequest) -> list[PaymentRun]:

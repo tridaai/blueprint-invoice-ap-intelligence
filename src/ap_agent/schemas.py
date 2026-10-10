@@ -463,6 +463,7 @@ class AgentResult(BaseModel):
     trace: list[TraceStep] = Field(default_factory=list)
     decision: Optional[str] = None  # approved | rejected
     decided_by: Optional[str] = None
+    decided_at: Optional[str] = None  # ISO timestamp of the gate decision
     decision_reason: Optional[str] = None
     dispatch_status: Optional[str] = None  # sent | failed | None
     posting_receipt: Optional["PostingReceipt"] = None
@@ -507,6 +508,39 @@ class PostingReceiptRequest(BaseModel):
 
     def actor_name(self) -> Optional[str]:
         return self.actor or self.approver or self.reviewer
+
+
+class OpenPostingItem(BaseModel):
+    """One approved invoice the ERP loop still owes an answer for:
+    approved longer ago than the grace window, with no posted
+    receipt recorded — either no receipt at all, or a failed one
+    nobody has superseded with a successful posting."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    total_amount: Optional[float] = None
+    currency: str = "USD"
+    decided_by: str = ""
+    decided_at: str = ""
+    age_days: Optional[int] = None  # since the approval (see age_basis)
+    age_basis: str = ""  # decision | submission | invoice_date
+    receipt_state: str = "none"  # none | failed
+    receipt_detail: str = ""  # the ERP's failure reason, when failed
+
+
+class ApprovedNotPostedReport(BaseModel):
+    """The ERP loop's open items: approved invoices with no posted
+    receipt after the grace window (``POSTING_RECEIPT_GRACE_DAYS``).
+    A read model over the store — it posts nothing and chases
+    nothing; it makes the loop's open ends as visible as the
+    approver queue's."""
+
+    as_of: str = ""
+    grace_days: int = 7
+    count: int = 0
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    items: list[OpenPostingItem] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

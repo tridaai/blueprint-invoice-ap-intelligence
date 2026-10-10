@@ -55,6 +55,7 @@ from .ports import Checkpointer, DocVision, EventSink, OcrEngine
 from .retriever import Retriever, get_retriever
 from .schemas import (
     AgentResult,
+    ApprovedNotPostedReport,
     BundleInvoiceOutcome,
     BundleResult,
     CreditNoteInput,
@@ -149,6 +150,23 @@ def master_change_expiry_days() -> int:
     load_dotenv()
     return max(
         1, env_int("MASTER_CHANGE_EXPIRY_DAYS", MASTER_CHANGE_EXPIRY_DEFAULT_DAYS)
+    )
+
+
+# Default grace window for the posting-receipt loop: an approved
+# invoice with no posted receipt older than this is reported as an
+# open item (POSTING_RECEIPT_GRACE_DAYS overrides it).
+POSTING_RECEIPT_GRACE_DEFAULT_DAYS = 7
+
+
+def posting_receipt_grace_days() -> int:
+    """The configured grace window for posting receipts, in days."""
+    load_dotenv()
+    return max(
+        0,
+        env_int(
+            "POSTING_RECEIPT_GRACE_DAYS", POSTING_RECEIPT_GRACE_DEFAULT_DAYS
+        ),
     )
 
 
@@ -513,6 +531,9 @@ class InvoiceService:
         record.result.status = "approved"
         record.result.decision = "approved"
         record.result.decided_by = approver
+        record.result.decided_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         record.result.decision_reason = reason or None
         # Output routing: by default there is NO external action. When
         # the operator configures ACTION_WEBHOOK_URL, the approved
@@ -548,6 +569,9 @@ class InvoiceService:
         record.result.status = "rejected"
         record.result.decision = "rejected"
         record.result.decided_by = reviewer
+        record.result.decided_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         record.result.decision_reason = reason or None
         record.result.external_action_taken = False
         store.save(record)
@@ -643,6 +667,28 @@ class InvoiceService:
         record = self._get_store().get(invoice_id)
         return record.result if record else None
 
+    def approved_not_posted_report(
+        self, as_of: str = "", grace_days: int | None = None
+    ) -> ApprovedNotPostedReport:
+        """The ERP loop's open items: approved invoices with no
+        posted receipt after the grace window
+        (``POSTING_RECEIPT_GRACE_DAYS``, default 7; ``grace_days``
+        overrides for one call). A pure read over the store — it
+        posts and chases nothing; see ``posting.py``."""
+        from .posting import approved_not_posted
+
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        return approved_not_posted(
+            self._get_store().list_records(),
+            as_of=anchor,
+            grace_days=(
+                posting_receipt_grace_days() if grace_days is None else grace_days
+            ),
+        )
+
     def metrics_snapshot(self) -> dict:
         """Operational metrics over the stored runs: volumes,
         outcomes, decisions, latency and model spend.
@@ -725,6 +771,10 @@ class InvoiceService:
                 "age_buckets": case_buckets,
             },
             "supplier_master": coverage,
+            "posting_open_items": {
+                "count": self.approved_not_posted_report().count,
+                "grace_days": posting_receipt_grace_days(),
+            },
         }
 
     def audit_rows(self) -> list[dict]:
