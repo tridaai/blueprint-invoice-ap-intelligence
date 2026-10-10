@@ -36,7 +36,10 @@ the illegible, never rewrites what the case already carries), and
 the new outcome supersedes the blocked one with the supersession
 recorded in the case's re-analysis chain. The stored invoice is
 never rewritten: original + recorded overlay is the re-run's input,
-reconstructible exactly.
+reconstructible exactly. And the chains are read back
+(:func:`reanalysis_analytics`): how often a completing reply
+actually moved its case, which transitions the replies bought,
+and which suppliers' replies most often change nothing.
 """
 
 from __future__ import annotations
@@ -429,3 +432,95 @@ def analyse_information_reply(
             "reply_recorded_by": recorded_by or request.reply_recorded_by,
         }
     )
+
+
+def reanalysis_analytics(records: list) -> dict:
+    """Read the re-analysis chains back: what the replies bought.
+
+    Every supersession a completing reply caused is recorded on
+    its case (``AgentResult.reanalysis_history``) — this is the
+    aggregate over that ledger. How many cases were re-run at
+    all, how many re-runs there were, and — the figure that
+    separates a reply that informed from a reply that merely
+    arrived — how often the re-run's outcome CHANGED against how
+    often it landed exactly where the blocked case already stood.
+    A same-outcome re-run is not a failure of the loop: it is
+    the supplier's claim tested and found wanting, and it is
+    counted as its own signal, per supplier (below).
+
+    The transitions name the movements (``previous->new``), the
+    overlay counts say which supplied item does the unblocking
+    (a case whose chain carries the PO twice counts it twice —
+    each loop's overlay is that loop's evidence), and the two
+    histograms keep the loop's shape honest: how many loops a
+    case needed, and how many overlay components it accumulated
+    across them. ``suppliers_not_unblocked`` names the suppliers
+    whose replies most often fail to move the case — the reply
+    landed, the re-run ran, the outcome stood — worst first,
+    capped at five; a supplier whose replies always move the
+    case never appears. Pure over the records.
+    """
+    cases = 0
+    entries_total = 0
+    changed = 0
+    unchanged = 0
+    transitions: dict[str, int] = {}
+    overlay_items: dict[str, int] = {}
+    loops_per_case: dict[str, int] = {}
+    overlays_per_case: dict[str, int] = {}
+    supplier_rows: dict[str, dict] = {}
+
+    def _bucket(histogram: dict[str, int], count: int) -> None:
+        key = str(count) if count < 3 else "3+"
+        histogram[key] = histogram.get(key, 0) + 1
+
+    for record in records:
+        result = record.result
+        chain = result.reanalysis_history
+        if not chain:
+            continue
+        cases += 1
+        _bucket(loops_per_case, len(chain))
+        _bucket(overlays_per_case, sum(len(entry.overlay) for entry in chain))
+        supplier = result.supplier_name or ""
+        for entry in chain:
+            entries_total += 1
+            transition = f"{entry.previous_outcome}->{entry.new_outcome}"
+            transitions[transition] = transitions.get(transition, 0) + 1
+            for key in entry.overlay:
+                overlay_items[key] = overlay_items.get(key, 0) + 1
+            row = supplier_rows.setdefault(
+                supplier, {"reanalyses": 0, "unchanged": 0}
+            )
+            row["reanalyses"] += 1
+            if entry.previous_outcome == entry.new_outcome:
+                unchanged += 1
+                row["unchanged"] += 1
+            else:
+                changed += 1
+    not_unblocked = [
+        {
+            "supplier_name": supplier,
+            "reanalyses": row["reanalyses"],
+            "unchanged": row["unchanged"],
+        }
+        for supplier, row in supplier_rows.items()
+        if row["unchanged"] > 0
+    ]
+    not_unblocked.sort(
+        key=lambda row: (-row["unchanged"], -row["reanalyses"], row["supplier_name"])
+    )
+    return {
+        "cases_reanalysed": cases,
+        "reanalyses": entries_total,
+        "outcomes_changed": changed,
+        "outcomes_unchanged": unchanged,
+        "change_rate": (
+            round(changed / entries_total, 4) if entries_total else None
+        ),
+        "transitions": dict(sorted(transitions.items())),
+        "overlay_items": dict(sorted(overlay_items.items())),
+        "loops_per_case": dict(sorted(loops_per_case.items())),
+        "overlays_per_case": dict(sorted(overlays_per_case.items())),
+        "suppliers_not_unblocked": not_unblocked[:5],
+    }

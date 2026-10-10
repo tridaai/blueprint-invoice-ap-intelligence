@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 from .bundles import segment_bundle
 from .checkpoints import get_checkpointer
+from .clarify import reanalysis_analytics
 from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
@@ -1463,6 +1464,12 @@ class InvoiceService:
                     len(r.result.information_escalations) for r in records
                 ),
             },
+            # The re-analysis chains, read back: how often a
+            # completing reply actually moved the case it blocked,
+            # which outcome transitions the replies bought, which
+            # overlay item does the unblocking — and the suppliers
+            # whose replies most often change nothing.
+            "reanalysis": reanalysis_analytics(records),
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
             "handoff_profiles": _handoff_profile_summary(
                 self._get_store().list_handoff_profiles()
