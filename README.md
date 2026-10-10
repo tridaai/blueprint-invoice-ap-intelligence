@@ -115,6 +115,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 63. **The forecast's lag statistic learns from the accuracy ledger** — the drift forecast projected every run from the global mean proposal→export lag, a pool that mixes unlike work: a slow currency or a lead-day-stretched profile has a lag of its own, and the mean understates exactly the runs most likely to drift. Lag statistics are now segmented (global / per currency / per governing profile), each candidate is graded by replaying its flag rule against the recorded export outcomes leave-one-out, and confirmation selects the statistic with the best recorded recall — the basis naming the statistic and why. `/metrics` carries the segments and the grades beside the forecast's own report card.
 64. **Rejected master changes can be re-proposed, answering the refusal** — a rejection used to be a dead end with a note on it. A rejected change can now be re-proposed with the refusal carried into the new attempt: the decider, the decision note, and the proposer's response ride in the new proposal's reason, the lineage is linked (`reproposes`), and the response is required — a re-proposal that answers nothing is a resubmission. The evidence is re-verified, not copied: a document-sourced original is re-derived from the stored invoice against the current master, so a master that moved since the refusal is what the second attempt overlays. Four-eyes is untouched, and the onboarding worklist names the lineage on the in-flight row.
 61. **A judge budget a reasoning model can think in** — the LLM pack's judge lost 4 of 6 live verdicts to "reply was not a JSON object": a reasoning judge spends its completion budget thinking before the verdict exists, and 300 tokens ran out mid-thought. The judge budget is now its own — `JUDGE_MAX_TOKENS` (default 2000) or `--judge-max-tokens` — and is recorded in `llm_results.json`, so a harness failure can never again masquerade as a drafting score.
+65. **Budgets in force, on the record** — round 15 made every completion budget env-tunable, but nothing on a run said which budgets it ran with: a starved-reply post-mortem had to re-derive them from the code and the environment the run happened to start in. Run telemetry now stamps the resolved budgets per call site — the provider-call registry plus the OCR and vision ports, env overrides included — the console's telemetry line shows them, and the LLM eval pack records the same stamp beside the judge budget.
+66. **The clarification loop closes** — the information request was policed outbound, but its answer had no inbound path: a supplier's reply lived in someone's inbox, re-linked to the case by memory, and an unanswered request aged invisibly. A reply is now recorded against the open request (which items it supplied, when it arrived, a note, the recording operator) and analysed in code — answered, partially answered with the still-missing items named, or still awaiting — with replies accumulating across answers. An unclosed wait past `INFORMATION_WAIT_AGING_DAYS` (default 3) joins the approver queue like the other stalls; a partial reply restarts the clock from the day it landed.
+67. **Lag grades, watched for decay** — the forecast's selection trusted one pooled grade per lag statistic, and a pooled number dilutes decay: a segment that caught every lapse for a quarter can start missing them and keep its crown for months. The grades are now windowed by export order — recent recall against the earlier record over the same leave-one-out replay — and a statistic whose recent recall falls 0.25 or more below its record is named degrading in `/metrics` and demoted in the selection: the forecast falls to the best standing graded candidate, or the most specific measured segment when none stands, with the demotion in the basis. Thin windows are reported unassessed, never dressed up as stable.
+68. **Twin clusters get a hand-off** — escalation put the cluster on the worklist as one case, but working it still meant deciding record by record. The cluster is now handed off whole: approve every waiting member through the cluster (each via the standard approval path — a guardrail-blocked member is refused by name in the report, never waved through by the bulk act), or split the cluster with a named reason when the grouping itself is wrong. A reason is required either way, and the act is stamped on every member's record with that member's own outcome — the cluster's history reads member by member, and a decided or dissolved cluster leaves the queue.
 
 ## Quickstart
 
@@ -145,7 +149,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 494 tests
+make test        # 519 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -216,7 +220,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            494 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            519 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -224,7 +228,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 494 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 519 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
