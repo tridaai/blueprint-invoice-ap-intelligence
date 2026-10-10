@@ -110,6 +110,10 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 58. **The duplicate screen, moved into the pipeline** — a live judged slice scored the INV-1004 resend as a clean match: the AP-DUP-01 screen existed only because the service computed the verdict over the store and passed it in, and the LLM eval pack called `run_invoice` directly, with no store — the screen never ran. The pipeline now computes the verdict itself from whatever priors it is handed (a caller-supplied verdict is discarded when priors ride along), and the LLM pack runs its cases through one shared service in file order, the production path. A deterministic control that depends on the caller remembering to invoke it is not a control.
 59. **Outcome claims trace like figures** — the same live judge caught a letter claiming "received and matched" over a partial quantity-variance match. The subject's claim is now composed from the computed outcome in the template drafter and the provider fallback alike (an unknown outcome defaults to "under review", never "matched"), and a new guardrail — `outcome_claim_must_trace` — fails a draft whose claim exceeds the computed outcome: outcome claims require a `clean_match` outcome, the match claim requires a `full_match` status, so a duplicate may state its full match but never a clean outcome. The repair directive teaches the fix by name; the catch is reproduced with a stub and repaired end-to-end.
 60. **Twin clusters escalate into the queue** — the twin graph was audit-only; the approver works the queue. A cluster now joins the worklist as one case, its graph attached (members + screened edges), when any trigger fires: size (`TWIN_CLUSTER_MIN_SIZE`, default 3), combined value in a single currency (`TWIN_CLUSTER_VALUE_THRESHOLD`, default 10000), or an approved twin spanning a waiting one — the double-payment shape itself, which seats first in work order. Under every trigger a cluster stays audit-only.
+61. **Every completion budget, audited against reasoning models** — the live NVIDIA run proved the judge's lesson generalises: budgets set in the short-answer era (classification at 300, the vision verdict at 300) starve a reasoning model into empty or truncated replies that read as model failure. Every live-path budget — classify, extract, draft, diagnose, options, information request, verify, review, both tool loops, OCR, vision — is now sized to its reply shape and env-tunable (`LLM_*_MAX_TOKENS`, `OCR_MAX_TOKENS`, `VISION_MAX_TOKENS`), and the audit table (call / was / default now / why) is written down in the architecture doc.
+62. **The information request is policed like the drafts** — the missing-information letter composed supplier-facing text in a node the draft guardrails never saw: a provider could word it with a payment promise, an invented figure, or a "matched" claim about a case blocked precisely because it did not match. It now passes its own validation (identity, payment and bank language, promises, PII, figures tracing to the fact block, outcome claims tracing to the computed outcome, a stated next step), gets one repair recompose told the failed checks' fixes by name, and falls back to the template with the rejection on the record — the request states its provenance (`template` / `provider` / `provider_repaired` / `template_fallback`) and carries its validation.
+63. **The forecast's lag statistic learns from the accuracy ledger** — the drift forecast projected every run from the global mean proposal→export lag, a pool that mixes unlike work: a slow currency or a lead-day-stretched profile has a lag of its own, and the mean understates exactly the runs most likely to drift. Lag statistics are now segmented (global / per currency / per governing profile), each candidate is graded by replaying its flag rule against the recorded export outcomes leave-one-out, and confirmation selects the statistic with the best recorded recall — the basis naming the statistic and why. `/metrics` carries the segments and the grades beside the forecast's own report card.
+64. **Rejected master changes can be re-proposed, answering the refusal** — a rejection used to be a dead end with a note on it. A rejected change can now be re-proposed with the refusal carried into the new attempt: the decider, the decision note, and the proposer's response ride in the new proposal's reason, the lineage is linked (`reproposes`), and the response is required — a re-proposal that answers nothing is a resubmission. The evidence is re-verified, not copied: a document-sourced original is re-derived from the stored invoice against the current master, so a master that moved since the refusal is what the second attempt overlays. Four-eyes is untouched, and the onboarding worklist names the lineage on the in-flight row.
 61. **A judge budget a reasoning model can think in** — the LLM pack's judge lost 4 of 6 live verdicts to "reply was not a JSON object": a reasoning judge spends its completion budget thinking before the verdict exists, and 300 tokens ran out mid-thought. The judge budget is now its own — `JUDGE_MAX_TOKENS` (default 2000) or `--judge-max-tokens` — and is recorded in `llm_results.json`, so a harness failure can never again masquerade as a drafting score.
 
 ## Quickstart
@@ -141,7 +145,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 462 tests
+make test        # 494 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -212,7 +216,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            462 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            494 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -220,7 +224,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 462 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 494 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
