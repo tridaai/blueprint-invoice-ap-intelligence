@@ -61,6 +61,7 @@ def history_entry(record: ApprovalRecord) -> dict:
         "total_amount": sub.get("total_amount"),
         "outcome": result.triage.outcome,
         "severity": result.triage.severity,
+        "duplicate_of": result.facts.duplicate_of,
     }
 
 
@@ -93,16 +94,53 @@ def supplier_summary(priors: list[dict], supplier: str) -> dict:
     }
 
 
+def duplicate_key(supplier_name: str, invoice_number: str) -> tuple[str, str]:
+    """The canonical identity a duplicate is judged on.
+
+    The same invoice arrives in different shapes — a structured
+    portal submission, a segment cut out of a combined bundle scan,
+    a line on a supplier statement — and each shape writes the
+    identity slightly differently: supplier case and spacing vary,
+    and invoice numbers pick up or lose their separators
+    (``NB-4471`` vs ``NB 4471`` vs ``nb4471``). Judging duplicates
+    on the raw strings would make the control depend on the arrival
+    shape, so both sides are reduced to a canonical key first:
+    the supplier name casefolded, punctuation dropped and
+    whitespace collapsed (``Acme, Inc.`` and ``Acme Inc`` are the
+    same supplier), the invoice number reduced to its uppercased
+    alphanumerics. The screen only ever flags for a human — a
+    generous key costs a glance, a strict one costs a double
+    payment."""
+    supplier = " ".join(
+        "".join(
+            ch if ch.isalnum() else " " for ch in str(supplier_name or "").casefold()
+        ).split()
+    )
+    number = "".join(
+        ch for ch in str(invoice_number or "").upper() if ch.isalnum()
+    )
+    return supplier, number
+
+
 def find_duplicate(priors: list[dict], invoice) -> str:
     """The invoice_id of a prior invoice that looks like a duplicate
     of this one — same supplier, same supplier invoice number, same
-    total (AP-DUP-01) — or "" when none matches."""
+    total (AP-DUP-01) — or "" when none matches. The identity is
+    compared on :func:`duplicate_key`, so a resend that arrives in
+    a different shape (a bundle segment after the portal single, or
+    the reverse) is still caught, with the earlier record as the
+    twin."""
     if not invoice.invoice_number:
+        return ""
+    key = duplicate_key(invoice.supplier_name, invoice.invoice_number)
+    if not key[1]:
         return ""
     for entry in priors:
         if (
-            entry.get("supplier_name") == invoice.supplier_name
-            and entry.get("invoice_number") == invoice.invoice_number
+            duplicate_key(
+                str(entry.get("supplier_name", "")), str(entry.get("invoice_number", ""))
+            )
+            == key
             and invoice.total_amount is not None
             and entry.get("total_amount") is not None
             and abs(float(entry["total_amount"]) - float(invoice.total_amount)) < 0.005
