@@ -626,6 +626,14 @@ class StatementLineResult(BaseModel):
     ap_amount: Optional[float] = None
     ap_invoice_id: str = ""
     difference: Optional[float] = None  # statement - AP, when both known
+    # Duplicate screening (round 7): a statement line is also where a
+    # duplicate payment hides — the supplier bills twice for an
+    # invoice AP already processed twice, or lists the same number
+    # twice. The flag rides alongside the match status: the line
+    # still matched, but paying it again is the risk being named.
+    duplicate_suspected: bool = False
+    duplicate_invoice_id: str = ""  # the second processed record, when AP holds one
+    duplicate_of: str = ""  # the original, when the matched record is itself the duplicate
 
 
 class StatementReconciliation(BaseModel):
@@ -643,6 +651,7 @@ class StatementReconciliation(BaseModel):
     differs_count: int = 0
     missing_from_ap_count: int = 0
     missing_from_statement_count: int = 0
+    duplicate_count: int = 0  # lines flagged by the duplicate screen
     statement_total: float = 0.0
     ap_total: float = 0.0
     summary: str = ""

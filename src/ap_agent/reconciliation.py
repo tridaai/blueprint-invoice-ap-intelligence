@@ -11,13 +11,25 @@ the two up by supplier invoice number and classifies every line:
 - ``missing_from_statement`` — AP processed it; the supplier does not
   list it (already paid, credited, or the statement is stale).
 
+Lines are also **duplicate-screened**: a statement is a classic
+duplicate-payment path, so a line is flagged when AP holds two
+records for its number (an original and its resend — whichever
+shape each arrived in), when the matched record is itself a
+suspected duplicate, or when the statement lists the same number
+twice. The flag rides alongside the match status and names the
+twin records; the recovery path for the underlying pair is the
+same one the invoice gate uses.
+
 The comparison is arithmetic over stored history entries — the model
-computes none of it. The summary prose is composed deterministically
-from the computed lines (``summary_source: template``): in this
-surface the agent drafts nothing free-form, because a reconciliation
-summary that invents a figure is worse than a plain one. A human
-confirms the report (service layer); confirming changes the report
-record only — never an invoice.
+computes none of it. Numbers are matched on the store's canonical
+duplicate key, so a number the statement writes as ``NB 4471``
+still lines up with the ``NB-4471`` AP processed. The summary prose
+is composed deterministically from the computed lines
+(``summary_source: template``): in this surface the agent drafts
+nothing free-form, because a reconciliation summary that invents a
+figure is worse than a plain one. A human confirms the report
+(service layer); confirming changes the report record only — never
+an invoice.
 """
 
 from __future__ import annotations
@@ -27,6 +39,7 @@ from .schemas import (
     StatementReconciliation,
     SupplierStatement,
 )
+from .store import duplicate_key
 
 _AMOUNT_TOLERANCE = 0.01
 
@@ -42,21 +55,27 @@ def reconcile_statement(
         if not statement.supplier_name
         or e.get("supplier_name") == statement.supplier_name
     ]
-    by_number: dict[str, dict] = {}
+    by_number: dict[str, list[dict]] = {}
     for entry in entries:
         number = entry.get("invoice_number") or ""
-        if number and number not in by_number:
-            by_number[number] = entry
+        if number:
+            key = duplicate_key(
+                str(entry.get("supplier_name", "")), number
+            )[1]
+            by_number.setdefault(key, []).append(entry)
 
     lines: list[StatementLineResult] = []
-    matched = differs = missing_ap = 0
+    matched = differs = missing_ap = duplicates = 0
     statement_total = 0.0
     seen_numbers: set[str] = set()
     for line in statement.lines:
-        seen_numbers.add(line.invoice_number)
+        key = duplicate_key(statement.supplier_name, line.invoice_number)[1]
+        repeated = key in seen_numbers and bool(key)
+        seen_numbers.add(key)
         if line.amount is not None:
             statement_total += float(line.amount)
-        entry = by_number.get(line.invoice_number)
+        group = by_number.get(key) or []
+        entry = group[0] if group else None
         if entry is None:
             missing_ap += 1
             lines.append(
@@ -77,6 +96,32 @@ def reconcile_statement(
         else:
             matched += 1
             status = "matched"
+        # Duplicate screening: the twin evidence rides on the line.
+        duplicate_suspected = False
+        duplicate_invoice_id = ""
+        duplicate_of = ""
+        if len(group) > 1:
+            twin = next(
+                (
+                    e
+                    for e in group[1:]
+                    if e.get("duplicate_of") or e.get("outcome") == "duplicate_suspected"
+                ),
+                group[1],
+            )
+            duplicate_suspected = True
+            duplicate_invoice_id = twin.get("invoice_id", "")
+            duplicate_of = entry.get("invoice_id", "")
+        elif entry.get("duplicate_of"):
+            duplicate_suspected = True
+            duplicate_invoice_id = entry.get("invoice_id", "")
+            duplicate_of = str(entry.get("duplicate_of"))
+        if repeated:
+            duplicate_suspected = True
+            if not duplicate_invoice_id:
+                duplicate_invoice_id = entry.get("invoice_id", "")
+        if duplicate_suspected:
+            duplicates += 1
         lines.append(
             StatementLineResult(
                 invoice_number=line.invoice_number,
@@ -85,6 +130,9 @@ def reconcile_statement(
                 ap_amount=float(ap_amount) if ap_amount is not None else None,
                 ap_invoice_id=entry.get("invoice_id", ""),
                 difference=difference,
+                duplicate_suspected=duplicate_suspected,
+                duplicate_invoice_id=duplicate_invoice_id,
+                duplicate_of=duplicate_of,
             )
         )
 
@@ -96,8 +144,9 @@ def reconcile_statement(
             "outcome": e.get("outcome", ""),
         }
         for e in entries
-        if (e.get("invoice_number") or "") not in seen_numbers
-        and e.get("invoice_number")
+        if e.get("invoice_number")
+        and duplicate_key(str(e.get("supplier_name", "")), e["invoice_number"])[1]
+        not in seen_numbers
     ]
     ap_total = round(
         sum(
@@ -119,6 +168,7 @@ def reconcile_statement(
         differs_count=differs,
         missing_from_ap_count=missing_ap,
         missing_from_statement_count=len(missing_from_statement),
+        duplicate_count=duplicates,
         statement_total=round(statement_total, 2),
         ap_total=ap_total,
     )
@@ -138,6 +188,12 @@ def _compose_summary(report: StatementReconciliation) -> str:
         f"amount, {report.missing_from_ap_count} are on the statement but "
         f"were never processed by AP, and {report.missing_from_statement_count} "
         "processed invoices do not appear on the statement."
+        + (
+            f" {report.duplicate_count} line(s) are flagged as suspected "
+            "duplicates."
+            if report.duplicate_count
+            else ""
+        )
     ]
     for line in report.lines:
         if line.status == "amount_differs":
@@ -150,6 +206,19 @@ def _compose_summary(report: StatementReconciliation) -> str:
                 f"{line.invoice_number}: on the statement at "
                 f"{(line.statement_amount or 0):.2f}, never processed by AP."
             )
+        if line.duplicate_suspected and line.duplicate_of:
+            parts.append(
+                f"{line.invoice_number}: AP holds two records for this "
+                f"invoice — {line.duplicate_invoice_id} is a suspected "
+                f"duplicate of {line.duplicate_of}; paying this line "
+                "again would pay it twice."
+            )
+        elif line.duplicate_suspected:
+            parts.append(
+                f"{line.invoice_number}: flagged as a suspected duplicate "
+                f"(see {line.duplicate_invoice_id or line.ap_invoice_id}) — "
+                "hold the line until the twin is resolved."
+            )
     for entry in report.missing_from_statement:
         parts.append(
             f"{entry['invoice_number']}: processed by AP "
@@ -160,6 +229,7 @@ def _compose_summary(report: StatementReconciliation) -> str:
         report.differs_count == 0
         and report.missing_from_ap_count == 0
         and report.missing_from_statement_count == 0
+        and report.duplicate_count == 0
     ):
         parts.append("No exceptions: the statement and AP's records agree.")
     return " ".join(parts)
