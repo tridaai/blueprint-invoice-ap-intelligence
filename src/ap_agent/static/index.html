@@ -336,6 +336,11 @@ async function loadQueue() {
     $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Escalated open postings</b> — approved but still unposted past the ${q.posting_escalation_days}-day escalation threshold</p>
     <table><tr><th>Invoice</th><th>Supplier</th><th>Amount</th><th>Approved by</th><th>Age</th><th>ERP receipt</th></tr>${postings.map(p => `<tr><td>${esc(p.invoice_id)}<br><span class="note">${esc(p.invoice_number || "")}</span></td><td>${esc(p.supplier_name)}</td><td>${esc(p.currency)} ${p.total_amount ?? "—"}</td><td>${esc(p.decided_by || "—")}</td><td>${pill((p.age_days ?? "—") + "d since approval", "bad")}</td><td>${p.receipt_state === "failed" ? pill("posting failed", "bad") + `<br><span class="note">${esc(p.receipt_detail || "")}</span>` : pill("no receipt", "warn")}</td></tr>`).join("")}</table>`;
   }
+  const foureyes = q.four_eyes_pending || [];
+  if (foureyes.length) {
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Four-eyes runs waiting</b> — confirmed once, hand-off locked, second confirmation past the ${q.four_eyes_aging_days}-day aging threshold. The second confirmer must be someone other than the first.</p>
+    <table><tr><th>Run</th><th>Net</th><th>First confirmer</th><th>Confirmed</th><th>Waiting</th></tr>${foureyes.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.currency)} ${r.total_net}</td><td>${esc(r.confirmed_by || "—")}</td><td>${esc((r.confirmed_at || "").slice(0, 10))}</td><td>${pill((r.age_days ?? "—") + "d waiting", "bad")}</td></tr>`).join("")}</table>`;
+  }
 }
 
 function runControls(run) {

@@ -30,6 +30,14 @@ when a receipt failed — one list for everything the building
 still owes an answer for. The service computes them through
 ``posting.approved_not_posted`` at the escalation threshold; this
 module only seats them in the view.
+
+**Four-eyes payment runs** age here too: a large run confirmed
+once is locked out of hand-off export until a second, different
+confirmer arrives, so past ``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``
+the wait joins the worklist as an action item — the run, its
+net total, how long it has waited, and the first confirmer's
+name (the person to nudge, and the one person who cannot be
+the second).
 """
 
 from __future__ import annotations
@@ -39,7 +47,9 @@ from typing import Iterable
 
 from .matching import _parse_date
 from .schemas import (
+    FourEyesAgingItem,
     OpenPostingItem,
+    PaymentRun,
     QueueItem,
     QueueView,
     RecoveryCaseAgingItem,
@@ -50,6 +60,7 @@ from .store import ApprovalRecord
 _SEVERITY_RANK = {"high": 0, "moderate": 1, "low": 2}
 
 DEFAULT_RECOVERY_SLA_DAYS = 14
+DEFAULT_FOUR_EYES_AGING_DAYS = 2
 
 
 def _age_bucket(age_days: int | None) -> str:
@@ -118,6 +129,47 @@ def recovery_case_aging(
     return items, buckets, breaches
 
 
+def four_eyes_aging(
+    runs: Iterable[PaymentRun],
+    *,
+    as_of: date,
+    aging_days: int = DEFAULT_FOUR_EYES_AGING_DAYS,
+) -> list[FourEyesAgingItem]:
+    """The four-eyes runs whose second confirmation is overdue:
+    confirmed once, stamped ``four_eyes_required``, no second
+    confirmer yet, and the first confirmation older than the
+    aging threshold. A run inside the threshold is a normal
+    in-flight wait, not a stall; a second-confirmed (or exported)
+    run is done waiting and drops out. Work order: the longest
+    wait first — it has the least discount headroom left.
+    """
+    items: list[FourEyesAgingItem] = []
+    for run in runs:
+        if run.status != "confirmed" or not run.four_eyes_required:
+            continue
+        if run.second_confirmed_by:
+            continue
+        confirmed = _parse_date(run.confirmed_at or "")
+        if confirmed is None:
+            continue
+        age_days = (as_of - confirmed).days
+        if age_days <= aging_days:
+            continue
+        items.append(
+            FourEyesAgingItem(
+                run_id=run.run_id,
+                currency=run.currency,
+                total_net=run.total_net,
+                four_eyes_threshold=run.four_eyes_threshold,
+                confirmed_by=run.confirmed_by or "",
+                confirmed_at=run.confirmed_at or "",
+                age_days=age_days,
+            )
+        )
+    items.sort(key=lambda item: (-(item.age_days or 0), item.run_id))
+    return items
+
+
 def _bucket(days_overdue: int | None, due: date | None, as_of: date) -> str:
     if due is None or days_overdue is None:
         return "no_due_date"
@@ -142,6 +194,8 @@ def build_queue(
     recovery_sla_days: int = DEFAULT_RECOVERY_SLA_DAYS,
     open_postings: Iterable[OpenPostingItem] = (),
     posting_escalation_days: int = 0,
+    payment_runs: Iterable[PaymentRun] = (),
+    four_eyes_aging_days: int = DEFAULT_FOUR_EYES_AGING_DAYS,
 ) -> QueueView:
     """The aging queue over the store's records, as of a date
     (today when not given — tests and API callers pass it
@@ -149,7 +203,9 @@ def build_queue(
     alongside the invoices (see :func:`recovery_case_aging`), and
     open postings past the escalation threshold ride along as
     action items, oldest first (``posting.approved_not_posted``
-    already orders them)."""
+    already orders them). Four-eyes runs whose second
+    confirmation has outlasted the aging threshold join them
+    (see :func:`four_eyes_aging`)."""
     as_of = as_of or date.today()
     items: list[QueueItem] = []
     triage_mix: dict[str, int] = {}
@@ -213,6 +269,9 @@ def build_queue(
         recovery_packs, as_of=as_of, sla_days=recovery_sla_days
     )
     posting_items = list(open_postings)
+    four_eyes_items = four_eyes_aging(
+        payment_runs, as_of=as_of, aging_days=four_eyes_aging_days
+    )
     return QueueView(
         as_of=as_of.isoformat(),
         count=len(items),
@@ -229,4 +288,7 @@ def build_queue(
         open_postings=posting_items,
         open_posting_count=len(posting_items),
         posting_escalation_days=posting_escalation_days,
+        four_eyes_pending=four_eyes_items,
+        four_eyes_pending_count=len(four_eyes_items),
+        four_eyes_aging_days=four_eyes_aging_days,
     )

@@ -994,6 +994,25 @@ class RecoveryCaseAgingItem(BaseModel):
     bucket: str = "unknown"  # age_0_7 | age_8_30 | age_30_plus | unknown
 
 
+class FourEyesAgingItem(BaseModel):
+    """One large payment run waiting on its second confirmer past
+    the aging threshold (``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``): the
+    run is confirmed once, its hand-off is locked, and the second
+    pair of eyes has not arrived. A queue-shaped stall — the run
+    cannot export, and its discounts age while it waits — so it
+    joins the approver's worklist as an action item, with the first
+    confirmer named: they are the person to nudge, and the record
+    of who is *not* allowed to be the second."""
+
+    run_id: str
+    currency: str = "USD"
+    total_net: float = 0.0
+    four_eyes_threshold: float = 0.0  # the gate the run was stamped against
+    confirmed_by: str = ""  # the first confirmer — named, on purpose
+    confirmed_at: str = ""  # ISO timestamp of the first confirmation
+    age_days: Optional[int] = None  # since the first confirmation
+
+
 class QueueView(BaseModel):
     """The aging queue: awaiting invoices, overdue first, with the
     triage mix — a pure read model over the store's records. Open
@@ -1019,6 +1038,14 @@ class QueueView(BaseModel):
     open_postings: list[OpenPostingItem] = Field(default_factory=list)
     open_posting_count: int = 0
     posting_escalation_days: int = 0
+    # Four-eyes runs awaiting their second confirmer past the
+    # aging threshold (PAYMENT_RUN_FOUR_EYES_AGING_DAYS): the run
+    # is locked out of hand-off export until a second, different
+    # confirmer arrives, so past the threshold the wait itself is
+    # the action item — first confirmer named.
+    four_eyes_pending: list[FourEyesAgingItem] = Field(default_factory=list)
+    four_eyes_pending_count: int = 0
+    four_eyes_aging_days: int = 0
 
 
 # ---------------------------------------------------------------------------

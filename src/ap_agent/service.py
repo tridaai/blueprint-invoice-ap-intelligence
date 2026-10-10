@@ -161,6 +161,28 @@ def payment_run_four_eyes_threshold_for(currency: str) -> float:
     )
 
 
+# Default aging threshold for a four-eyes run's second
+# confirmation: a confirmed-once run waiting longer than this for
+# its second confirmer joins the approver queue as an action item
+# (PAYMENT_RUN_FOUR_EYES_AGING_DAYS overrides it). Short on
+# purpose — the wait is pure stall: the run cannot export, and
+# its members' discount windows keep closing while it sits.
+PAYMENT_RUN_FOUR_EYES_AGING_DEFAULT_DAYS = 2
+
+
+def four_eyes_aging_days() -> int:
+    """The configured four-eyes aging threshold, in days since
+    the first confirmation."""
+    load_dotenv()
+    return max(
+        0,
+        env_int(
+            "PAYMENT_RUN_FOUR_EYES_AGING_DAYS",
+            PAYMENT_RUN_FOUR_EYES_AGING_DEFAULT_DAYS,
+        ),
+    )
+
+
 # Default recovery-case SLA: a case may sit in one status this many
 # days before the queue flags it as stuck (RECOVERY_CASE_SLA_DAYS
 # overrides it).
@@ -1606,10 +1628,13 @@ class InvoiceService:
         """The AP aging queue: invoices still at the gate, aged by
         due date, overdue first, with the triage mix — plus the open
         recovery cases with their per-status aging and SLA flags,
-        and the open postings that have outlasted the escalation
-        threshold (``POSTING_ESCALATION_DAYS``), so one worklist
-        shows everything the building still owes an answer for. A
-        pure read over the store — it decides and writes nothing."""
+        the open postings that have outlasted the escalation
+        threshold (``POSTING_ESCALATION_DAYS``), and the four-eyes
+        payment runs whose second confirmation has outlasted its
+        aging threshold (``PAYMENT_RUN_FOUR_EYES_AGING_DAYS``), so
+        one worklist shows everything the building still owes an
+        answer for. A pure read over the store — it decides and
+        writes nothing."""
         from .posting import approved_not_posted
 
         anchor = _parse_date(as_of) if as_of else None
@@ -1628,6 +1653,8 @@ class InvoiceService:
             recovery_sla_days=recovery_case_sla_days(),
             open_postings=escalated.items,
             posting_escalation_days=escalation,
+            payment_runs=store.list_payment_runs(),
+            four_eyes_aging_days=four_eyes_aging_days(),
         )
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
