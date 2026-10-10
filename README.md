@@ -57,7 +57,7 @@ AP teams drown in document work that is simple to describe and miserable to do: 
 10. **Options** — five next steps proposed by the model (or templates), always scored and ranked by code; a fraud block zeroes the approve option's fit. Early-payment terms are priced in code first ("2/10 net 30": gross saving vs the cost of paying early at `COST_OF_CAPITAL_ANNUAL_PCT`), and a worthwhile net saving raises the approve option's score and is quantified in its wording and in the packet.
 11. **Draft** — a supplier query letter + an internal AP packet, fenced against untrusted supplier text.
 12. **Verify + review** — a self-check (amounts must come from the match, citations must be retrieved, no payment language) and an independent reviewer that did not draft.
-13. **Guardrails (code)** — `no_payment_language`, `no_prohibited_promises`, `no_pii_in_draft`, citations present, invoice id present. Failures trigger a bounded repair loop; a still-failing draft **cannot be approved** (the API returns 422).
+13. **Guardrails (code)** — `no_payment_language`, `no_prohibited_promises`, `no_pii_in_draft`, citations present **and within the retrieved set**, invoice id present. Failures trigger a bounded repair loop; a still-failing draft **cannot be approved** (the API returns 422).
 14. **Gate** — the run checkpoints and waits. A finance approver approves or rejects with name + reason. An autonomy recommendation (auto-triage eligible only for clean matches under the approval threshold with every check green) is printed, never acted on.
 
 Beyond the single invoice, three follow-on surfaces work over the processed queue:
@@ -95,7 +95,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 126 tests
+make test        # 128 tests
 make evals       # golden set: 28/28 outcome + match status, credit-note 1/1
 ```
 
@@ -157,7 +157,7 @@ src/ap_agent/     the agent: graph, matching, triage, screening, guardrails,
 src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
-tests/            126 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            128 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -165,7 +165,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 126 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 128 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 28/28 + credit-note 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)

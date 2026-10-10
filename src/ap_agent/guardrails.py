@@ -200,6 +200,29 @@ def validate_drafts(
         )
     )
 
+    # Citations must come from the retrieved set. A provider draft
+    # that cites a plausible-but-unretrieved policy (the judge pack
+    # caught [AP-DOC-02] in a letter) is inventing authority — the
+    # verify checklist flags it as ungrounded, and this check makes
+    # it blocking, over letter and packet alike.
+    cited = sorted(set(re.findall(r"\[(AP-[A-Z]+-\d+)\]", combined)))
+    unretrieved = [c for c in cited if c not in citations]
+    checks.append(
+        GuardrailCheck(
+            name="citations_within_retrieved",
+            passed=not unretrieved,
+            detail=(
+                "every cited policy was retrieved for this invoice"
+                if not unretrieved
+                else (
+                    f"drafts cite policies that were not retrieved: "
+                    f"{unretrieved} — citations come from the retrieved "
+                    "set, never from memory"
+                )
+            ),
+        )
+    )
+
     next_step = "next step" in combined.lower()
     checks.append(
         GuardrailCheck(

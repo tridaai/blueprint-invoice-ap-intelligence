@@ -42,6 +42,19 @@ def test_good_drafts_pass_everything():
     assert validation.passed, [c.detail for c in validation.checks if not c.passed]
 
 
+def test_citation_outside_the_retrieved_set_fails():
+    # The judge pack caught a provider letter citing a plausible
+    # policy that was never retrieved — invented authority, blocking.
+    packet = GOOD_PACKET + "\nSee also [AP-DOC-02]."
+    validation = _validate(packet=packet)
+    assert not _check(validation, "citations_within_retrieved").passed
+    assert not validation.passed
+
+
+def test_citation_inside_the_retrieved_set_passes():
+    assert _check(_validate(), "citations_within_retrieved").passed
+
+
 def test_payment_made_language_fails():
     letter = GOOD_LETTER + "\nPayment has been made for this invoice."
     validation = _validate(letter=letter)
