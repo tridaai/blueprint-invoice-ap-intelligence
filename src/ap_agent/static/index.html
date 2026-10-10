@@ -330,6 +330,11 @@ async function loadQueue() {
     $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Open recovery cases</b> — ${q.recovery_open_count} open · ${q.recovery_sla_breaches} past the ${q.recovery_sla_days}-day per-status SLA</p>
     <table><tr><th>Case</th><th>Supplier</th><th>Amount</th><th>Stuck on</th><th>Case age</th><th>In status</th><th>SLA</th></tr>${cases.map(c => `<tr><td>${esc(c.pack_id)}<br><span class="note">${esc(c.duplicate_invoice_id)}</span></td><td>${esc(c.supplier_name)}</td><td>${esc(c.currency)} ${c.amount}</td><td>${esc(c.case_status.replaceAll("_", " "))}</td><td>${c.age_days ?? "—"}d</td><td>${c.status_age_days ?? "—"}d</td><td>${c.sla_breached ? pill("SLA breached", "bad") : pill("within SLA", "ok")}</td></tr>`).join("")}</table>`;
   }
+  const postings = q.open_postings || [];
+  if (postings.length) {
+    $("queuebody").innerHTML += `<p class="kv" style="margin-top:14px"><b>Escalated open postings</b> — approved but still unposted past the ${q.posting_escalation_days}-day escalation threshold</p>
+    <table><tr><th>Invoice</th><th>Supplier</th><th>Amount</th><th>Approved by</th><th>Age</th><th>ERP receipt</th></tr>${postings.map(p => `<tr><td>${esc(p.invoice_id)}<br><span class="note">${esc(p.invoice_number || "")}</span></td><td>${esc(p.supplier_name)}</td><td>${esc(p.currency)} ${p.total_amount ?? "—"}</td><td>${esc(p.decided_by || "—")}</td><td>${pill((p.age_days ?? "—") + "d since approval", "bad")}</td><td>${p.receipt_state === "failed" ? pill("posting failed", "bad") + `<br><span class="note">${esc(p.receipt_detail || "")}</span>` : pill("no receipt", "warn")}</td></tr>`).join("")}</table>`;
+  }
 }
 
 function runControls(run) {
@@ -341,8 +346,8 @@ function runControls(run) {
   }
   if (run.four_eyes_required) html += `${pill("four-eyes complete", "ok")} `;
   html += run.handoff_key
-    ? `<span class="note">hand-off: ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…</span> <button class="secondary" data-download="${esc(run.run_id)}">Download CSV</button>`
-    : ` <button class="secondary" data-handoff="${esc(run.run_id)}">Generate hand-off file</button>`;
+    ? `<span class="note">hand-off (${esc(run.handoff_format || "csv")}): ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…</span> <button class="secondary" data-download="${esc(run.run_id)}" data-format="${esc(run.handoff_format || "csv")}">Download ${run.handoff_format === "pain001" ? "pain.001 XML" : "CSV"}</button>`
+    : ` <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="csv">Generate CSV</button> <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="pain001">Generate pain.001 XML</button>`;
   return html;
 }
 function renderRuns(runs) {
@@ -353,8 +358,8 @@ function renderRuns(runs) {
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
   document.querySelectorAll("[data-second]").forEach(btn => btn.onclick = () => confirmSecond(btn.dataset.second));
-  document.querySelectorAll("[data-handoff]").forEach(btn => btn.onclick = () => exportHandoff(btn.dataset.handoff));
-  document.querySelectorAll("[data-download]").forEach(btn => btn.onclick = () => downloadHandoff(btn.dataset.download));
+  document.querySelectorAll("[data-handoff]").forEach(btn => btn.onclick = () => exportHandoff(btn.dataset.handoff, btn.dataset.format));
+  document.querySelectorAll("[data-download]").forEach(btn => btn.onclick = () => downloadHandoff(btn.dataset.download, btn.dataset.format));
 }
 async function confirmSecond(runId) {
   const actor = $("lead").value.trim();
@@ -365,23 +370,23 @@ async function confirmSecond(runId) {
   $("paynote").textContent = `Run ${runId} second-confirmed by ${body.second_confirmed_by} (first: ${body.confirmed_by}). The hand-off export is unlocked — it still pays nothing.`;
   loadRuns();
 }
-async function exportHandoff(runId) {
+async function exportHandoff(runId, format) {
   const actor = $("lead").value.trim();
   if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — hand-off generation is attributable."; return; }
-  const res = await fetch(`/payment-runs/${runId}/handoff`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const res = await fetch(`/payment-runs/${runId}/handoff?format=${encodeURIComponent(format || "csv")}`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
   const body = await res.json();
   if (!res.ok) { $("paynote").textContent = `Hand-off refused (${res.status}): ${body.detail || ""}`; return; }
   const drift = (body.handoff_drift || []).length ? ` Discount drift flagged on the run: ${body.handoff_drift.map(d => d.invoice_id + " lost " + d.discount_lost).join(", ")} — drifted members are exported at full gross.` : "";
   $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.${drift}`;
   loadRuns();
 }
-async function downloadHandoff(runId) {
+async function downloadHandoff(runId, format) {
   const res = await fetch(`/payment-runs/${runId}/handoff`, {headers: headers()});
   if (!res.ok) { $("paynote").textContent = `Download failed (${res.status}).`; return; }
   const blob = await res.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `${runId}-handoff.csv`;
+  a.download = format === "pain001" ? `${runId}-handoff.pain001.xml` : `${runId}-handoff.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
