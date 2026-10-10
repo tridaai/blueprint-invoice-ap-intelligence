@@ -42,6 +42,7 @@ from .matching import _parse_date
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
 from .queue import build_queue
+from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
 from .model_backends import ModelBackend, get_backend
@@ -55,6 +56,7 @@ from .schemas import (
     InvoiceInput,
     PaymentRun,
     QueueView,
+    RecoveryPack,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -649,6 +651,53 @@ class InvoiceService:
 
     def list_payment_runs(self) -> list[PaymentRun]:
         return self._get_store().list_payment_runs()
+
+    def draft_duplicate_recovery(self, invoice_id: str) -> RecoveryPack:
+        """Draft the duplicate-payment recovery pack for one invoice.
+
+        The case exists when duplicate detection fired on the
+        invoice and the twin it duplicates was already approved —
+        one payment in flight, a second copy to recover against.
+        The evidence and amounts are computed from the two stored
+        records; the letter and memo go through the standard verify +
+        guardrail path (``recovery.py``) and the pack is stored for
+        a human. Idempotent: an existing pack is returned, not
+        redrafted. Drafting changes no invoice's state.
+        """
+        store = self._get_store()
+        existing = store.get_recovery_pack(invoice_id)
+        if existing is not None:
+            return existing
+        record = store.get(invoice_id)
+        if record is None:
+            raise KeyError(f"Unknown invoice_id: {invoice_id} (analyze it first)")
+        result = record.result
+        twin_id = result.facts.duplicate_of
+        if result.triage.outcome != "duplicate_suspected" or not twin_id:
+            raise ValueError(
+                f"Invoice {invoice_id} is not a suspected duplicate "
+                f"(outcome: {result.triage.outcome}) — no recovery case"
+            )
+        twin = store.get(twin_id)
+        if twin is None:
+            raise ValueError(
+                f"Invoice {invoice_id} duplicates {twin_id}, which is "
+                "not in the store — the recovery case cannot be evidenced"
+            )
+        if twin.result.status != "approved":
+            raise ValueError(
+                f"Invoice {invoice_id} duplicates {twin_id}, but the "
+                f"original is {twin.result.status}, not approved — "
+                "recovery starts once the original has been approved; "
+                "until then the duplicate control at the gate is enough"
+            )
+        backend = self.backend or get_backend()
+        pack = build_recovery_pack(record, twin, backend)
+        store.save_recovery_pack(pack)
+        return pack
+
+    def get_recovery_pack(self, invoice_id: str) -> RecoveryPack | None:
+        return self._get_store().get_recovery_pack(invoice_id)
 
     def queue_view(self, as_of: str = "") -> QueueView:
         """The AP aging queue: invoices still at the gate, aged by

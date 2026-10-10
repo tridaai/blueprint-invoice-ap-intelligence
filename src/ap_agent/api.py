@@ -45,6 +45,7 @@ from .schemas import (
     PaymentRun,
     PaymentRunRequest,
     QueueView,
+    RecoveryPack,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -378,6 +379,27 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         if result is None:
             raise HTTPException(status_code=404, detail="Invoice not analyzed yet.")
         return result
+
+    @app.post("/invoices/{invoice_id}/recovery-pack", response_model=RecoveryPack, dependencies=_AUTH)
+    def draft_recovery_pack(invoice_id: str) -> RecoveryPack:
+        """Draft the duplicate-payment recovery pack: the duplicate
+        evidence, a supplier recovery letter, and an internal memo —
+        verified and guardrail-checked, stored for a human to send.
+        Only for a suspected duplicate whose original was already
+        approved; the agent recovers nothing itself."""
+        try:
+            return svc.draft_duplicate_recovery(invoice_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/invoices/{invoice_id}/recovery-pack", response_model=RecoveryPack, dependencies=_AUTH)
+    def get_recovery_pack(invoice_id: str) -> RecoveryPack:
+        pack = svc.get_recovery_pack(invoice_id)
+        if pack is None:
+            raise HTTPException(status_code=404, detail="No recovery pack drafted for this invoice.")
+        return pack
 
     @app.post("/invoices/{invoice_id}/approve", response_model=AgentResult, dependencies=_AUTH)
     def approve(invoice_id: str, request: DecisionRequest) -> AgentResult:

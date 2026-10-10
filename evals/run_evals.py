@@ -131,11 +131,48 @@ def evaluate(cases: list[dict]) -> dict:
                 f"credit-note {note.credit_note_id}: expected {expected}, got {got}"
             )
 
+    # Duplicate-payment recovery: INV-1013 duplicates INV-1001 (the
+    # portal resend). Once the original is approved, the recovery
+    # pack must draft — evidence computed, guardrails passed.
+    recovery_total = 1
+    recovery_correct = 0
+    try:
+        service.approve(
+            "INV-1001", approver="eval-harness", reason="eval: approve the original"
+        )
+        pack = service.draft_duplicate_recovery("INV-1013")
+        got = {
+            "pack_id": pack.pack_id,
+            "original_invoice_id": pack.original_invoice_id,
+            "amount": pack.amount,
+            "exposure_status": pack.exposure_status,
+            "status": pack.status,
+            "validation_passed": bool(pack.validation and pack.validation.passed),
+            "grounded": bool(pack.verification and pack.verification.grounded),
+        }
+        expected = {
+            "pack_id": "REC-INV-1013",
+            "original_invoice_id": "INV-1001",
+            "amount": 1180.0,
+            "exposure_status": "twin_approved",
+            "status": "ready",
+            "validation_passed": True,
+            "grounded": True,
+        }
+        if got == expected:
+            recovery_correct = 1
+        else:
+            failures.append(f"recovery pack: expected {expected}, got {got}")
+    except Exception as exc:  # a broken recovery path is a failed case
+        failures.append(f"recovery pack: {type(exc).__name__}: {exc}")
+
     total = len(cases)
     return {
         "total": total,
         "credit_note_total": credit_total,
         "credit_note_correct": credit_correct,
+        "recovery_total": recovery_total,
+        "recovery_correct": recovery_correct,
         "outcome_correct": outcome_correct,
         "outcome_accuracy": round(outcome_correct / total, 4) if total else 0.0,
         "match_correct": match_correct,
@@ -166,6 +203,7 @@ def main() -> int:
         scored["outcome_accuracy"] >= THRESHOLD
         and scored["match_accuracy"] >= THRESHOLD
         and scored["credit_note_correct"] == scored["credit_note_total"]
+        and scored["recovery_correct"] == scored["recovery_total"]
     )
 
     _write_results(
@@ -177,6 +215,9 @@ def main() -> int:
             "match_status_match": f"{scored['match_correct']}/{total}",
             "credit_note_match": (
                 f"{scored['credit_note_correct']}/{scored['credit_note_total']}"
+            ),
+            "recovery_pack": (
+                f"{scored['recovery_correct']}/{scored['recovery_total']}"
             ),
             "outcome_correct": scored["outcome_correct"],
             "outcome_accuracy": scored["outcome_accuracy"],
@@ -209,6 +250,10 @@ def main() -> int:
     print(
         f"Credit-note matching    : {scored['credit_note_correct']}/"
         f"{scored['credit_note_total']}"
+    )
+    print(
+        f"Recovery pack           : {scored['recovery_correct']}/"
+        f"{scored['recovery_total']}"
     )
     for outcome, row in scored["per_outcome"].items():
         print(f"  {outcome:<20} {row['correct']}/{row['total']}")

@@ -1,12 +1,14 @@
 {
   "dataset": "golden.jsonl (synthetic)",
-  "generated_at": "2026-10-10T12:39:35+00:00",
-  "total": 28,
-  "outcome_match": "28/28",
-  "match_status_match": "28/28",
-  "outcome_correct": 28,
+  "generated_at": "2026-10-10T13:26:59+00:00",
+  "total": 29,
+  "outcome_match": "29/29",
+  "match_status_match": "29/29",
+  "credit_note_match": "1/1",
+  "recovery_pack": "1/1",
+  "outcome_correct": 29,
   "outcome_accuracy": 1.0,
-  "match_correct": 28,
+  "match_correct": 29,
   "match_accuracy": 1.0,
   "per_outcome": {
     "clean_match": {
@@ -15,8 +17,8 @@
       "accuracy": 1.0
     },
     "duplicate_suspected": {
-      "correct": 1,
-      "total": 1,
+      "correct": 2,
+      "total": 2,
       "accuracy": 1.0
     },
     "missing_po": {
