@@ -149,6 +149,18 @@ def test_report_endpoint_and_metrics(service):
         "escalation_days": 21,
         "escalations_recorded": 0,
         "escalations_recorded_urgent": 0,
+        "escalation_ladder": {
+            "episodes_graded": 0,
+            "firings": 0,
+            "firings_by_rung": {"1": 0, "2": 0},
+            "resolved_after_rung_1": 0,
+            "resolved_after_rung_2": 0,
+            "closed_otherwise": 0,
+            "still_open": 0,
+            "resolution_rate": None,
+            "days_to_post": None,
+            "still_open_invoice_ids": [],
+        },
     }
     record = service._get_store().get("INV-1001")
     record.result.decided_at = _plus(result.decided_at, -30) + "T00:00:00+00:00"
