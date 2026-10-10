@@ -41,6 +41,7 @@ from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
+from .queue import build_queue
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
 from .model_backends import ModelBackend, get_backend
@@ -53,6 +54,7 @@ from .schemas import (
     CreditNoteMatch,
     InvoiceInput,
     PaymentRun,
+    QueueView,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -647,6 +649,13 @@ class InvoiceService:
 
     def list_payment_runs(self) -> list[PaymentRun]:
         return self._get_store().list_payment_runs()
+
+    def queue_view(self, as_of: str = "") -> QueueView:
+        """The AP aging queue: invoices still at the gate, aged by
+        due date, overdue first, with the triage mix. A pure read
+        over the store — it decides and writes nothing."""
+        anchor = _parse_date(as_of) if as_of else None
+        return build_queue(self._get_store().list_records(), as_of=anchor)
 
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)

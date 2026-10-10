@@ -44,6 +44,7 @@ from .schemas import (
     InvoiceInput,
     PaymentRun,
     PaymentRunRequest,
+    QueueView,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -331,6 +332,13 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/queue", response_model=QueueView, dependencies=_AUTH)
+    def queue(as_of: str = Query(default="")) -> QueueView:
+        """The AP aging queue: invoices awaiting an approver, aged
+        by due date (overdue first), with the triage mix. Read-only.
+        ``as_of`` (ISO date) anchors the aging; default today."""
+        return svc.queue_view(as_of=as_of)
 
     @app.post("/payment-runs/propose", response_model=list[PaymentRun], dependencies=_AUTH)
     def propose_payment_runs(request: PaymentRunRequest) -> list[PaymentRun]:
