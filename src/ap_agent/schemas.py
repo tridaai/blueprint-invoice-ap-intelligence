@@ -931,6 +931,7 @@ class PaymentRunDrift(BaseModel):
     discount_at_proposal: float = 0.0
     discount_at_export: float = 0.0  # what is still capturable at export
     discount_lost: float = 0.0  # proposal − export, the drift amount
+    reason: str = ""
 
 
 class PaymentRunWaitLapse(BaseModel):
@@ -946,7 +947,6 @@ class PaymentRunWaitLapse(BaseModel):
     supplier_name: str = ""
     discount_amount: float = 0.0  # the discount lost to the wait
     discount_deadline: str = ""  # the deadline that closed mid-wait
-    reason: str = ""
 
 
 class PaymentRunForecast(BaseModel):
