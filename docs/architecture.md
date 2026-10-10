@@ -57,7 +57,7 @@ There are no local files in the runtime story. One database is the system of rec
                                ▼          ▼
                  ┌──────────────────┐  ┌──────────────────┐
                  │ PostgreSQL 16    │  │ Object storage   │
-                 │ + pgvector       │  │ (S3 / MinIO)     │
+                 │ + pgvector       │  │ (S3 / SeaweedFS) │
                  │ ─ approvals      │  │ document blobs,  │
                  │ ─ checkpoints    │  │ keyed by         │
                  │ ─ policy vectors │  │ documents'       │
@@ -74,7 +74,7 @@ There are no local files in the runtime story. One database is the system of rec
 
 **Migrations, not ORM magic.** Schema lives in `migrations/` as numbered SQL files (`0001_core`, `0002_policy_embeddings`, `0003_checkpoints`), mirrored into the package (`src/ap_agent/migrations/`) so installed deployments run the same files the repo reviews — a test asserts the copies are identical. A tiny runner records applied versions in `schema_migrations` and applies pending files in order, one transaction each, when a Postgres-backed store or checkpointer is constructed. Production systems version their schema; this keeps that habit cheap.
 
-**Object storage port.** Documents reference `object_key`s, not local paths. The OCR stage resolves a key through the `ObjectStore` port (boto3 against any S3-compatible endpoint; MinIO in compose) when a document carries no inline text. Unset `S3_BUCKET` disables the port and documents must carry their text layer — the hermetic default for tests and demos.
+**Object storage port.** Documents reference `object_key`s, not local paths. The OCR stage resolves a key through the `ObjectStore` port (boto3 against any S3-compatible endpoint; SeaweedFS gateway in compose) when a document carries no inline text. Unset `S3_BUCKET` disables the port and documents must carry their text layer — the hermetic default for tests and demos.
 
 **Runtime posture.** Multi-stage Dockerfile (locked uv build, slim runtime, non-root user, healthcheck), `/health` for liveness and `/readiness` for store connectivity (503 when the database is unreachable, so an orchestrator stops routing), structured JSON logs with a per-request ID (`X-Request-ID` honoured inbound, returned outbound), configuration exclusively through environment variables, and graceful shutdown through the FastAPI lifespan. Batch analysis goes through the service layer, so concurrent workers share Postgres state exactly as in production — the duplicate sample behaves identically in a batch and in the API.
 
@@ -91,7 +91,7 @@ NIM services speak the OpenAI chat-completions dialect, so "built on NIM" is a c
 
 Self-hosted NIM is the same profile with `*_BASE_URL` pointed at the containers (the local compose override documents the per-service URLs). Anthropic, plain OpenAI, and Ollama remain first-class `ModelBackend` choices — the engine is portable by construction.
 
-**Adapter assumption (stated plainly).** The OCR NIM integration posts the document text to the endpoint's chat-completions shape and asks for a JSON reply of `{text, confidence}`. That request shape is an adapter seam: it isolates the one place that changes if a deployment's OCR service expects a dedicated document payload, and it is called out in the `ocr.py` docstring. Live NIM verification — hosted key against all four services — is a follow-up item; every NIM seam is covered by fake-based tests in the meantime.
+**Adapter assumption (stated plainly).** The OCR NIM integration posts the document text to the endpoint's chat-completions shape and asks for a JSON reply of `{text, confidence}`. That request shape is an adapter seam: it isolates the one place that changes if a deployment's OCR service expects a dedicated document payload, and it is called out in the `ocr.py` docstring. Live NIM verification — hosted key against all four services — has run end to end (2026-10-10); every NIM seam is additionally covered by fake-based tests.
 
 ## 5. The match, and why it is code
 

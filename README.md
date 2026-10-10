@@ -25,7 +25,7 @@ Everything is synthetic data. There is no real supplier, invoice, or bank detail
 ```bash
 git clone https://github.com/tridaai/blueprint-invoice-ap-intelligence.git
 cd blueprint-invoice-ap-intelligence
-docker compose up --build        # the real stack: api + PostgreSQL/pgvector + MinIO
+docker compose up --build        # the real stack: api + PostgreSQL/pgvector + SeaweedFS (S3 gateway)
 ```
 
 Then open http://localhost:8000 — pick a sample invoice, watch the match table, the triage cross-check, and the approver gate. The stack boots with no keys (offline fallback); add an `nvapi-` key to run it on NVIDIA NIM (below).
@@ -149,7 +149,7 @@ uv run ap-agent-demo   # the trace header names the backend that produced it
 
 `.env.example` documents the full NIM profile: Nemotron LLM (`MODEL_BACKEND=openai` + the integrate endpoint), Nemotron OCR (`OCR_ENGINE=nim`), Nemotron VL (`VISION_ENGINE=nim`), NV-Embed (`RETRIEVER=hybrid` + `OPENAI_EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b`). For self-hosted NIM containers, point the `*_BASE_URL` variables at your containers instead — no code changes.
 
-> Live NIM runs are the one path not yet exercised end-to-end by the maintainers (no key in the dev sandbox); the NIM seams are covered by fake-based tests. The OCR endpoint's chat-completions shape is a documented adapter assumption — see `docs/architecture.md`.
+> Live NIM runs have been exercised end-to-end against NVIDIA's hosted endpoints (2026-10-10 — OCR read, vision verdict, and LLM diagnosis through the full pipeline); the NIM seams are also covered by fake-based tests. The OCR endpoint's chat-completions shape is a documented adapter assumption — see `docs/architecture.md`.
 
 ### B. The full stack locally (compose)
 
@@ -157,7 +157,7 @@ uv run ap-agent-demo   # the trace header names the backend that produced it
 docker compose up --build
 ```
 
-This runs **the real stack locally** — the same components a production deployment uses: the stateless API service, PostgreSQL 16 with pgvector (approvals store + LangGraph checkpointer + policy embeddings in one database), and MinIO (S3-compatible document storage). State lives in the services, never in the app container or loose files. Add `-f docker-compose.local.yml --profile local-llm` for a local Ollama.
+This runs **the real stack locally** — the same components a production deployment uses: the stateless API service, PostgreSQL 16 with pgvector (approvals store + LangGraph checkpointer + policy embeddings in one database), and an S3-compatible store (SeaweedFS gateway in compose). State lives in the services, never in the app container or loose files. Add `-f docker-compose.local.yml --profile local-llm` for a local Ollama.
 
 ### C. Offline smoke test (no keys, no Docker)
 
@@ -203,7 +203,7 @@ Everything is environment variables (`.env` supported; real env wins). The full 
 | `VISION_ENGINE` / `VISION_MODEL` / `VISION_BASE_URL` | `nim` enables the Nemotron VL port |
 | `RETRIEVER` | `keyword` · `semantic` · `hybrid` (semantic/hybrid use pgvector) |
 | `DATABASE_URL` | PostgreSQL — approvals, checkpoints, vectors. Unset = in-memory test doubles |
-| `S3_BUCKET` / `S3_ENDPOINT_URL` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3-compatible document storage (MinIO in compose) |
+| `S3_BUCKET` / `S3_ENDPOINT_URL` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3-compatible document storage (SeaweedFS gateway in compose) |
 | `RUN_TOKEN_BUDGET` | Per-run token budget; later provider steps degrade to templates when exceeded |
 | `ACTION_WEBHOOK_URL` | Opt-in: POSTed once on approval, and by the recovery-escalation sweep on an SLA breach — the only external action available |
 | `ACTION_WEBHOOK_SECRET` | When set, the webhook body is HMAC-SHA256 signed (`X-Trida-Signature`) |
@@ -246,15 +246,15 @@ docs/             architecture.md
 2. `make test` — expect 660 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
-5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
+5. `docker compose up --build` — console at :8000; `/readiness` reports the Postgres store. (Build-verified 2026-10-10: the image builds and the stack runs healthy.)
 6. With `DATABASE_URL=postgresql://ap:ap@localhost:5432/ap` (compose Postgres published via the local override), re-run the test suite — the 3 integration tests now run: Postgres store round-trip, checkpointer pause/resume across instances, pgvector retrieval.
 7. Optional: set the NIM profile in `.env` and `make llm-evals` for the live-provider pack.
 
 ## Limitations
 
 - Synthetic data only; the policy corpus is illustrative, not legal or accounting advice.
-- Live NVIDIA NIM verification is a follow-up (no key available during the build); the NIM OCR/vision/LLM seams are fake-tested, and the OCR chat-shape is an adapter assumption documented in code and architecture docs.
-- The Docker image and compose stack are build-unverified in the dev sandbox (no daemon) — step 5 of the QA checklist is the first real build.
+- Live NVIDIA NIM verification has run end to end against the hosted endpoints (2026-10-10); the NIM OCR/vision/LLM seams are additionally fake-tested, and the OCR chat-shape is an adapter assumption documented in code and architecture docs. The opt-in live judge pack has run as a small slice so far, not the full set.
+- The Docker image and compose stack are build-verified (built and run healthy on a developer machine, 2026-10-10); the dev sandbox itself has no daemon.
 - This is a reference prototype, not a production AP system: no ERP integration, no real payment rails, no SSO. The production-hardening notes in `docs/architecture.md` describe what changes.
 
 ## License
