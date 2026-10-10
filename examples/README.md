@@ -47,3 +47,31 @@ too:
   else is a thin transport step on top of this shape, and it belongs
   to the customer's system of record — deliberately outside the
   agent.
+
+### The receipt loop — the ERP answers back
+
+A posting without an answer leaves the agent's record and the
+ledger free to drift apart. The same example shapes the answer:
+
+```bash
+python examples/erp_posting.py --receipt posting.json posted ERP-DOC-1042
+python examples/erp_posting.py --receipt posting.json failed "" "period 2026-09 is closed"
+```
+
+which produces the body of `POST /invoices/{invoice_id}/posting-receipt`:
+
+```json
+{"invoice_id": "INV-1001", "status": "posted",
+ "external_reference": "ERP-DOC-1042",
+ "idempotency_key": "ap-posting-…", "actor": "<operator>"}
+```
+
+The service records the receipt on the invoice and in the audit
+export. The discipline mirrors the posting side: a `posted` receipt
+must name the ERP's document number, a `failed` one must carry its
+reason, only an approved invoice can carry a receipt at all, and
+once an invoice is recorded as posted, a second receipt is refused
+unless it replays the same idempotency key — a double posting is
+corrected in the ERP, not papered over here. A `failed` receipt may
+be superseded by the retry's outcome. The agent still posts
+nothing itself; the receipt is bookkeeping that closes the loop.

@@ -69,3 +69,55 @@ def test_unreconciled_figures_are_refused(approved_result):
     broken["facts"] = dict(approved_result["facts"], invoice_total_stated=9999.0)
     with pytest.raises(ValueError, match="do not reconcile"):
         adapter.build_posting(broken)
+
+
+# --- the receipt loop: the ERP's answer, shaped for the endpoint -------
+
+def test_receipt_carries_the_postings_key_and_reference(approved_result):
+    adapter = _load_adapter()
+    posting = adapter.build_posting(approved_result)
+    receipt = adapter.build_receipt(
+        posting,
+        outcome="posted",
+        external_reference="ERP-DOC-1042",
+        recorded_by="Tomas Reid",
+    )
+    assert receipt["invoice_id"] == "INV-1001"
+    assert receipt["status"] == "posted"
+    assert receipt["external_reference"] == "ERP-DOC-1042"
+    assert receipt["idempotency_key"] == posting["idempotency_key"]
+    assert receipt["actor"] == "Tomas Reid"
+
+
+def test_receipt_guards_mirror_the_endpoint(approved_result):
+    adapter = _load_adapter()
+    posting = adapter.build_posting(approved_result)
+    with pytest.raises(ValueError, match="document number"):
+        adapter.build_receipt(posting, outcome="posted")
+    with pytest.raises(ValueError, match="reason"):
+        adapter.build_receipt(posting, outcome="failed")
+    with pytest.raises(ValueError, match="'posted' or 'failed'"):
+        adapter.build_receipt(posting, outcome="queued", external_reference="X")
+    failed = adapter.build_receipt(
+        posting, outcome="failed", detail="period 2026-09 is closed"
+    )
+    assert failed["detail"] == "period 2026-09 is closed"
+
+
+def test_receipt_cli_mode(approved_result, tmp_path, capsys):
+    import json as _json
+
+    adapter = _load_adapter()
+    posting_path = tmp_path / "posting.json"
+    posting_path.write_text(
+        _json.dumps(adapter.build_posting(approved_result)), encoding="utf-8"
+    )
+    assert adapter.main(
+        ["erp_posting.py", "--receipt", str(posting_path), "posted", "ERP-DOC-1042"]
+    ) == 0
+    receipt = _json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "posted"
+    assert receipt["external_reference"] == "ERP-DOC-1042"
+    assert adapter.main(
+        ["erp_posting.py", "--receipt", str(posting_path), "posted"]
+    ) == 1  # no reference: refused before the endpoint ever sees it

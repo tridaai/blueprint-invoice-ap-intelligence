@@ -465,8 +465,48 @@ class AgentResult(BaseModel):
     decided_by: Optional[str] = None
     decision_reason: Optional[str] = None
     dispatch_status: Optional[str] = None  # sent | failed | None
+    posting_receipt: Optional["PostingReceipt"] = None
     external_action_taken: bool = False
     error: Optional[str] = None
+
+
+class PostingReceipt(BaseModel):
+    """The ERP's posting outcome, recorded back onto the invoice.
+
+    The output adapter (see ``examples/erp_posting.py``) shapes an
+    approved result into a posting for the customer's ERP; the ERP
+    — or the operator carrying its answer — reports the outcome
+    back, and this receipt is that report: ``posted`` with the
+    ERP's document number as the external reference, or ``failed``
+    with its reason. Recording it is bookkeeping on the invoice
+    record: the agent posted nothing itself, and the receipt
+    changes no decision. The idempotency key ties the receipt to
+    the exact posting it answers."""
+
+    invoice_id: str
+    status: str  # posted | failed
+    external_reference: str = ""  # the ERP's document number, when posted
+    idempotency_key: str = ""  # the key the posting carried
+    detail: str = ""  # the ERP's reason, when failed
+    recorded_by: str = ""
+    recorded_at: str = ""  # ISO timestamp
+    source: str = "erp_posting_receipt"
+
+
+class PostingReceiptRequest(BaseModel):
+    """Record a posting receipt (the body of
+    ``POST /invoices/{id}/posting-receipt``)."""
+
+    status: str  # posted | failed
+    external_reference: str = ""
+    idempotency_key: str = ""
+    detail: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
 
 
 # ---------------------------------------------------------------------------

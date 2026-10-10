@@ -49,6 +49,7 @@ from .schemas import (
     MasterChangeProposeRequest,
     MasterChangeRequest,
     PaymentRun,
+    PostingReceiptRequest,
     PaymentRunRequest,
     QueueView,
     RecoveryPack,
@@ -558,6 +559,27 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 invoice_id,
                 actor=_decision_actor(request),
                 reason=request.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/invoices/{invoice_id}/posting-receipt", response_model=AgentResult, dependencies=_AUTH)
+    def record_posting_receipt(invoice_id: str, request: PostingReceiptRequest) -> AgentResult:
+        """Record the ERP's posting outcome for an approved invoice
+        (the receipt loop of examples/erp_posting.py): 'posted' with
+        the ERP's document number, or 'failed' with its reason. The
+        receipt lands on the invoice record and in the audit export;
+        the agent posted nothing itself."""
+        try:
+            return svc.record_posting_receipt(
+                invoice_id,
+                status=request.status,
+                actor=_decision_actor(request),
+                external_reference=request.external_reference,
+                idempotency_key=request.idempotency_key,
+                detail=request.detail,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

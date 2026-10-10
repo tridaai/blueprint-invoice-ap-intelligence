@@ -62,6 +62,7 @@ from .schemas import (
     MasterChangeEvent,
     MasterChangeRequest,
     PaymentRun,
+    PostingReceipt,
     QueueView,
     RecoveryPack,
     StatementReconciliation,
@@ -98,6 +99,8 @@ AUDIT_COLUMNS = [
     "backend",
     "model",
     "estimated_cost_usd",
+    "posting_status",
+    "posting_reference",
 ]
 
 
@@ -533,6 +536,88 @@ class InvoiceService:
         )
         return record.result
 
+    def record_posting_receipt(
+        self,
+        invoice_id: str,
+        *,
+        status: str,
+        actor: str,
+        external_reference: str = "",
+        idempotency_key: str = "",
+        detail: str = "",
+    ) -> AgentResult:
+        """Record the ERP's posting outcome on an approved invoice.
+
+        The receipt loop closes the output seam: the example adapter
+        (``examples/erp_posting.py``) shapes the posting, the
+        customer's ERP posts it (or refuses it), and its answer —
+        ``posted`` + the ERP document number, or ``failed`` + the
+        reason — is recorded here, on the invoice record and in the
+        audit export. Recording is bookkeeping: the agent posted
+        nothing, and no decision changes.
+
+        The guards are the loop's integrity: only an approved
+        invoice can carry a receipt (only approvals post); a posted
+        receipt must name its ERP reference and a failed one its
+        reason; and once an invoice is recorded as posted, a second
+        receipt is refused unless it replays the same idempotency
+        key — a double posting is an ERP-side correction, not a
+        second receipt. A failed receipt may be superseded (the
+        retry's outcome replaces it).
+        """
+        store = self._get_store()
+        record = store.get(invoice_id)
+        if record is None:
+            raise KeyError(f"Unknown invoice_id: {invoice_id} (analyze it first)")
+        if status not in ("posted", "failed"):
+            raise ValueError(
+                f"Unknown posting outcome: {status!r} — a receipt is "
+                "'posted' or 'failed'"
+            )
+        result = record.result
+        if result.status != "approved":
+            raise ValueError(
+                f"Invoice {invoice_id} is {result.status} — only an "
+                "approved invoice can be posted, so only an approved "
+                "invoice can carry a posting receipt"
+            )
+        if status == "posted" and not external_reference.strip():
+            raise ValueError(
+                "a 'posted' receipt must carry the ERP's external "
+                "reference (its document number) — that reference is "
+                "what closes the loop"
+            )
+        if status == "failed" and not detail.strip():
+            raise ValueError(
+                "a 'failed' receipt must carry the ERP's reason — a "
+                "failure without a reason closes nothing"
+            )
+        existing = result.posting_receipt
+        if existing is not None and existing.status == "posted":
+            if (
+                idempotency_key
+                and existing.idempotency_key
+                and idempotency_key == existing.idempotency_key
+            ):
+                return result  # the same posting reported twice: one receipt
+            raise ValueError(
+                f"Invoice {invoice_id} is already recorded as posted "
+                f"(ERP reference {existing.external_reference}) — a "
+                "second, different posting receipt would double-post "
+                "it; correct the posting in the ERP, not here"
+            )
+        result.posting_receipt = PostingReceipt(
+            invoice_id=invoice_id,
+            status=status,
+            external_reference=external_reference,
+            idempotency_key=idempotency_key,
+            detail=detail,
+            recorded_by=actor,
+            recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+        store.save(record)
+        return result
+
     def get(self, invoice_id: str) -> AgentResult | None:
         record = self._get_store().get(invoice_id)
         return record.result if record else None
@@ -639,6 +724,16 @@ class InvoiceService:
                     "model": telemetry.model if telemetry else "",
                     "estimated_cost_usd": (
                         telemetry.estimated_cost_usd if telemetry else None
+                    ),
+                    "posting_status": (
+                        result.posting_receipt.status
+                        if result.posting_receipt
+                        else ""
+                    ),
+                    "posting_reference": (
+                        result.posting_receipt.external_reference
+                        if result.posting_receipt
+                        else ""
                     ),
                 }
             )
