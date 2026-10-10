@@ -119,6 +119,9 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 66. **The clarification loop closes** — the information request was policed outbound, but its answer had no inbound path: a supplier's reply lived in someone's inbox, re-linked to the case by memory, and an unanswered request aged invisibly. A reply is now recorded against the open request (which items it supplied, when it arrived, a note, the recording operator) and analysed in code — answered, partially answered with the still-missing items named, or still awaiting — with replies accumulating across answers. An unclosed wait past `INFORMATION_WAIT_AGING_DAYS` (default 3) joins the approver queue like the other stalls; a partial reply restarts the clock from the day it landed.
 67. **Lag grades, watched for decay** — the forecast's selection trusted one pooled grade per lag statistic, and a pooled number dilutes decay: a segment that caught every lapse for a quarter can start missing them and keep its crown for months. The grades are now windowed by export order — recent recall against the earlier record over the same leave-one-out replay — and a statistic whose recent recall falls 0.25 or more below its record is named degrading in `/metrics` and demoted in the selection: the forecast falls to the best standing graded candidate, or the most specific measured segment when none stands, with the demotion in the basis. Thin windows are reported unassessed, never dressed up as stable.
 68. **Twin clusters get a hand-off** — escalation put the cluster on the worklist as one case, but working it still meant deciding record by record. The cluster is now handed off whole: approve every waiting member through the cluster (each via the standard approval path — a guardrail-blocked member is refused by name in the report, never waved through by the bulk act), or split the cluster with a named reason when the grouping itself is wrong. A reason is required either way, and the act is stamped on every member's record with that member's own outcome — the cluster's history reads member by member, and a decided or dissolved cluster leaves the queue.
+69. **The reply finishes the case** — recording a reply used to be bookkeeping: the gap closed on paper while the case sat at its blocked triage until someone re-ran it by hand. A reply can now carry the supplied documents themselves (`POST /invoices/{id}/information-reply` with the PO, the GRN, the legible copy), validated as they arrive — accounted for by a supplied key, filling only a gap the case actually has, a legible copy replacing only a document the case holds. They accumulate on the request as a named overlay, the stored extraction untouched, and when a reply closes the gap the case re-runs through the pipeline on original + overlays; the new outcome supersedes, with the supersession recorded in the case's re-analysis chain (prior → new outcome, supplied items, overlay payloads, the request as closed). A case can loop — the PO arrives, the re-run asks for the GRN, the GRN arrives — and every loop's facts fold in. Keys-only completions and decided cases stay bookkeeping: re-analysis never unmakes a decision.
+70. **The wait that outlasts its second window gets pushed** — an aged information wait joined the queue at `INFORMATION_WAIT_AGING_DAYS`, but nothing pushed: the chase of purchasing or the supplier depended on someone reading the worklist. `POST /information-waits/escalate` sweeps the waits and fires the signed `information_wait_escalation` webhook (the same opt-in `ACTION_WEBHOOK_URL` seam and HMAC) for every wait whose current episode has run past twice the aging threshold with the gap still open — who owes what, what is still missing, where the loop stands. One firing per episode, recorded on the record's own escalation ledger beside the request: a partial reply starts a new episode with an escalation of its own once it crosses, a complete reply is the reset, and the queue item reads `escalated` once its episode has fired. `/metrics` counts the pushes beside the thresholds.
+71. **The grades draft their own remedy** — the profile effectiveness grades named configuration theatre (a profile governing no exports; a profile routing no safer than ungoverned) and a read changed nothing. `POST /handoff/profile-change-proposals/draft` turns those two grades into governed proposals (migration 0012): retire the dormant profile, or set the marker flag whose absence the equal rate indicts — each carrying the grade's account as its basis and the profile's values as graded. Proposer ≠ decider; rejection leaves the profile exactly as it was; approval applies through the profile's own governed path, and an approval whose evidence moved since the draft (the profile started governing; the flag is already on) is refused — re-draft against fresh grades. The flagged-supplier and lead-breach grades draft nothing on purpose: their remedies are onboarding and a resolution-path fix, not profile configuration. `/metrics` counts the proposals by state.
 
 ## Quickstart
 
@@ -149,7 +152,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 519 tests
+make test        # 553 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -220,7 +223,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            519 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            553 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -228,7 +231,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 519 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 553 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
