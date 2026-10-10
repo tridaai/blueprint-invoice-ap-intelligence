@@ -31,7 +31,7 @@ import hmac
 import json
 import threading
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -68,7 +68,9 @@ from .schemas import (
     InvoiceInput,
     MasterChangeEvent,
     MasterChangeRequest,
+    OpenPostingItem,
     PaymentRun,
+    PostingEscalation,
     PostingReceipt,
     QueueView,
     RecoveryEscalation,
@@ -378,6 +380,42 @@ def dispatch_recovery_escalation_webhook(
         "status_age_days": status_age_days,
         "sla_days": sla_days,
         "sla_breached": True,
+    }
+    return _post_signed_webhook(payload)
+
+
+def dispatch_posting_escalation_webhook(
+    item: OpenPostingItem,
+    *,
+    escalation_days: int,
+) -> str | None:
+    """POST the ``posting_escalation`` event for one open posting
+    past its escalation threshold (off by default — the same
+    opt-in seam, secret, and signature as the approval webhook).
+
+    The payload is the posting's snapshot at the crossing: which
+    invoice, which supplier, how much, who approved it, how long
+    the ERP loop has been open, and what the ERP said when a
+    receipt failed. It carries no drafts and no bank details — it
+    is a pointer at the open item in the queue, for the customer's
+    own paging/ticketing system to act on. Returns ``None`` when
+    unconfigured, else ``"sent"`` / ``"failed"`` (see
+    :func:`_post_signed_webhook`)."""
+    payload = {
+        "event": "posting_escalation",
+        "invoice_id": item.invoice_id,
+        "supplier_name": item.supplier_name,
+        "invoice_number": item.invoice_number,
+        "currency": item.currency,
+        "total_amount": item.total_amount,
+        "decided_by": item.decided_by,
+        "decided_at": item.decided_at,
+        "age_days": item.age_days,
+        "age_basis": item.age_basis,
+        "receipt_state": item.receipt_state,
+        "receipt_detail": item.receipt_detail,
+        "escalation_days": escalation_days,
+        "escalated": True,
     }
     return _post_signed_webhook(payload)
 
@@ -937,6 +975,12 @@ class InvoiceService:
                 "escalation_days": max(
                     posting_escalation_days(), posting_receipt_grace_days()
                 ),
+                # posting_escalation webhooks recorded on the
+                # invoice records (the sweep's ledger): pushes
+                # fired, as opposed to items merely past the line.
+                "escalations_recorded": sum(
+                    len(r.result.posting_escalations) for r in records
+                ),
             },
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
         }
@@ -1321,6 +1365,89 @@ class InvoiceService:
             )
             store.save_recovery_pack(pack)
             escalated.append(pack)
+        return escalated
+
+    def escalate_open_postings(self, as_of: str = "") -> list[OpenPostingItem]:
+        """Sweep the open postings and escalate the crossed.
+
+        The queue has always *shown* an approved invoice still
+        unposted past the escalation threshold
+        (``POSTING_ESCALATION_DAYS``, never below the receipt
+        grace window); this is the push counterpart — for each
+        crossed posting, fire the signed ``posting_escalation``
+        webhook (the opt-in ``ACTION_WEBHOOK_URL`` seam) with the
+        posting's snapshot, so the customer's paging/ticketing
+        system hears that the ERP loop is open without anyone
+        watching the queue. The recovery cases got this treatment
+        first; an unposted approval is the same shape of silence.
+
+        One escalation per episode: the dispatch is recorded in
+        the invoice record's own escalation ledger
+        (``result.posting_escalations``, beside the receipt
+        fields), deduped by (receipt state, episode start) — an
+        episode runs from the approval while no receipt exists,
+        or from the latest failed receipt, because a failure is
+        new information worth one escalation of its own once its
+        episode crosses. A posted receipt closes the item
+        outright: the reset. With no webhook configured the sweep
+        is a no-op that records nothing — there is nothing to
+        dedupe against a dispatch that never happened. Returns
+        the items escalated by this sweep.
+        """
+        from .posting import approved_not_posted
+
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        threshold = max(posting_escalation_days(), posting_receipt_grace_days())
+        report = approved_not_posted(
+            store.list_records(), as_of=anchor, grace_days=threshold
+        )
+        escalated: list[OpenPostingItem] = []
+        for item in report.items:
+            record = store.get(item.invoice_id)
+            if record is None:
+                continue
+            result = record.result
+            receipt = result.posting_receipt
+            if receipt is not None:
+                since = _parse_date(receipt.recorded_at)
+                episode_since = since.isoformat() if since is not None else ""
+            else:
+                # No receipt: the episode runs from the item's age
+                # anchor (decision, else submission/invoice date —
+                # posting._anchor's rule), recoverable exactly from
+                # the age the report computed.
+                episode_since = (
+                    anchor - timedelta(days=item.age_days or 0)
+                ).isoformat()
+            if any(
+                entry.receipt_state == item.receipt_state
+                and entry.episode_since == episode_since
+                for entry in result.posting_escalations
+            ):
+                continue  # this episode already escalated — once is the rule
+            outcome = dispatch_posting_escalation_webhook(
+                item, escalation_days=threshold
+            )
+            if outcome is None:
+                continue  # webhook off: nothing fired, nothing recorded
+            result.posting_escalations.append(
+                PostingEscalation(
+                    receipt_state=item.receipt_state,
+                    episode_since=episode_since,
+                    escalation_days=threshold,
+                    age_days=item.age_days,
+                    dispatched_at=datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    dispatch_status=outcome,
+                )
+            )
+            store.save(record)
+            escalated.append(item)
         return escalated
 
     # --- Governed supplier-master changes ---------------------------

@@ -52,6 +52,7 @@ from .schemas import (
     MasterChangeProposeRequest,
     MasterChangeRequest,
     MarkerWorklist,
+    OpenPostingItem,
     PaymentRun,
     PostingReceiptRequest,
     PaymentRunRequest,
@@ -590,6 +591,22 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         ``as_of`` (ISO date) anchors the aging; default today."""
         try:
             return svc.escalate_breached_recovery_cases(as_of=as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/postings/escalate", response_model=list[OpenPostingItem], dependencies=_AUTH)
+    def escalate_open_postings(as_of: str = Query(default="")) -> list[OpenPostingItem]:
+        """Sweep: fire the signed ``posting_escalation`` webhook
+        for every approved invoice still unposted past the
+        escalation threshold, and record the dispatch on the
+        invoice record's own escalation ledger (beside the receipt
+        fields). One escalation per open episode — re-running the
+        sweep does not re-fire; a posted receipt closes the item,
+        a new failed receipt starts a new episode; with no webhook
+        configured nothing fires and nothing is recorded.
+        ``as_of`` (ISO date) anchors the aging; default today."""
+        try:
+            return svc.escalate_open_postings(as_of=as_of)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

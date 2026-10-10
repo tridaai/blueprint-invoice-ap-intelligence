@@ -104,7 +104,8 @@
     <h2>Approved, not yet posted (ERP loop open items)</h2>
     <div class="gate">
       <button id="loadopen" class="secondary">Load open items</button>
-      <span class="note" id="openote">Approved invoices with no posted receipt past the grace window — the postings the ERP still owes an answer for. A failed receipt keeps its item open, with the ERP's reason.</span>
+      <button id="escalateopen" class="secondary">Escalate open postings</button>
+      <span class="note" id="openote">Approved invoices with no posted receipt past the grace window — the postings the ERP still owes an answer for. A failed receipt keeps its item open, with the ERP's reason. Escalating fires the signed posting_escalation webhook for items past the escalation threshold — once per open episode, recorded on the invoice record.</span>
     </div>
     <div id="openbody"></div>
   </section>
@@ -300,7 +301,10 @@ function receiptHtml(r) {
   const line = rec
     ? `<p class="kv"><b>ERP posting receipt:</b> ${rec.status === "posted" ? pill("posted · " + (rec.external_reference || ""), "ok") : pill("failed — " + (rec.detail || ""), "bad")} · recorded by ${esc(rec.recorded_by || "")} · ${esc(rec.recorded_at || "")}</p>`
     : `<p class="kv"><b>ERP posting receipt:</b> none recorded yet — when the ERP answers the posting (see <span class="note">examples/erp_posting.py</span>), record its outcome here.</p>`;
-  return `${line}
+  const escalations = (r.posting_escalations || []).length
+    ? `<p class="kv"><b>Posting escalations</b> — the signed posting_escalation webhook, once per open episode</p><ul>${r.posting_escalations.map(e => `<li>${pill("escalated", "bad")} episode since ${esc(e.episode_since)} (receipt: ${esc(e.receipt_state)}) — ${e.age_days ?? "—"}d open vs the ${e.escalation_days}d threshold · webhook ${esc(e.dispatch_status)} · ${esc(e.dispatched_at)}</li>`).join("")}</ul>`
+    : "";
+  return `${line}${escalations}
     <div class="gate">
       <select id="rec-status"><option value="posted">posted</option><option value="failed">failed</option></select>
       <input type="text" id="rec-ref" placeholder="ERP document number (when posted)" size="26">
@@ -512,6 +516,15 @@ async function loadOpenItems() {
   $("openbody").innerHTML = (r.items || []).length ? `<table><tr><th>Invoice</th><th>Supplier</th><th>Amount</th><th>Approved by</th><th>Age</th><th>Receipt</th></tr>${r.items.map(i => `<tr><td>${esc(i.invoice_id)}<br><span class="note">${esc(i.invoice_number || "")}</span></td><td>${esc(i.supplier_name)}</td><td>${esc(i.currency)} ${i.total_amount ?? "—"}</td><td>${esc(i.decided_by || "—")}</td><td>${pill((i.age_days ?? "—") + "d since " + i.age_basis, "warn")}</td><td>${i.receipt_state === "failed" ? pill("posting failed", "bad") + `<br><span class="note">${esc(i.receipt_detail)}</span>` : pill("no receipt", "warn")}</td></tr>`).join("")}</table>` : `<p class="kv">No open items — every approval past the grace window has its posted receipt.</p>`;
 }
 $("loadopen").onclick = loadOpenItems;
+$("escalateopen").onclick = async () => {
+  const res = await fetch("/postings/escalate", {method: "POST", headers: headers()});
+  const body = await res.json();
+  if (!res.ok) { $("openote").textContent = `Escalation sweep failed (${res.status}): ${body.detail || ""}`; return; }
+  $("openote").textContent = body.length
+    ? `Escalated ${body.length} open posting(s): ${body.map(i => i.invoice_id).join(", ")} — the signed posting_escalation webhook fired for each, recorded on its record. With no webhook configured the sweep records nothing.`
+    : "No open posting crossed its escalation threshold in this sweep (or the webhook is not configured — then nothing fires and nothing is recorded).";
+  loadOpenItems();
+};
 
 async function loadWorklist() {
   const res = await fetch("/suppliers/marker-worklist", {headers: headers()});

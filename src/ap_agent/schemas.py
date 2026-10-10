@@ -467,6 +467,10 @@ class AgentResult(BaseModel):
     decision_reason: Optional[str] = None
     dispatch_status: Optional[str] = None  # sent | failed | None
     posting_receipt: Optional["PostingReceipt"] = None
+    # Open-posting escalations fired for this invoice (see
+    # PostingEscalation): the webhook ledger, deduped per open
+    # episode. Empty until a sweep finds the posting crossed.
+    posting_escalations: list["PostingEscalation"] = Field(default_factory=list)
     external_action_taken: bool = False
     error: Optional[str] = None
 
@@ -492,6 +496,31 @@ class PostingReceipt(BaseModel):
     recorded_by: str = ""
     recorded_at: str = ""  # ISO timestamp
     source: str = "erp_posting_receipt"
+
+
+class PostingEscalation(BaseModel):
+    """One escalation for an open posting: the signed
+    ``posting_escalation`` webhook fired when the posting crossed
+    the escalation threshold (``POSTING_ESCALATION_DAYS``) still
+    unposted.
+
+    The ledger lives on the invoice record, beside the receipt
+    fields it escalates against. Dedupe is per *episode* —
+    (receipt_state, episode_since): an episode runs from the
+    approval while no receipt exists, or from the latest failed
+    receipt (a failure is new information, worth one escalation
+    of its own once the episode crosses). A posted receipt closes
+    the item and ends the story; it is the reset. An attempt is
+    recorded whether the receiver answered (``sent``) or not
+    (``failed``): the ledger is the record that the crossing was
+    escalated, once."""
+
+    receipt_state: str = ""  # none | failed — the state escalated against
+    episode_since: str = ""  # ISO date the episode began — the crossing's identity
+    escalation_days: int = 0  # the threshold in force when it fired
+    age_days: Optional[int] = None  # the posting's age at the crossing
+    dispatched_at: str = ""  # ISO timestamp of the dispatch
+    dispatch_status: str = ""  # sent | failed
 
 
 class PostingReceiptRequest(BaseModel):
