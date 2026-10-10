@@ -80,7 +80,7 @@
     <h2>Escalation digest (today's escalations, composed — never sent)</h2>
     <div class="gate">
       <button id="loaddigest" class="secondary">Load digest</button>
-      <span class="note" id="digestnote">The day's escalations in one summary: recovery cases past their SLA, escalated postings, stuck invoices, four-eyes stalls, forecast lapses and realised drift. Composed from the records; the agent sends nothing.</span>
+      <span class="note" id="digestnote">The day's escalations in one summary: recovery cases past their SLA, escalated postings, stuck invoices, four-eyes stalls, forecast lapses and realised drift — plus the standing governance lines: four-eyes wait budgets breached this month and onboarding changes whose decision windows are closing. Composed from the records; the agent sends nothing.</span>
     </div>
     <div id="digestbody"></div>
     <div class="gate" style="margin-top:10px">
@@ -100,6 +100,23 @@
       <span class="note" id="paynote">Groups the approved invoices by currency + due window. Confirming records the lead's acceptance; the AP system of record executes the run. A run above the four-eyes threshold also needs a second, different confirmer before its hand-off file can be generated.</span>
     </div>
     <div id="payrunsbody"></div>
+  </section>
+  <section id="sec-profiles">
+    <h2>Hand-off profiles (governed routing — per supplier / per currency)</h2>
+    <p class="note">The payee side's say in the export: which format its bank or ERP ingests, how many lead days a pain.001 requested execution date needs, and whether its bank rejects at-import creditor markers. Setting a profile names its actor and appends to the profile's audit trail. Exports resolve it deterministically — a format named on the export wins, then the currency profile, then a supplier profile the run's members agree on, else the CSV default. A supplier whose bank rejects markers is flagged on the run at proposal time while the master holds no bank details for it.</p>
+    <div class="gate">
+      <select id="hp-scope"><option value="currency">Currency</option><option value="supplier">Supplier</option></select>
+      <input type="text" id="hp-key" placeholder="Currency code (EUR) or supplier name" size="30">
+      <select id="hp-format"><option value="csv">CSV</option><option value="pain001">pain.001</option></select>
+      <input type="text" id="hp-lead" placeholder="Lead days" size="9">
+      <label class="note"><input type="checkbox" id="hp-markers"> bank rejects markers</label>
+      <input type="text" id="hp-note" placeholder="Note (why — e.g. bank portal)" size="26">
+      <input type="text" id="hp-actor" placeholder="Your name" size="16">
+      <button id="hp-set">Set profile</button>
+      <button id="hp-load" class="secondary">Load profiles</button>
+    </div>
+    <span class="note" id="hpnote">No profiles loaded yet.</span>
+    <div id="hpbody"></div>
   </section>
   <section id="sec-openitems">
     <h2>Approved, not yet posted (ERP loop open items)</h2>
@@ -380,14 +397,15 @@ function runControls(run) {
   }
   if (run.four_eyes_required) html += `${pill("four-eyes complete", "ok")} `;
   html += run.handoff_key
-    ? `<span class="note">hand-off (${esc(run.handoff_format || "csv")}): ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…</span> <button class="secondary" data-download="${esc(run.run_id)}" data-format="${esc(run.handoff_format || "csv")}">Download ${run.handoff_format === "pain001" ? "pain.001 XML" : "CSV"}</button>`
-    : ` <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="csv">Generate CSV</button> <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="pain001">Generate pain.001 XML</button>`;
+    ? `<span class="note">hand-off (${esc(run.handoff_format || "csv")}): ${esc(run.handoff_key)} · sha256 ${esc((run.handoff_sha256 || "").slice(0, 12))}…${run.handoff_profile_id ? ` · profile ${esc(run.handoff_profile_id)}` : ""}${run.handoff_execution_date ? ` · execute ${esc(run.handoff_execution_date)}` : ""}</span> <button class="secondary" data-download="${esc(run.run_id)}" data-format="${esc(run.handoff_format || "csv")}">Download ${run.handoff_format === "pain001" ? "pain.001 XML" : "CSV"}</button>`
+    : ` <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="csv">Generate CSV</button> <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="pain001">Generate pain.001 XML</button> <button class="secondary" data-handoff="${esc(run.run_id)}" data-format="">Generate via profile</button>`;
   return html;
 }
 function renderRuns(runs) {
   $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
     <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b>${run.four_eyes_threshold ? ` · four-eyes threshold ${esc(run.currency)} ${run.four_eyes_threshold}` : ""}${run.second_confirmed_by ? ` · four-eyes wait cost ${esc(run.currency)} ${run.four_eyes_wait_cost || 0}${(run.four_eyes_wait_lapses || []).length ? ` (${run.four_eyes_wait_lapses.length} discount(s) lapsed during the wait: ${run.four_eyes_wait_lapses.map(l => esc(l.invoice_id) + " " + l.discount_amount).join(", ")})` : " (no discount lapsed during the wait)"}` : ""} · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || "") + (run.second_confirmed_by ? " + " + run.second_confirmed_by : ""), "ok") : pill("proposed", "info")} ${runControls(run)}</p>
     ${(run.handoff_drift || []).map(d => `<p class="note" style="margin:2px 0">${pill("discount drift", "warn")} ${esc(d.invoice_id)} — ${esc(run.currency)} ${d.discount_lost} of discount lost: ${esc(d.reason)}</p>`).join("")}
+    ${(run.handoff_profile_flags || []).map(f => `<p class="note" style="margin:2px 0">${pill("bank rejects markers", "bad")} ${esc(f)}</p>`).join("")}
     ${(run.drift_forecast || []).map(f => `<p class="note" style="margin:2px 0">${pill("drift forecast", "warn")} ${esc(f.invoice_id)} — ${esc(f.message)}</p>`).join("")}
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
@@ -408,7 +426,7 @@ async function confirmSecond(runId) {
 async function exportHandoff(runId, format) {
   const actor = $("lead").value.trim();
   if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — hand-off generation is attributable."; return; }
-  const res = await fetch(`/payment-runs/${runId}/handoff?format=${encodeURIComponent(format || "csv")}`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const res = await fetch(`/payment-runs/${runId}/handoff?format=${encodeURIComponent(format ?? "csv")}`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
   const body = await res.json();
   if (!res.ok) { $("paynote").textContent = `Hand-off refused (${res.status}): ${body.detail || ""}`; return; }
   const drift = (body.handoff_drift || []).length ? ` Discount drift flagged on the run: ${body.handoff_drift.map(d => d.invoice_id + " lost " + d.discount_lost).join(", ")} — drifted members are exported at full gross.` : "";
@@ -416,7 +434,8 @@ async function exportHandoff(runId, format) {
   const done = cred.filter(e => e.source === "supplier_master");
   const marked = cred.filter(e => e.source !== "supplier_master");
   const completion = cred.length ? ` Creditor accounts: ${done.length} completed from the supplier master${done.length ? " (" + done.map(e => e.invoice_id + " " + e.account_label).join(", ") + ")" : ""}${marked.length ? `; ${marked.length} still carry the at-import marker (${marked.map(e => e.invoice_id).join(", ")})` : ""}.` : "";
-  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.${drift}${completion}`;
+  const profile = body.handoff_profile_id ? ` Format ${body.handoff_format} resolved by profile ${body.handoff_profile_id}${body.handoff_execution_date ? `, requested execution ${body.handoff_execution_date}` : ""}.` : "";
+  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.${profile}${drift}${completion}`;
   loadRuns();
 }
 async function downloadHandoff(runId, format) {
@@ -532,9 +551,9 @@ async function loadWorklist() {
   const w = await res.json();
   if (!res.ok) { $("worklistnote").textContent = `Worklist failed to load (${res.status}): ${w.detail || ""}`; return; }
   const totals = Object.entries(w.totals_by_currency || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
-  $("worklistnote").textContent = `${w.supplier_count} supplier(s) still exporting marked${totals ? " · marked value " + totals : ""}${w.in_flight_count ? ` · ${w.in_flight_count} onboarding in flight (do not chase twice)` : ""}${w.rejected_count ? ` · ${w.rejected_count} with a rejected change on record` : ""}${w.resolved_supplier_count ? ` · ${w.resolved_supplier_count} supplier(s) onboarded since (resolved)` : ""}.`;
+  $("worklistnote").textContent = `${w.supplier_count} supplier(s) still exporting marked${totals ? " · marked value " + totals : ""}${w.in_flight_count ? ` · ${w.in_flight_count} onboarding in flight (do not chase twice)` : ""}${w.expiring_soon_count ? ` · ${w.expiring_soon_count} with a decision window closing` : ""}${w.rejected_count ? ` · ${w.rejected_count} with a rejected change on record` : ""}${w.resolved_supplier_count ? ` · ${w.resolved_supplier_count} supplier(s) onboarded since (resolved)` : ""}.`;
   const stateCell = i => {
-    if (i.onboarding_state === "in_flight") return `<span class="pill info">Onboarding in flight</span><br><span class="note">${esc(i.in_flight_change_id)} proposed by ${esc(i.in_flight_proposed_by || "—")}${i.in_flight_age_days != null ? ` · ${i.in_flight_age_days}d waiting` : ""} · decision owed by a second operator</span>`;
+    if (i.onboarding_state === "in_flight") return `<span class="pill info">Onboarding in flight</span><br><span class="note">${esc(i.in_flight_change_id)} proposed by ${esc(i.in_flight_proposed_by || "—")}${i.in_flight_age_days != null ? ` · ${i.in_flight_age_days}d waiting` : ""} · decision owed by a second operator</span>${i.in_flight_expiring_soon ? `<br>${pill("window closing — " + (i.in_flight_days_to_expiry ?? "?") + "d left", "bad")}` : (i.in_flight_days_to_expiry != null ? `<br><span class="note">${i.in_flight_days_to_expiry}d of decision window left</span>` : "")}`;
     if (i.onboarding_state === "rejected") return `<span class="pill bad">Change rejected</span><br><span class="note">${esc(i.rejected_change_id)} rejected by ${esc(i.rejected_by || "—")}${i.rejected_at ? " on " + esc(String(i.rejected_at).slice(0, 10)) : ""}${i.rejection_note ? " — " + esc(i.rejection_note) : ""} · re-propose deliberately</span>`;
     return `<span class="pill warn">Open</span>`;
   };
@@ -550,6 +569,28 @@ async function loadWorklist() {
   });
 }
 $("loadworklist").onclick = loadWorklist;
+
+async function loadProfiles() {
+  const res = await fetch("/handoff/profiles", {headers: headers()});
+  const ps = await res.json();
+  if (!res.ok) { $("hpnote").textContent = `Profiles failed to load (${res.status}): ${ps.detail || ""}`; return; }
+  $("hpnote").textContent = ps.length ? `${ps.length} profile(s) in force — exports resolve them per run; the audit trail rides each record.` : "No profiles in force — exports use the format named on the call, else the CSV default.";
+  $("hpbody").innerHTML = ps.length ? `<table><tr><th>Profile</th><th>Scope</th><th>Format</th><th>Lead</th><th>Markers</th><th>Set by</th><th>Audit trail</th></tr>${ps.map(p => `<tr><td>${esc(p.profile_id)}</td><td>${esc(p.scope)}: ${esc(p.scope === "supplier" ? p.supplier_name : p.currency)}</td><td>${pill(p.format, p.format === "pain001" ? "info" : "ok")}</td><td>${p.lead_days}d</td><td>${p.markers_rejected ? pill("rejected by bank", "bad") : "accepted"}</td><td>${esc(p.updated_by || "—")}<br><span class="note">${esc((p.updated_at || "").slice(0, 10))}</span></td><td><span class="note">${(p.history || []).map(e => esc(e.action) + " by " + esc(e.actor) + " (" + esc((e.at || "").slice(0, 10)) + "): " + esc(e.detail)).join("<br>")}</span></td></tr>`).join("")}</table>` : "";
+}
+$("hp-load").onclick = loadProfiles;
+$("hp-set").onclick = async () => {
+  const actor = $("hp-actor").value.trim();
+  if (!actor) { $("hpnote").textContent = "Enter your name first — a profile is governed configuration; an unattributed set is refused."; return; }
+  const scope = $("hp-scope").value;
+  const key = $("hp-key").value.trim();
+  const payload = {actor, scope, format: $("hp-format").value, lead_days: parseInt($("hp-lead").value || "0", 10) || 0, markers_rejected: $("hp-markers").checked, note: $("hp-note").value.trim()};
+  if (scope === "supplier") payload.supplier_name = key; else payload.currency = key;
+  const res = await fetch("/handoff/profiles", {method: "POST", headers: headers(), body: JSON.stringify(payload)});
+  const body = await res.json();
+  if (!res.ok) { $("hpnote").textContent = `Profile refused (${res.status}): ${body.detail || ""}`; return; }
+  $("hpnote").textContent = `Profile ${body.profile_id} set by ${body.updated_by} — format ${body.format}, lead ${body.lead_days}d${body.markers_rejected ? ", markers rejected by the payee's bank" : ""}. It applies from the next proposal/export; it changed no run by itself.`;
+  loadProfiles();
+};
 
 $("propose").onclick = async () => {
   const res = await fetch("/payment-runs/propose", {method: "POST", headers: headers(), body: JSON.stringify({window_days: 7})});
