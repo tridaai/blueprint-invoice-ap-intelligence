@@ -5,7 +5,10 @@ backend) over ``golden.jsonl`` through ONE service instance in file
 order — order matters: the duplicate case only duplicates because the
 original invoice was analysed earlier in the same run, exactly like a
 real AP queue. Reports triage outcome accuracy and match-status
-accuracy. All cases are synthetic. Run from the repo root:
+accuracy, then matches the bundled sample credit notes against the
+populated store (a credit note only settles because its invoice was
+processed earlier in the run). All cases are synthetic. Run from the
+repo root:
 
     python evals/run_evals.py
 
@@ -22,13 +25,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ap_agent.samples import load_sample_invoices  # noqa: E402
-from ap_agent.schemas import InvoiceInput  # noqa: E402
+from ap_agent.samples import load_sample_credit_notes, load_sample_invoices  # noqa: E402
+from ap_agent.schemas import CreditNoteInput, InvoiceInput  # noqa: E402
 from ap_agent.service import InvoiceService  # noqa: E402
 from ap_agent.store import InMemoryStore  # noqa: E402
 
 GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
 THRESHOLD = 0.95
+
+# The credit-note expectations: each bundled sample credit note,
+# matched against the store the case loop above has populated (the
+# referenced invoice is one of the samples, analysed earlier in the
+# same run — the order dependency is the point).
+EXPECTED_CREDIT_NOTES = {
+    "CN-3001": {
+        "matched_invoice_id": "INV-1002",
+        "status": "settles_variance",
+        "settles_variance": True,
+        "overbilled_amount": 94.40,
+    },
+}
 
 
 def _write_results(payload: dict) -> None:
@@ -91,9 +107,35 @@ def evaluate(cases: list[dict]) -> dict:
                     f"{case['expected_severity']}, got {result.triage.severity}"
                 )
 
+    # Credit-note matching runs against the same store, after the
+    # invoices it references have been processed.
+    credit_total = 0
+    credit_correct = 0
+    for payload in load_sample_credit_notes():
+        note = CreditNoteInput.model_validate(payload)
+        expected = EXPECTED_CREDIT_NOTES.get(note.credit_note_id)
+        if expected is None:
+            continue
+        credit_total += 1
+        match = service.match_credit_note(note)
+        got = {
+            "matched_invoice_id": match.matched_invoice_id,
+            "status": match.status,
+            "settles_variance": match.settles_variance,
+            "overbilled_amount": match.overbilled_amount,
+        }
+        if got == expected:
+            credit_correct += 1
+        else:
+            failures.append(
+                f"credit-note {note.credit_note_id}: expected {expected}, got {got}"
+            )
+
     total = len(cases)
     return {
         "total": total,
+        "credit_note_total": credit_total,
+        "credit_note_correct": credit_correct,
         "outcome_correct": outcome_correct,
         "outcome_accuracy": round(outcome_correct / total, 4) if total else 0.0,
         "match_correct": match_correct,
@@ -123,6 +165,7 @@ def main() -> int:
     passed = (
         scored["outcome_accuracy"] >= THRESHOLD
         and scored["match_accuracy"] >= THRESHOLD
+        and scored["credit_note_correct"] == scored["credit_note_total"]
     )
 
     _write_results(
@@ -132,6 +175,9 @@ def main() -> int:
             "total": total,
             "outcome_match": f"{scored['outcome_correct']}/{total}",
             "match_status_match": f"{scored['match_correct']}/{total}",
+            "credit_note_match": (
+                f"{scored['credit_note_correct']}/{scored['credit_note_total']}"
+            ),
             "outcome_correct": scored["outcome_correct"],
             "outcome_accuracy": scored["outcome_accuracy"],
             "match_correct": scored["match_correct"],
@@ -160,6 +206,10 @@ def main() -> int:
             f"Severity accuracy       : {scored['severity_correct']}/"
             f"{scored['severity_total']} (where labelled)"
         )
+    print(
+        f"Credit-note matching    : {scored['credit_note_correct']}/"
+        f"{scored['credit_note_total']}"
+    )
     for outcome, row in scored["per_outcome"].items():
         print(f"  {outcome:<20} {row['correct']}/{row['total']}")
     if scored["failures"]:

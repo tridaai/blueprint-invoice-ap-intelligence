@@ -156,6 +156,9 @@ class InMemoryStore:
         with self._lock:
             return self._records.get(invoice_id)
 
+    def list_records(self) -> list[ApprovalRecord]:
+        return self._all()
+
     def _all(self) -> list[ApprovalRecord]:
         with self._lock:
             return list(self._records.values())
@@ -236,6 +239,9 @@ class PostgresStore:
                 )
                 row = cur.fetchone()
         return _load_record(row["payload"]) if row else None
+
+    def list_records(self) -> list[ApprovalRecord]:
+        return [_load_record(payload) for payload in self._all_payloads()]
 
     def _all_payloads(self) -> list:
         with self._connect() as conn:

@@ -34,7 +34,7 @@ from .events import CallbackSink, RunEvent
 from .logging_config import configure_logging, new_request_id, request_id_var
 from .policies_data import POLICIES
 from .samples import load_sample_invoices
-from .schemas import AgentResult, DecisionRequest, InvoiceInput
+from .schemas import AgentResult, CreditNoteInput, CreditNoteMatch, DecisionRequest, InvoiceInput
 from .service import InvoiceService
 from .wiring import build_service_from_env
 
@@ -254,6 +254,13 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             yield _sse(final)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
+
+    @app.post("/credit-notes/match", response_model=CreditNoteMatch, dependencies=_AUTH)
+    def match_credit_note(note: CreditNoteInput) -> CreditNoteMatch:
+        """Match a credit note against the processed invoices: does
+        it settle a variance the pipeline computed? Report only — the
+        call changes no invoice's state."""
+        return svc.match_credit_note(note)
 
     @app.get("/invoices/{invoice_id}", response_model=AgentResult, dependencies=_AUTH)
     def get_result(invoice_id: str) -> AgentResult:

@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .schemas import InvoiceInput
+from .schemas import CreditNoteInput, InvoiceInput
 
 _DATA = Path(__file__).parent / "data" / "sample_invoices.json"
+_CREDIT_DATA = Path(__file__).parent / "data" / "sample_credit_notes.json"
 
 
 def load_sample_invoices() -> list[dict]:
@@ -22,3 +23,11 @@ def load_sample_invoices() -> list[dict]:
 
 def sample_invoice_models() -> list[InvoiceInput]:
     return [InvoiceInput.model_validate(item) for item in load_sample_invoices()]
+
+
+def load_sample_credit_notes() -> list[dict]:
+    return json.loads(_CREDIT_DATA.read_text(encoding="utf-8"))
+
+
+def sample_credit_note_models() -> list[CreditNoteInput]:
+    return [CreditNoteInput.model_validate(item) for item in load_sample_credit_notes()]

@@ -468,6 +468,53 @@ class AgentResult(BaseModel):
     error: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Credit notes (a supplier document that arrives after the invoice)
+# ---------------------------------------------------------------------------
+
+class CreditNoteInput(BaseModel):
+    """A credit note as it arrives: its own document, referencing the
+    supplier invoice number it credits. Matching it against the
+    processed invoices is a query over the store (creditnotes.py) —
+    it changes no invoice's state."""
+
+    credit_note_id: str
+    supplier_name: str = ""
+    credit_note_number: str = ""
+    credit_date: str = ""
+    currency: str = "USD"
+    amount: Optional[float] = None
+    referenced_invoice_number: str = ""  # the supplier invoice number credited
+    reason: str = ""
+    documents: list[DocumentInput] = Field(default_factory=list)
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _num_opt(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        return _to_float(v)
+
+
+class CreditNoteMatch(BaseModel):
+    """The credit-note match report: which processed invoice the note
+    belongs to, how much that invoice was overbilled (computed from
+    its match facts), and whether the credit settles that variance."""
+
+    credit_note_id: str
+    credit_note_number: str = ""
+    supplier_name: str = ""
+    referenced_invoice_number: str = ""
+    matched_invoice_id: str = ""  # our invoice id; "" when unmatched
+    status: str = "unmatched"  # settles_variance | partial_settlement | exceeds_variance | no_variance | currency_mismatch | unmatched
+    credit_amount: float = 0.0
+    overbilled_amount: float = 0.0
+    remaining_variance: float = 0.0
+    settles_variance: bool = False
+    basis: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
 class AnalyzeRequest(BaseModel):
     invoice: InvoiceInput
 

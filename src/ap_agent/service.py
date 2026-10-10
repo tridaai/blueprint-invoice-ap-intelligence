@@ -32,12 +32,13 @@ from dataclasses import dataclass, field
 
 from .checkpoints import get_checkpointer
 from .config import env_float, env_str, load_dotenv
+from .creditnotes import evaluate_credit_note
 from .graph import resume_approval, run_invoice
 from .model_backends import ModelBackend, get_backend
 from .ocr import get_ocr_engine
 from .ports import Checkpointer, DocVision, EventSink, OcrEngine
 from .retriever import Retriever, get_retriever
-from .schemas import AgentResult, InvoiceInput
+from .schemas import AgentResult, CreditNoteInput, CreditNoteMatch, InvoiceInput
 from .store import ApprovalRecord, default_store, find_duplicate, supplier_summary
 from .vision import get_vision_engine
 
@@ -420,3 +421,22 @@ class InvoiceService:
     def get(self, invoice_id: str) -> AgentResult | None:
         record = self._get_store().get(invoice_id)
         return record.result if record else None
+
+    def match_credit_note(
+        self, note: CreditNoteInput | dict
+    ) -> CreditNoteMatch:
+        """Match a supplier credit note against the processed invoices.
+
+        A pure query over the store: the note is tied to the invoice
+        it references (supplier + supplier invoice number), that
+        invoice's overbilled amount is recomputed from its stored
+        match facts, and the report says whether the credit settles
+        the variance. Nothing is written — an approver acts on the
+        report.
+        """
+        model = (
+            note
+            if isinstance(note, CreditNoteInput)
+            else CreditNoteInput.model_validate(note)
+        )
+        return evaluate_credit_note(model, self._get_store().list_records())
