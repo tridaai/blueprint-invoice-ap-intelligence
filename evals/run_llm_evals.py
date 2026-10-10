@@ -27,6 +27,15 @@ The pipeline now computes the screen itself from whatever priors
 it is handed — but a harness that hands it none is grading a
 pipeline nobody runs.
 
+The judge's completion budget (``JUDGE_MAX_TOKENS``, default
+2000) is sized for reasoning models: a reasoning judge spends
+part of its budget thinking before the verdict JSON exists, and
+at the original 300 tokens a live slice lost 4 of 6 verdicts to
+"judge reply was not a JSON object" — the budget ran out
+mid-thought and the answer channel came back empty. The budget
+is the judge's alone; the pipeline's drafting budgets are
+unchanged.
+
 Exit codes: 0 = pack passed, 1 = pack ran and failed, 2 = NOT RUN —
 no real provider configured. The refusal is loud on purpose: an
 LLM-mode score produced by the offline fallback would be fiction.
@@ -43,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from ap_agent.config import env_int  # noqa: E402
 from ap_agent.matching import format_match_summary  # noqa: E402
 from ap_agent.model_backends import (  # noqa: E402
     estimate_cost_usd,
@@ -59,8 +69,30 @@ from ap_agent.store import InMemoryStore  # noqa: E402
 GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
 RESULTS = Path(__file__).resolve().parent / "llm_results.json"
 
+# The judge's completion budget. Reasoning judges think before
+# they answer, inside the same budget: too small a budget returns
+# an empty or truncated answer channel, which reads as "not a
+# JSON object" and fails the pack for a harness reason, not a
+# drafting one. 2000 leaves room for the thought and the verdict;
+# JUDGE_MAX_TOKENS overrides it (a non-reasoning judge is fine
+# with far less), and --judge-max-tokens overrides both.
+DEFAULT_JUDGE_MAX_TOKENS = 2000
 
-def judge_draft(backend, result, judge_model: str | None) -> dict:
+
+def judge_max_tokens(cli_value: int | None = None) -> int:
+    """The judge budget in force: CLI flag, then JUDGE_MAX_TOKENS,
+    then the default — never below 1."""
+    if cli_value is not None:
+        return max(1, cli_value)
+    return max(1, env_int("JUDGE_MAX_TOKENS", DEFAULT_JUDGE_MAX_TOKENS))
+
+
+def judge_draft(
+    backend,
+    result,
+    judge_model: str | None,
+    max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS,
+) -> dict:
     """One LLM-judge verdict for a produced draft pair. Never raises: a
     failed judge call is a ``judge_error`` verdict, which fails the pack."""
     user = JUDGE_USER_TEMPLATE.format(
@@ -77,7 +109,7 @@ def judge_draft(backend, result, judge_model: str | None) -> dict:
     )
     try:
         text, _usage = backend.complete_with_usage(
-            JUDGE_SYSTEM_PROMPT, user, max_tokens=300, model=judge_model
+            JUDGE_SYSTEM_PROMPT, user, max_tokens=max_tokens, model=judge_model
         )
     except Exception as exc:  # a broken judge must not look like a pass
         return {"judge_error": f"{type(exc).__name__}: {exc}"}
@@ -113,7 +145,9 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N cases")
     parser.add_argument("--outcomes", type=str, default=None, help="Comma-separated expected outcomes to include")
     parser.add_argument("--judge-model", type=str, default=None, help="Model override for the judge calls")
+    parser.add_argument("--judge-max-tokens", type=int, default=None, help="Judge completion budget (default: JUDGE_MAX_TOKENS or 2000 — reasoning judges need room to think before the verdict)")
     args = parser.parse_args()
+    judge_budget = judge_max_tokens(args.judge_max_tokens)
 
     backend = get_backend()
     if backend.name == "mock":
@@ -147,7 +181,7 @@ def main() -> int:
         payload = case.get("invoice") or samples[case["sample_id"]]
         invoice = InvoiceInput.model_validate(payload)
         result = service.analyze(invoice)
-        verdict = judge_draft(backend, result, args.judge_model)
+        verdict = judge_draft(backend, result, args.judge_model, max_tokens=judge_budget)
         outcome_ok = result.triage.outcome == case["expected_outcome"]
         outcome_hits += outcome_ok
         rows.append(
@@ -180,6 +214,7 @@ def main() -> int:
         "backend": backend.name,
         "model": model,
         "judge_model": args.judge_model or model,
+        "judge_max_tokens": judge_budget,
         "cases": total,
         "outcome_match": f"{outcome_hits}/{total}",
         "drafts_grounded": f"{grounded}/{total}",
