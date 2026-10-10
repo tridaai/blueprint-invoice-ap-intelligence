@@ -128,22 +128,30 @@ The graph ends in an interrupt: the run pauses at `approval_gate` with its full 
 
 The autonomy recommendation is computed, printed, and never acted on: eligible only for `clean_match`, low severity, `full_match`, at or under the approval threshold, no fraud flags, validation green, no repair, an agreeing cross-check, and an unblocked reviewer. Its purpose is to make the automation roadmap discussable with data instead of vibes.
 
-The approval webhook (`ACTION_WEBHOOK_URL`) is the single external action in the system, opt-in, fired after a human decision — it announces that a packet was approved; it does not pay anything.
+The approval webhook (`ACTION_WEBHOOK_URL`) is the single external action in the system, opt-in, fired after a human decision — it announces that a packet was approved; it does not pay anything. When `ACTION_WEBHOOK_SECRET` is set, the body is HMAC-SHA256 signed (`X-Trida-Signature: sha256=<hex>`) so the receiving system can verify origin and integrity before acting on it.
 
 ## 10. Observability and cost control
 
 Every run returns telemetry: backend, model, call count, token usage, estimated cost (a small price table; models outside it — including Nemotron — report `None`, shown as n/a, never invented), latency, and per-node timings via the event sink (the API's SSE stream is the same events). `RUN_TOKEN_BUDGET` wraps the backend in a guard that, once the budget is spent, hides the optional provider capabilities so later steps degrade to their deterministic paths instead of failing mid-run — the run completes, labelled honestly.
 
-Structured JSON logging with request IDs threads the API surface; the CLI's `--stream` flag prints the same event stream for a local run.
+Structured JSON logging with request IDs threads the API surface; the CLI's `--stream` flag prints the same event stream for a local run. Two read surfaces aggregate the store itself: `GET /metrics` (runs, outcomes, decisions, mean latency, token/cost totals summed only over runs that reported them — null, not zero, when none did) and `GET /audit/export` (JSON/CSV: one row per invoice with the triage conclusion, the human decision and its reason, and the dispatch outcome). Aggregating at read time keeps the store the single source of truth — there is no counters table to drift.
 
 ## 11. Evaluation
 
-Two packs, both in-repo. The deterministic pack (`evals/run_evals.py`) runs 28 golden cases — the 12 samples plus 16 constructed variants — through one service instance in queue order (order is load-bearing for the duplicate case) and gates on triage-outcome and match-status accuracy at 95%. The opt-in LLM pack (`evals/run_llm_evals.py`) runs the same cases against a live provider and adds an LLM judge for draft grounding and cleanliness; it exits 2 without a provider rather than grade the offline templates. Neither pack claims real-world accuracy: the golden set is synthetic and exists as a regression gate.
+Two packs, both in-repo. The deterministic pack (`evals/run_evals.py`) runs 28 golden cases — the 12 samples plus 16 constructed variants — through one service instance in queue order (order is load-bearing for the duplicate case) and gates on triage-outcome and match-status accuracy at 95%; it then matches the bundled sample credit notes against the populated store, so a note can only settle a variance its invoice actually computed. The opt-in LLM pack (`evals/run_llm_evals.py`) runs the same cases against a live provider and adds an LLM judge for draft grounding and cleanliness; it exits 2 without a provider rather than grade the offline templates. Neither pack claims real-world accuracy: the golden set is synthetic and exists as a regression gate.
 
 ## 12. Testing posture
 
-The pytest suite (96 tests) is hermetic: in-memory doubles for the store, checkpointer, and object store; scripted fake backends for the provider seams; fake NIM engines for the OCR/vision ports. Test doubles are test design, not a runtime mode — the documented runtime stores are Postgres and S3. Postgres behaviour is covered by integration tests gated on `DATABASE_URL` (store round-trip, checkpointer pause/resume across instances, pgvector retrieval with a stubbed embeddings client) that skip cleanly when no database is configured.
+The pytest suite (126 tests) is hermetic: in-memory doubles for the store, checkpointer, and object store; scripted fake backends for the provider seams; fake NIM engines for the OCR/vision ports. Test doubles are test design, not a runtime mode — the documented runtime stores are Postgres and S3. Postgres behaviour is covered by integration tests gated on `DATABASE_URL` (store round-trip, checkpointer pause/resume across instances, pgvector retrieval with a stubbed embeddings client) that skip cleanly when no database is configured.
 
-## 13. From prototype to production
+## 13. Follow-on AP work: discounts, credit notes, statements
+
+Three surfaces operate over the processed queue rather than a single run, all with the same discipline — code computes, humans decide, nothing external happens:
+
+- **Early-payment discounts** (`discounts.py`) are priced inside the run: terms are parsed from the intake (`payment_terms` field or a document field), the gross saving is compared against the cost of paying early at the configured cost of capital, and a worthwhile net saving enters the approve option's score (capped) and is quantified in the packet. The deadline is stated as a condition — the payment-language guardrail rejected an earlier "paid by" phrasing, correctly, and the packet wording was changed rather than the guardrail.
+- **Credit-note matching** (`creditnotes.py`) answers "does this credit settle a variance we computed?" from stored match facts: overbilling is recomposed per line (price, quantity, short receipt, missing-on-PO) and grossed at the invoice's effective tax rate, so the comparison is tax-inclusive like the credit itself. It is a query: no invoice state changes.
+- **Statement reconciliation** (`reconciliation.py`) lines a supplier statement up against the store's history projection. Its summary is composed deterministically (`summary_source: template`) by design: on this surface a plain summary beats a fluent one that might invent a figure. Reports persist (migration 0004) for human confirmation; confirmation touches the report only.
+
+## 14. From prototype to production
 
 What changes for a real AP deployment, in rough order: SSO + role-based access on the gate (approver ≠ requester enforcement); an ERP/AP-system integration behind the webhook (the packet becomes a posting, still human-triggered); bank-detail master data with out-of-band change workflows (the agent's block becomes one signal among several); document ingestion from the mailroom/scanner pipeline writing blobs to object storage; per-entity policy corpora replacing the synthetic 12; NIM self-hosting or hosted-key management in the platform's secret store; and the LLM-judge pack running in CI against recorded provider budgets. What does not change: the ports, the match arithmetic, the guardrails, or the rule that the agent prepares and a human decides.

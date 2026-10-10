@@ -54,11 +54,17 @@ AP teams drown in document work that is simple to describe and miserable to do: 
 7. **Triage** — rules first ({clean_match, price_variance, quantity_variance, missing_po, missing_receipt, duplicate_suspected, unreadable, not_an_invoice}), then an LLM cross-check with an explicit resolution policy: agreement stands, strong rules beat a disagreeing model, a weak rule yields to a confident model.
 8. **Retrieve** — the synthetic AP policy corpus (12 policies) via keyword, semantic (pgvector), or hybrid retrieval with reciprocal-rank fusion.
 9. **Diagnose** — a bounded tool loop (search_policies, match_facts, supplier_history, po_lookup) grounded in the computed match, plus supplier history and prior approver feedback from the store.
-10. **Options** — five next steps proposed by the model (or templates), always scored and ranked by code; a fraud block zeroes the approve option's fit.
+10. **Options** — five next steps proposed by the model (or templates), always scored and ranked by code; a fraud block zeroes the approve option's fit. Early-payment terms are priced in code first ("2/10 net 30": gross saving vs the cost of paying early at `COST_OF_CAPITAL_ANNUAL_PCT`), and a worthwhile net saving raises the approve option's score and is quantified in its wording and in the packet.
 11. **Draft** — a supplier query letter + an internal AP packet, fenced against untrusted supplier text.
 12. **Verify + review** — a self-check (amounts must come from the match, citations must be retrieved, no payment language) and an independent reviewer that did not draft.
 13. **Guardrails (code)** — `no_payment_language`, `no_prohibited_promises`, `no_pii_in_draft`, citations present, invoice id present. Failures trigger a bounded repair loop; a still-failing draft **cannot be approved** (the API returns 422).
 14. **Gate** — the run checkpoints and waits. A finance approver approves or rejects with name + reason. An autonomy recommendation (auto-triage eligible only for clean matches under the approval threshold with every check green) is printed, never acted on.
+
+Beyond the single invoice, three follow-on surfaces work over the processed queue:
+
+15. **Credit-note matching** — a credit note that arrives later is tied to the invoice it references, and its amount is compared against the overbilling *recomputed from that invoice's stored match facts* (price/quantity/short-receipt overbilling, grossed at the invoice's tax rate): settles / partial / exceeds / no variance. Report only (`POST /credit-notes/match`).
+16. **Statement reconciliation** — a supplier statement is lined up against the processed invoices (matched / amount differs / never processed / missing from the statement) with a summary a human confirms (`POST /statements/reconcile`). Report only — confirming changes the report, never an invoice.
+17. **Ops surfaces** — `GET /metrics` (runs, outcomes, decisions, latency, model spend, aggregated from the records) and `GET /audit/export` (JSON/CSV audit trail: conclusion, human decision + reason, dispatch). The approval webhook can be HMAC-signed (`ACTION_WEBHOOK_SECRET`) so the receiving system can verify it.
 
 ## Quickstart
 
@@ -89,8 +95,8 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 96 tests
-make evals       # golden set: 28/28 outcome + match status
+make test        # 126 tests
+make evals       # golden set: 28/28 outcome + match status, credit-note 1/1
 ```
 
 The offline path uses a deterministic template backend and the documents' provided text layer. It is labelled everywhere it appears: it proves the plumbing, not the model quality. The LLM-judge eval pack (`make llm-evals`) refuses to run without a real provider — exit code 2 — rather than grade its own templates.
@@ -99,7 +105,7 @@ The offline path uses a deterministic template backend and the documents' provid
 
 | ID | Scenario | Designed outcome |
 |---|---|---|
-| INV-1001 | Clean three-way match | clean_match |
+| INV-1001 | Clean three-way match, "2/10 net 30" terms | clean_match (+ a priced early-payment saving) |
 | INV-1002 | Unit price +8% over PO | price_variance (high) |
 | INV-1003 | Short shipment (80 of 100 received) | quantity_variance |
 | INV-1004 | Same supplier/number/amount as INV-1001 | duplicate_suspected |
@@ -129,6 +135,8 @@ Everything is environment variables (`.env` supported; real env wins). The full 
 | `S3_BUCKET` / `S3_ENDPOINT_URL` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3-compatible document storage (MinIO in compose) |
 | `RUN_TOKEN_BUDGET` | Per-run token budget; later provider steps degrade to templates when exceeded |
 | `ACTION_WEBHOOK_URL` | Opt-in: POSTed once on approval — the only external action available |
+| `ACTION_WEBHOOK_SECRET` | When set, the webhook body is HMAC-SHA256 signed (`X-Trida-Signature`) |
+| `COST_OF_CAPITAL_ANNUAL_PCT` | Cost of capital (default 6.0) used to price early-payment discounts |
 | `API_KEY` | When set, data endpoints require `X-API-Key` |
 
 ## Architecture
@@ -139,7 +147,7 @@ Read [`docs/architecture.md`](docs/architecture.md) for the production topology,
 
 ## Eval results
 
-Golden set: 28 synthetic cases (the 12 samples + 16 variants), run through one service instance in queue order. Current: **outcome 28/28, match status 28/28** — a regression gate (≥95% required), not a real-world accuracy claim. The opt-in LLM pack (`evals/run_llm_evals.py`) additionally judges draft grounding/cleanliness with a live provider.
+Golden set: 28 synthetic cases (the 12 samples + 16 variants), run through one service instance in queue order. Current: **outcome 28/28, match status 28/28**, plus the bundled credit-note case **1/1** (the note settles its invoice's computed variance exactly) — a regression gate (≥95% required), not a real-world accuracy claim. The opt-in LLM pack (`evals/run_llm_evals.py`) additionally judges draft grounding/cleanliness with a live provider.
 
 ## Repository structure
 
@@ -147,9 +155,9 @@ Golden set: 28 synthetic cases (the 12 samples + 16 variants), run through one s
 src/ap_agent/     the agent: graph, matching, triage, screening, guardrails,
                   backends, retriever, store, checkpoints, storage, api, cli
 src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
-migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints)
+migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
-tests/            96 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            126 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -157,8 +165,8 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 96 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
-3. `make evals` — expect 28/28 and PASS.
+2. `make test` — expect 126 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+3. `make evals` — expect 28/28 + credit-note 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
 6. With `DATABASE_URL=postgresql://ap:ap@localhost:5432/ap` (compose Postgres published via the local override), re-run the test suite — the 3 integration tests now run: Postgres store round-trip, checkpointer pause/resume across instances, pgvector retrieval.
