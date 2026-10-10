@@ -38,9 +38,11 @@ from .policies_data import POLICIES
 from .samples import load_sample_invoices
 from .schemas import (
     AgentResult,
+    BundleResult,
     CreditNoteInput,
     CreditNoteMatch,
     DecisionRequest,
+    InvoiceBundleInput,
     InvoiceInput,
     PaymentRun,
     PaymentRunRequest,
@@ -333,6 +335,22 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/bundles/analyze", response_model=BundleResult, dependencies=_AUTH)
+    def analyze_bundle(bundle: InvoiceBundleInput) -> BundleResult:
+        """Analyse a multi-invoice arrival: the bundle is segmented
+        in code by invoice-number anchors, and every segment runs
+        the full pipeline as its own invoice with its own gate. The
+        response is the bundle summary; each invoice is retrievable
+        (and decidable) on its own."""
+        return svc.analyze_bundle(bundle)
+
+    @app.get("/bundles/{bundle_id}", response_model=BundleResult, dependencies=_AUTH)
+    def get_bundle(bundle_id: str) -> BundleResult:
+        summary = svc.get_bundle(bundle_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Bundle not analyzed yet.")
+        return summary
 
     @app.get("/queue", response_model=QueueView, dependencies=_AUTH)
     def queue(as_of: str = Query(default="")) -> QueueView:

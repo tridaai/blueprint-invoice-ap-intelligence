@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from .bundles import segment_bundle
 from .checkpoints import get_checkpointer
 from .config import env_float, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
@@ -51,8 +52,11 @@ from .ports import Checkpointer, DocVision, EventSink, OcrEngine
 from .retriever import Retriever, get_retriever
 from .schemas import (
     AgentResult,
+    BundleInvoiceOutcome,
+    BundleResult,
     CreditNoteInput,
     CreditNoteMatch,
+    InvoiceBundleInput,
     InvoiceInput,
     PaymentRun,
     QueueView,
@@ -651,6 +655,75 @@ class InvoiceService:
 
     def list_payment_runs(self) -> list[PaymentRun]:
         return self._get_store().list_payment_runs()
+
+    def analyze_bundle(
+        self, bundle: InvoiceBundleInput | dict
+    ) -> BundleResult:
+        """Analyse one multi-invoice arrival: segment it in code
+        (``bundles.py``), then run every segment through the full
+        pipeline as its own invoice — its own record, its own gate.
+        A segment that fails lands in its outcome's ``error``; it
+        never fails the bundle. The summary is stored so the arrival
+        can be retrieved as one batch later."""
+        model = (
+            bundle
+            if isinstance(bundle, InvoiceBundleInput)
+            else InvoiceBundleInput.model_validate(bundle)
+        )
+        invoices, note = segment_bundle(model)
+        outcomes: list[BundleInvoiceOutcome] = []
+        for invoice in invoices:
+            try:
+                backend = self.backend or get_backend()
+                retriever = self.retriever or get_retriever()
+                result = self._analyze_model(invoice, backend, retriever)
+                outcomes.append(
+                    BundleInvoiceOutcome(
+                        invoice_id=invoice.invoice_id,
+                        invoice_number=result.invoice_number,
+                        status=result.status,
+                        outcome=result.triage.outcome,
+                        severity=result.triage.severity,
+                        total_amount=invoice.total_amount,
+                        currency=invoice.currency,
+                    )
+                )
+            except Exception as exc:  # one bad segment never fails the bundle
+                outcomes.append(
+                    BundleInvoiceOutcome(
+                        invoice_id=invoice.invoice_id,
+                        invoice_number=invoice.invoice_number,
+                        status="error",
+                        total_amount=invoice.total_amount,
+                        currency=invoice.currency,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+        outcome_counts: dict[str, int] = {}
+        totals: dict[str, float] = {}
+        for outcome in outcomes:
+            key = outcome.outcome or "error"
+            outcome_counts[key] = outcome_counts.get(key, 0) + 1
+            if outcome.status != "error" and outcome.total_amount is not None:
+                totals[outcome.currency] = round(
+                    totals.get(outcome.currency, 0.0) + float(outcome.total_amount),
+                    2,
+                )
+        summary = BundleResult(
+            bundle_id=model.bundle_id,
+            supplier_name=model.supplier_name,
+            segment_count=len(invoices),
+            processed_count=sum(1 for o in outcomes if o.status != "error"),
+            outcomes=outcomes,
+            outcome_counts=outcome_counts,
+            totals_by_currency=totals,
+            note=note,
+        )
+        self._get_store().save_bundle(summary)
+        return summary
+
+    def get_bundle(self, bundle_id: str) -> BundleResult | None:
+        return self._get_store().get_bundle(bundle_id)
 
     def draft_duplicate_recovery(self, invoice_id: str) -> RecoveryPack:
         """Draft the duplicate-payment recovery pack for one invoice.
