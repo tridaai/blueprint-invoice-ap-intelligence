@@ -453,6 +453,105 @@ def forecast_accuracy(runs: list[PaymentRun]) -> dict:
     }
 
 
+def _new_completion_cell() -> dict:
+    return {
+        "exports": 0,
+        "members": 0,
+        "members_completed": 0,
+        "members_marked": 0,
+        "value_total": 0.0,
+        "value_completed": 0.0,
+        "value_marked": 0.0,
+    }
+
+
+def _completion_shares(cell: dict) -> dict:
+    cell["member_completion_share"] = (
+        round(cell["members_completed"] / cell["members"], 4)
+        if cell["members"]
+        else None
+    )
+    cell["value_completion_share"] = (
+        round(cell["value_completed"] / cell["value_total"], 4)
+        if cell["value_total"]
+        else None
+    )
+    return cell
+
+
+def creditor_completion_metrics(runs: list[PaymentRun]) -> dict:
+    """Creditor-completion coverage — the ``creditor_completion``
+    entry of :func:`handoff_metrics`.
+
+    Master coverage (in ``/metrics``' ``supplier_master`` section)
+    counts *records*: how much of the processed flow has a
+    governed master entry. This counts *exports*: of the members
+    actually handed to the bank, how many — and how much value —
+    carried creditor accounts completed from the master, and how
+    many still carried the ``SUPPLIER-MASTER-AT-IMPORT`` marker
+    for the importing system to fill. The marker is the residual
+    import risk; this is its price tag, per currency and per
+    hand-off format, read off each run's completion receipt
+    (``handoff_creditor_entries``, a per-member record of the
+    latest export).
+
+    A member's value is its export-time net amount (the figure
+    the bank was told to pay). Runs exported before completion
+    receipts existed export-count but receipt-less: they are
+    reported as ``exports_without_receipt`` so the coverage
+    denominator is never quietly smaller than the export count.
+    Pure over the runs given.
+    """
+    overall = _new_completion_cell()
+    groups: dict[tuple[str, str], dict] = {}
+    exports_total = 0
+    exports_without_receipt = 0
+    for run in runs:
+        if not run.handoff_generated_at:
+            continue
+        exports_total += 1
+        if not run.handoff_creditor_entries:
+            exports_without_receipt += 1
+            continue
+        nets = {line.invoice_id: line.net_amount for line in run.lines}
+        cell = groups.setdefault(
+            (run.currency, run.handoff_format or "unknown"),
+            _new_completion_cell(),
+        )
+        overall["exports"] += 1
+        cell["exports"] += 1
+        for entry in run.handoff_creditor_entries:
+            value = round(nets.get(entry.invoice_id, 0.0), 2)
+            completed = entry.source == "supplier_master"
+            for target in (overall, cell):
+                target["members"] += 1
+                target["value_total"] = round(target["value_total"] + value, 2)
+                if completed:
+                    target["members_completed"] += 1
+                    target["value_completed"] = round(
+                        target["value_completed"] + value, 2
+                    )
+                else:
+                    target["members_marked"] += 1
+                    target["value_marked"] = round(
+                        target["value_marked"] + value, 2
+                    )
+    return {
+        "exports_total": exports_total,
+        "exports_with_receipt": overall["exports"],
+        "exports_without_receipt": exports_without_receipt,
+        "overall": _completion_shares(overall),
+        "by_currency_format": [
+            {
+                "currency": currency,
+                "format": format_name,
+                **_completion_shares(cell),
+            }
+            for (currency, format_name), cell in sorted(groups.items())
+        ],
+    }
+
+
 def handoff_metrics(runs: list[PaymentRun]) -> dict:
     """The hand-off story, aggregated over the stored runs — the
     ``payment_runs`` section of ``/metrics``.
@@ -511,6 +610,7 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
             "proposal_to_export": _lag_stats(proposal_lags),
         },
         "forecast_accuracy": forecast_accuracy(runs),
+        "creditor_completion": creditor_completion_metrics(runs),
     }
 
 
