@@ -30,7 +30,7 @@ confirms. The agent's part stops exactly where its authority stops:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from .discounts import evaluate_discount
 from .matching import _parse_date
@@ -160,6 +160,86 @@ def propose_payment_runs(
 
 def run_member_ids(run: PaymentRun) -> set[str]:
     return {line.invoice_id for line in run.lines}
+
+
+def _lag_days(start: str | None, end: str | None) -> float | None:
+    """Whole-and-part days between two ISO timestamps, or None
+    when either is missing or unparseable (an unstamped legacy
+    run is excluded from the lag stats, never counted as zero)."""
+    if not start or not end:
+        return None
+    try:
+        delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    except ValueError:
+        return None
+    return round(delta.total_seconds() / 86400.0, 2)
+
+
+def _lag_stats(lags: list[float]) -> dict | None:
+    if not lags:
+        return None
+    return {
+        "count": len(lags),
+        "mean_days": round(sum(lags) / len(lags), 2),
+        "max_days": max(lags),
+    }
+
+
+def handoff_metrics(runs: list[PaymentRun]) -> dict:
+    """The hand-off story, aggregated over the stored runs — the
+    ``payment_runs`` section of ``/metrics``.
+
+    Round 6 made drift visible per run; this makes the *discipline*
+    measurable: how much discount value drift destroyed, in which
+    currencies, and how long runs sat between proposal,
+    confirmation and export — the confirm→export lag is the
+    process leak that causes drift, so the two are reported side
+    by side. Pure over the runs given; runs exported before the
+    receipt fields existed simply contribute what they carry.
+    """
+    by_status: dict[str, int] = {}
+    by_format: dict[str, int] = {}
+    exported = 0
+    runs_with_drift = 0
+    drift_members = 0
+    drift_value: dict[str, float] = {}
+    confirm_lags: list[float] = []
+    proposal_lags: list[float] = []
+    for run in runs:
+        by_status[run.status] = by_status.get(run.status, 0) + 1
+        if run.handoff_drift:
+            runs_with_drift += 1
+            drift_members += len(run.handoff_drift)
+            if run.handoff_drift_total:
+                drift_value[run.currency] = round(
+                    drift_value.get(run.currency, 0.0) + run.handoff_drift_total, 2
+                )
+        if not run.handoff_generated_at:
+            continue
+        exported += 1
+        if run.handoff_format:
+            by_format[run.handoff_format] = by_format.get(run.handoff_format, 0) + 1
+        lag = _lag_days(run.confirmed_at, run.handoff_generated_at)
+        if lag is not None:
+            confirm_lags.append(lag)
+        lag = _lag_days(run.proposed_at, run.handoff_generated_at)
+        if lag is not None:
+            proposal_lags.append(lag)
+    return {
+        "runs_total": len(runs),
+        "by_status": by_status,
+        "exported_runs": exported,
+        "exports_by_format": by_format,
+        "drift": {
+            "runs_with_drift": runs_with_drift,
+            "members_drifted": drift_members,
+            "value_lost_by_currency": drift_value,
+        },
+        "export_lag": {
+            "confirm_to_export": _lag_stats(confirm_lags),
+            "proposal_to_export": _lag_stats(proposal_lags),
+        },
+    }
 
 
 def discount_drift(

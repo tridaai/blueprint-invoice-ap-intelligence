@@ -40,7 +40,7 @@ from .checkpoints import get_checkpointer
 from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
-from .paymentruns import discount_drift
+from .paymentruns import discount_drift, handoff_metrics
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
 from .queue import build_queue, recovery_case_aging
@@ -775,6 +775,7 @@ class InvoiceService:
                 "count": self.approved_not_posted_report().count,
                 "grace_days": posting_receipt_grace_days(),
             },
+            "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
         }
 
     def audit_rows(self) -> list[dict]:
