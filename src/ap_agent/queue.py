@@ -78,6 +78,17 @@ complete reply is the reset), and the item here reads
 (:func:`information_escalation_follow_through`): a reply that
 followed the push, a wait closed without one, or a wait still
 open exactly as it was — the escalation's effect, measured.
+
+**Bank silence** ages here too. A batch-booked file's groups
+are answered by the bank one by one, and a group that never
+answers leaves its members in limbo — not booked, not
+bounced. Past ``GROUP_RECEIPT_AGING_DAYS``
+(:func:`unanswered_group_items`) the group joins the worklist
+with its members and value named, its clock running from the
+file the bank is currently answering (the whole export, or
+the group's solo re-export when it was re-presented). An
+answered group is never a wait: an acceptance closes it, and
+a rejection is the re-export's work, not the queue's.
 """
 
 from __future__ import annotations
@@ -88,6 +99,7 @@ from typing import Iterable
 from .matching import _parse_date
 from .schemas import (
     FourEyesAgingItem,
+    GroupReceiptWaitItem,
     InformationWaitItem,
     OpenPostingItem,
     PaymentRun,
@@ -427,6 +439,85 @@ def information_wait_items(
     return items
 
 
+DEFAULT_GROUP_RECEIPT_AGING_DAYS = 5
+
+
+def unanswered_group_items(
+    runs: list[PaymentRun],
+    *,
+    as_of: date,
+    aging_days: int = DEFAULT_GROUP_RECEIPT_AGING_DAYS,
+) -> list[GroupReceiptWaitItem]:
+    """The batch groups the bank has not answered, aged: for
+    each batch-booked export, the groups with no standing
+    receipt whose file went out more than ``aging_days`` ago.
+
+    The group's clock runs from the file the bank is currently
+    answering (``handoff.group_file_sent_at``): the whole-file
+    export, or the group's solo re-export when it bounced and
+    was re-presented — a re-exported group's silence is about
+    the corrected file, and the item says so. The group's
+    value is its members' net total from the run's lines (the
+    figures the file carried). An answered group never appears
+    — accepted closes it, rejected hands it to the re-export —
+    and a group still inside its threshold is just a bank
+    being a bank. Work order: the longest silence first. Pure
+    over the runs given.
+    """
+    from .handoff import (
+        batch_group_members,
+        current_group_receipts,
+        group_file_sent_at,
+        latest_group_reexport,
+    )
+
+    items: list[GroupReceiptWaitItem] = []
+    for run in runs:
+        if not run.handoff_batch_booking or not run.handoff_generated_at:
+            continue
+        groups = batch_group_members(run)
+        if not groups:
+            continue
+        standing = current_group_receipts(run)
+        nets = {line.invoice_id: line.net_amount for line in run.lines}
+        for execution_date, members in groups.items():
+            if execution_date in standing:
+                continue  # answered — accepted, or rejected (re-export's work)
+            sent_at = group_file_sent_at(run, execution_date)
+            sent = _parse_date(sent_at[:10]) if sent_at else None
+            if sent is None:
+                continue
+            waiting_days = (as_of - sent).days
+            if waiting_days <= aging_days:
+                continue
+            items.append(
+                GroupReceiptWaitItem(
+                    run_id=run.run_id,
+                    execution_date=execution_date,
+                    pmt_inf_id=f"{run.run_id}-{execution_date}",
+                    member_invoice_ids=list(members),
+                    member_count=len(members),
+                    currency=run.currency,
+                    group_value=round(
+                        sum(nets.get(m, 0.0) for m in members), 2
+                    ),
+                    file_sent_at=sent_at,
+                    waiting_days=waiting_days,
+                    aging_threshold_days=aging_days,
+                    reexported=latest_group_reexport(run, execution_date)
+                    is not None,
+                )
+            )
+    items.sort(
+        key=lambda item: (
+            -(item.waiting_days or 0),
+            item.run_id,
+            item.execution_date,
+        )
+    )
+    return items
+
+
 def information_escalation_follow_through(records: list[ApprovalRecord]) -> dict:
     """Grade the recorded information-wait escalations against
     what happened next: did the push work?
@@ -545,6 +636,8 @@ def build_queue(
     twin_value_threshold: float = DEFAULT_TWIN_CLUSTER_VALUE_THRESHOLD,
     information_waits: Iterable[InformationWaitItem] = (),
     information_wait_aging_days: int = DEFAULT_INFORMATION_WAIT_AGING_DAYS,
+    group_receipt_waits: Iterable[GroupReceiptWaitItem] = (),
+    group_receipt_aging_days: int = DEFAULT_GROUP_RECEIPT_AGING_DAYS,
 ) -> QueueView:
     """The aging queue over the store's records, as of a date
     (today when not given — tests and API callers pass it
@@ -627,6 +720,7 @@ def build_queue(
     )
     twin_list = list(twin_items)
     wait_list = list(information_waits)
+    group_list = list(group_receipt_waits)
     return QueueView(
         as_of=as_of.isoformat(),
         count=len(items),
@@ -653,4 +747,7 @@ def build_queue(
         information_waits=wait_list,
         information_wait_count=len(wait_list),
         information_wait_aging_days=information_wait_aging_days,
+        group_receipt_waits=group_list,
+        group_receipt_wait_count=len(group_list),
+        group_receipt_aging_days=group_receipt_aging_days,
     )

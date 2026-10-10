@@ -311,6 +311,28 @@ def information_wait_aging_days() -> int:
     )
 
 
+# Default aging threshold for an unanswered batch group: the
+# file went out, the bank answered the other groups, and this
+# one has heard nothing. Banks are slower than suppliers, so
+# the threshold sits above the information wait's
+# (GROUP_RECEIPT_AGING_DAYS overrides it).
+GROUP_RECEIPT_AGING_DEFAULT_DAYS = 5
+
+
+def group_receipt_aging_days() -> int:
+    """The configured group-receipt aging threshold, in days
+    since the file the group is waiting on went out (the whole
+    export, or the group's solo re-export when re-presented)."""
+    load_dotenv()
+    return max(
+        0,
+        env_int(
+            "GROUP_RECEIPT_AGING_DAYS",
+            GROUP_RECEIPT_AGING_DEFAULT_DAYS,
+        ),
+    )
+
+
 def information_wait_escalation_days() -> int:
     """The information-wait escalation threshold: twice the aging
     threshold — the ladder's second rung, in the posting
@@ -2699,11 +2721,16 @@ class InvoiceService:
         shows everything the building still owes an answer for. A
         pure read over the store — it decides and writes nothing."""
         from .posting import approved_not_posted
-        from .queue import information_wait_items, twin_escalation_items
+        from .queue import (
+            information_wait_items,
+            twin_escalation_items,
+            unanswered_group_items,
+        )
 
         anchor = _parse_date(as_of) if as_of else None
         store = self._get_store()
         records = store.list_records()
+        runs = store.list_payment_runs()
         escalation = max(posting_escalation_days(), posting_receipt_grace_days())
         escalated = approved_not_posted(
             records,
@@ -2713,6 +2740,7 @@ class InvoiceService:
         min_size = twin_cluster_min_size()
         value_threshold = twin_cluster_value_threshold()
         wait_aging = information_wait_aging_days()
+        group_aging = group_receipt_aging_days()
         return build_queue(
             records,
             as_of=anchor,
@@ -2720,7 +2748,7 @@ class InvoiceService:
             recovery_sla_days=recovery_case_sla_days(),
             open_postings=escalated.items,
             posting_escalation_days=escalation,
-            payment_runs=store.list_payment_runs(),
+            payment_runs=runs,
             four_eyes_aging_days=four_eyes_aging_days(),
             twin_items=twin_escalation_items(
                 records, min_size=min_size, value_threshold=value_threshold
@@ -2733,6 +2761,12 @@ class InvoiceService:
                 aging_days=wait_aging,
             ),
             information_wait_aging_days=wait_aging,
+            group_receipt_waits=unanswered_group_items(
+                runs,
+                as_of=anchor or datetime.now(timezone.utc).date(),
+                aging_days=group_aging,
+            ),
+            group_receipt_aging_days=group_aging,
         )
 
     def escalation_digest(self, as_of: str = "") -> EscalationDigest:

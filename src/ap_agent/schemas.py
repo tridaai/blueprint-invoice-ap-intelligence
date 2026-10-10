@@ -1803,6 +1803,38 @@ class InformationWaitItem(BaseModel):
     escalated: bool = False
 
 
+class GroupReceiptWaitItem(BaseModel):
+    """One batch-booked ``PmtInf`` group the bank has not
+    answered, aged onto the approver's worklist.
+
+    The bank answers per group, and an answer that never comes
+    is its own kind of silence: the file went out, the other
+    groups booked, and this group's members hang in a state
+    nobody inside the building can see — not paid, not bounced,
+    just unanswered. Past ``GROUP_RECEIPT_AGING_DAYS`` the
+    group joins the queue like the other waits: its run, its
+    members, the value riding on it, and how long the bank has
+    had the file. The wait's clock runs from the file the bank
+    is currently answering — the whole-file export, or the
+    group's solo re-export when it was re-presented (a
+    re-exported group reads ``reexported``: its silence is
+    about the corrected file, not the original one). An
+    answered group — accepted or rejected — is not waiting:
+    a rejection is work for the re-export, not for the queue."""
+
+    run_id: str
+    execution_date: str = ""  # the group's requested execution date
+    pmt_inf_id: str = ""  # the group's id in the file
+    member_invoice_ids: list[str] = Field(default_factory=list)
+    member_count: int = 0
+    currency: str = "USD"
+    group_value: float = 0.0  # the members' net total, in the run's currency
+    file_sent_at: str = ""  # when the file being answered went out (ISO)
+    waiting_days: Optional[int] = None
+    aging_threshold_days: int = 0
+    reexported: bool = False  # the file being answered is the solo re-export
+
+
 class QueueView(BaseModel):
     """The aging queue: awaiting invoices, overdue first, with the
     triage mix — a pure read model over the store's records. Open
@@ -1851,6 +1883,15 @@ class QueueView(BaseModel):
     information_waits: list[InformationWaitItem] = Field(default_factory=list)
     information_wait_count: int = 0
     information_wait_aging_days: int = 0
+    # Batch groups the bank has not answered past their aging
+    # threshold (GROUP_RECEIPT_AGING_DAYS): the file went out,
+    # the other groups answered, this one's members hang
+    # unbooked and unbounced — bank silence as a worklist item.
+    group_receipt_waits: list[GroupReceiptWaitItem] = Field(
+        default_factory=list
+    )
+    group_receipt_wait_count: int = 0
+    group_receipt_aging_days: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1961,6 +2002,14 @@ class EscalationDigest(BaseModel):
     # window can still be rescued, most urgent first.
     onboarding_expiring: list[DigestOnboardingEntry] = Field(default_factory=list)
     onboarding_expiring_count: int = 0
+    # Batch groups the bank has not answered past their aging
+    # threshold (from the same queue view): the file went out
+    # days ago and one group has simply never answered — bank
+    # silence, named in the day's summary like any other stall.
+    group_receipt_waits: list[GroupReceiptWaitItem] = Field(
+        default_factory=list
+    )
+    group_receipt_wait_count: int = 0
     # Provenance: a digest is "computed" at read time by default —
     # fresh every call, and labelled as such. An operator can store
     # a day's first-computed digest (POST /digest/{date}/store);

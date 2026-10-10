@@ -31,6 +31,12 @@ that crossed a line, as of a day.
   second operator, and the digest names the change, its age,
   and the days of window left while a decision can still
   rescue the onboarding.
+- **Bank silence** — batch-booked groups the bank has not
+  answered past their aging threshold (the queue's group
+  waits): the file went out days ago, the other groups
+  answered, and this group's members hang unbooked and
+  unbounced. Named with the run, the members, and the value
+  riding on the answer.
 
 Composition is the reconciliation summary's discipline: computed
 in code from the stored records, every exception named, an
@@ -296,6 +302,8 @@ def build_digest(
         ),
         onboarding_expiring=onboarding_sorted,
         onboarding_expiring_count=len(onboarding_sorted),
+        group_receipt_waits=list(queue.group_receipt_waits),
+        group_receipt_wait_count=len(queue.group_receipt_waits),
     )
     digest.summary = _compose_summary(digest, queue)
     return digest
@@ -445,6 +453,27 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
             "before the window closes: an undecided change expires "
             "and the supplier returns to open work."
         )
+    if digest.group_receipt_waits:
+        named = "; ".join(
+            f"{entry.run_id} group {entry.execution_date} "
+            f"({', '.join(entry.member_invoice_ids)}) — "
+            f"{entry.currency} {entry.group_value:,.2f} unanswered "
+            f"{entry.waiting_days}d"
+            + (
+                " since its solo re-export"
+                if entry.reexported
+                else ""
+            )
+            for entry in digest.group_receipt_waits
+        )
+        parts.append(
+            f"Bank silence — batch groups unanswered past "
+            f"{queue.group_receipt_aging_days} days: "
+            f"{digest.group_receipt_wait_count} — {named}. The "
+            "file went out and the group has simply never "
+            "answered: chase the bank for its answer, or "
+            "re-present the group if the file itself was at fault."
+        )
     if (
         digest.recovery_breach_count == 0
         and digest.posting_escalation_count == 0
@@ -454,6 +483,7 @@ def _compose_summary(digest: EscalationDigest, queue: QueueView) -> str:
         and not digest.drift_today
         and not digest.wait_budget_breaches
         and not digest.onboarding_expiring
+        and not digest.group_receipt_waits
     ):
         parts.append(
             "All clear: nothing crossed a line today — no breaches, no "

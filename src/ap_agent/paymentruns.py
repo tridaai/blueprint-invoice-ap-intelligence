@@ -1221,6 +1221,51 @@ def wait_cost_budget_status(
     }
 
 
+def group_answer_metrics(runs: list[PaymentRun]) -> dict:
+    """The bank's per-group answers, aggregated: over the
+    batch-booked exports, how many groups stand accepted,
+    rejected, or unanswered — and how many bounced groups were
+    re-presented alone. The feedback loop's coverage: a high
+    unanswered count is bank silence, and it is the queue's
+    group waits (aged) that chase it. Pure; the group reads
+    come from ``handoff`` (the receipts are the record, never
+    recomputed)."""
+    from .handoff import batch_group_members, current_group_receipts
+
+    groups = accepted = rejected = unanswered = 0
+    reexported_groups = 0
+    reexports = 0
+    for run in runs:
+        if not run.handoff_batch_booking or not run.handoff_generated_at:
+            continue
+        members_by_group = batch_group_members(run)
+        if not members_by_group:
+            continue
+        standing = current_group_receipts(run)
+        groups += len(members_by_group)
+        for execution_date in members_by_group:
+            receipt = standing.get(execution_date)
+            if receipt is None:
+                unanswered += 1
+            elif receipt.status == "accepted":
+                accepted += 1
+            elif receipt.status == "rejected":
+                rejected += 1
+        reexported = {
+            entry.execution_date for entry in run.handoff_group_reexports
+        }
+        reexported_groups += len(reexported)
+        reexports += len(run.handoff_group_reexports)
+    return {
+        "groups_total": groups,
+        "accepted": accepted,
+        "rejected": rejected,
+        "unanswered": unanswered,
+        "reexported_groups": reexported_groups,
+        "reexports": reexports,
+    }
+
+
 def handoff_metrics(runs: list[PaymentRun]) -> dict:
     """The hand-off story, aggregated over the stored runs — the
     ``payment_runs`` section of ``/metrics``.
@@ -1310,6 +1355,7 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
         "lag_statistic_grades": grade_lag_statistics(runs),
         "lag_grade_drift_watch": lag_grade_drift_watch(runs),
         "creditor_completion": creditor_completion_metrics(runs),
+        "group_answers": group_answer_metrics(runs),
         "four_eyes_wait": {
             "runs_second_confirmed": second_confirmed_runs,
             "cost_by_currency": wait_cost_value,
