@@ -60,11 +60,15 @@ AP teams drown in document work that is simple to describe and miserable to do: 
 13. **Guardrails (code)** — `no_payment_language`, `no_prohibited_promises`, `no_pii_in_draft`, citations present **and within the retrieved set**, invoice id present. Failures trigger a bounded repair loop; a still-failing draft **cannot be approved** (the API returns 422).
 14. **Gate** — the run checkpoints and waits. A finance approver approves or rejects with name + reason. An autonomy recommendation (auto-triage eligible only for clean matches under the approval threshold with every check green) is printed, never acted on.
 
-Beyond the single invoice, three follow-on surfaces work over the processed queue:
+Beyond the single invoice, the follow-on surfaces work over the processed queue:
 
 15. **Credit-note matching** — a credit note that arrives later is tied to the invoice it references, and its amount is compared against the overbilling *recomputed from that invoice's stored match facts* (price/quantity/short-receipt overbilling, grossed at the invoice's tax rate): settles / partial / exceeds / no variance. Report only (`POST /credit-notes/match`).
 16. **Statement reconciliation** — a supplier statement is lined up against the processed invoices (matched / amount differs / never processed / missing from the statement) with a summary a human confirms (`POST /statements/reconcile`). Report only — confirming changes the report, never an invoice.
 17. **Ops surfaces** — `GET /metrics` (runs, outcomes, decisions, latency, model spend, aggregated from the records) and `GET /audit/export` (JSON/CSV audit trail: conclusion, human decision + reason, dispatch). The approval webhook can be HMAC-signed (`ACTION_WEBHOOK_SECRET`) so the receiving system can verify it.
+18. **Payment-run proposals** — the approved invoices are grouped by currency + due window (overdue swept into the first window) into a proposed pay list with totals and still-capturable discount amounts summed in code (`POST /payment-runs/propose`). A finance lead confirms the run (`POST /payment-runs/{run_id}/confirm`); members of a confirmed run are never re-proposed. The agent proposes — it never pays.
+19. **AP aging queue** — the approver's worklist: invoices still at the gate, aged by due date into the standard buckets (overdue first), with the triage mix, per-currency totals, and each item's discount deadline (`GET /queue`). A pure read model; the console renders it as a panel.
+20. **Duplicate-payment recovery packs** — when duplicate detection fires on an invoice whose original was *already approved*, holding the copy is not enough: the pack computes the evidence from both records, drafts the supplier recovery letter (credit note or refund) and the internal memo through the standard verify + guardrail path, and stores it for a human to send (`POST /invoices/{id}/recovery-pack`). The agent recovers nothing itself.
+21. **Multi-invoice bundles** — one arrival carrying several invoices is segmented in code at invoice-number anchors (never by the model); each segment is parsed (lines, totals, dates, PO reference), mapped to the bundle's PO/goods-receipt records, and run as its own invoice with its own gate (`POST /bundles/analyze`). The stored summary reports per-invoice outcomes and totals.
 
 ## Quickstart
 
@@ -95,13 +99,13 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 128 tests
-make evals       # golden set: 28/28 outcome + match status, credit-note 1/1
+make test        # 160 tests
+make evals       # golden set: 29/29 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
 The offline path uses a deterministic template backend and the documents' provided text layer. It is labelled everywhere it appears: it proves the plumbing, not the model quality. The LLM-judge eval pack (`make llm-evals`) refuses to run without a real provider — exit code 2 — rather than grade its own templates.
 
-## The 12 sample invoices
+## The 13 sample invoices
 
 | ID | Scenario | Designed outcome |
 |---|---|---|
@@ -117,8 +121,9 @@ The offline path uses a deterministic template backend and the documents' provid
 | INV-1010 | **Adversarial:** "updated bank account" in notes | fraud flag + block (triage stays clean_match) |
 | INV-1011 | **Adversarial:** injection in supplier email | flagged + stripped; clean_match |
 | INV-1012 | **Trap:** note relays a payment-date demand | clean_match, but the draft fails `no_payment_language` → unapprovable offline |
+| INV-1013 | Supplier portal resends NB-4471 *after* INV-1001 was approved | duplicate_suspected → the recovery-pack case |
 
-Duplicate detection is store-backed: INV-1004 only duplicates because INV-1001 was processed first — run the batch (`ap-agent --all`) or the API in order to see it.
+Duplicate detection is store-backed: INV-1004 only duplicates because INV-1001 was processed first — run the batch (`ap-agent --all`) or the API in order to see it. A bundled multi-invoice arrival ships too (`sample_bundles.json`: BND-4001, two Northbeam invoices in one scan against PO-9015).
 
 ## Configuration
 
@@ -147,7 +152,7 @@ Read [`docs/architecture.md`](docs/architecture.md) for the production topology,
 
 ## Eval results
 
-Golden set: 28 synthetic cases (the 12 samples + 16 variants), run through one service instance in queue order. Current: **outcome 28/28, match status 28/28**, plus the bundled credit-note case **1/1** (the note settles its invoice's computed variance exactly) — a regression gate (≥95% required), not a real-world accuracy claim. The opt-in LLM pack (`evals/run_llm_evals.py`) additionally judges draft grounding/cleanliness with a live provider.
+Golden set: 29 synthetic cases (the 13 samples + 16 variants), run through one service instance in queue order. Current: **outcome 29/29, match status 29/29**, plus the bundled credit-note case **1/1** (the note settles its invoice's computed variance exactly) and the duplicate-recovery case **1/1** (pack drafted for the approved original, guardrails passed) — a regression gate (≥95% required), not a real-world accuracy claim. The opt-in LLM pack (`evals/run_llm_evals.py`) additionally judges draft grounding/cleanliness with a live provider.
 
 ## Repository structure
 
@@ -155,9 +160,9 @@ Golden set: 28 synthetic cases (the 12 samples + 16 variants), run through one s
 src/ap_agent/     the agent: graph, matching, triage, screening, guardrails,
                   backends, retriever, store, checkpoints, storage, api, cli
 src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
-migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations)
+migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
-tests/            128 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            160 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -165,8 +170,8 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 128 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
-3. `make evals` — expect 28/28 + credit-note 1/1 and PASS.
+2. `make test` — expect 160 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+3. `make evals` — expect 29/29 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
 6. With `DATABASE_URL=postgresql://ap:ap@localhost:5432/ap` (compose Postgres published via the local override), re-run the test suite — the 3 integration tests now run: Postgres store round-trip, checkpointer pause/resume across instances, pgvector retrieval.

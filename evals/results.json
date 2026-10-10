@@ -1,6 +1,6 @@
 {
   "dataset": "golden.jsonl (synthetic)",
-  "generated_at": "2026-10-10T13:29:35+00:00",
+  "generated_at": "2026-10-10T13:30:45+00:00",
   "total": 29,
   "outcome_match": "29/29",
   "match_status_match": "29/29",
