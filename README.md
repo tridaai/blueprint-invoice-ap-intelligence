@@ -63,13 +63,13 @@ AP teams drown in document work that is simple to describe and miserable to do: 
 Beyond the single invoice, the follow-on surfaces work over the processed queue:
 
 15. **Credit-note matching** — a credit note that arrives later is tied to the invoice it references, and its amount is compared against the overbilling *recomputed from that invoice's stored match facts* (price/quantity/short-receipt overbilling, grossed at the invoice's tax rate): settles / partial / exceeds / no variance. Report only (`POST /credit-notes/match`).
-16. **Statement reconciliation** — a supplier statement is lined up against the processed invoices (matched / amount differs / never processed / missing from the statement) with a summary a human confirms (`POST /statements/reconcile`). Report only — confirming changes the report, never an invoice.
+16. **Statement reconciliation** — a supplier statement is lined up against the processed invoices (matched / amount differs / never processed / missing from the statement) with a summary a human confirms (`POST /statements/reconcile`). Lines are duplicate-screened too (surface 33). Report only — confirming changes the report, never an invoice.
 17. **Ops surfaces** — `GET /metrics` (runs, outcomes, decisions, latency, model spend, aggregated from the records) and `GET /audit/export` (JSON/CSV audit trail: conclusion, human decision + reason, dispatch). The approval webhook can be HMAC-signed (`ACTION_WEBHOOK_SECRET`) so the receiving system can verify it.
 18. **Payment-run proposals** — the approved invoices are grouped by currency + due window (overdue swept into the first window) into a proposed pay list with totals and still-capturable discount amounts summed in code (`POST /payment-runs/propose`). A finance lead confirms the run (`POST /payment-runs/{run_id}/confirm`); members of a confirmed run are never re-proposed. The agent proposes — it never pays.
 19. **AP aging queue** — the approver's worklist: invoices still at the gate, aged by due date into the standard buckets (overdue first), with the triage mix, per-currency totals, and each item's discount deadline (`GET /queue`). A pure read model; the console renders it as a panel.
 20. **Duplicate-payment recovery packs** — when duplicate detection fires on an invoice whose original was *already approved*, holding the copy is not enough: the pack computes the evidence from both records, drafts the supplier recovery letter (credit note or refund) and the internal memo through the standard verify + guardrail path, and stores it for a human to send (`POST /invoices/{id}/recovery-pack`). The agent recovers nothing itself.
 21. **Multi-invoice bundles** — one arrival carrying several invoices is segmented in code at invoice-number anchors (never by the model); each segment is parsed (lines, totals, dates, PO reference), mapped to the bundle's PO/goods-receipt records, and run as its own invoice with its own gate (`POST /bundles/analyze`). The stored summary reports per-invoice outcomes and totals.
-22. **Payment-run hand-off file** — a confirmed run renders as a bank-ready CSV (documented layout) into object storage (`POST /payment-runs/{id}/handoff`); the run record keeps the receipt (object key + sha256). The file is the adapter to the customer's banking/ERP system — generating it changes no payment state, and a human carries it the last mile.
+22. **Payment-run hand-off file** — a confirmed run renders as a bank-ready file into object storage (`POST /payment-runs/{id}/handoff`): a CSV (documented layout v1) or an ISO 20022 pain.001 credit-transfer XML (`?format=pain001`, mapping in `docs/handoff-formats.md`); the run record keeps the receipt (object key + sha256 + format). The file is the adapter to the customer's banking/ERP system — generating it changes no payment state, and a human carries it the last mile.
 23. **Recovery-case lifecycle** — a recovery pack opens a case that operators walk (`opened → supplier_contacted → credit_received → closed`), one audited transition at a time (`POST /invoices/{id}/recovery-case/transition`); the console renders the case on duplicate invoices. The agent records the case — it contacts nobody and books no credit.
 24. **ERP posting example** — `examples/erp_posting.py` shapes an approved result into a generic double-entry journal (purchases / input tax / AP control) with a stable idempotency key, refusing unapproved results and unreconciled figures. No vendor SDK — the transport into a real ERP is the customer's step.
 25. **Governed supplier-master changes** — a bank-detail change becomes a request object (migration 0009): proposed by an operator or from a document (the details an invoice states, overlaid on the current record), decided by a *second* operator — proposer ≠ approver — with the out-of-band verification reference recorded, and applied only from its effective date (`/suppliers/master-changes`). Until a change is approved and in force, the master check keeps returning a mismatch for the new details.
@@ -80,6 +80,9 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 30. **Master-coverage metrics** — `/metrics` reports the fraud screen's blind spot: the share of processed invoices (and of spend) whose supplier has a master record, the recorded bank-check verdict mix (match / mismatch / no master record / no details stated / not checked), and the governed changes in flight to close the gap. A pending change counts as in flight, not as coverage.
 31. **Master-change expiry** — a pending change nobody decides within `MASTER_CHANGE_EXPIRY_DAYS` (default 30) expires: the sweep runs with the promotion sweep and at analysis time, a late decision attempt expires the request on the spot, and the expiry is recorded in the request's audit history. Expired changes are decidable no longer — re-proposing restarts the governed path with fresh eyes.
 32. **Approved-not-posted reconciliation** — the receipt loop's open items: approved invoices with no posted receipt past `POSTING_RECEIPT_GRACE_DAYS` (default 7), oldest first, at `GET /reconciliation/approved-not-posted` and as a count in `/metrics`. A failed receipt keeps its item open with the ERP's reason; a posted receipt closes it. Approvals now stamp `decided_at`, the age anchor (legacy records fall back to submission, labelled).
+33. **Duplicate screening across arrival shapes** — duplicate identity is judged on a canonical key (supplier name punctuation/case normalised, invoice number reduced to alphanumerics), so a resend is caught whichever shape it arrives in: a bundle segment that re-sends a portal single is flagged with the single as its twin (and the recovery path opens for it), a single that re-sends a bundle segment likewise, and a repeated segment inside one bundle too. Statement lines are screened on the same key: a line whose number AP holds twice, or that the statement itself lists twice, is flagged with the twin reference in the reconciliation report.
+34. **Hand-off drift + lag metrics** — `/metrics` aggregates the export story over the stored runs: runs exported with drift, members drifted, discount value lost per currency — beside confirm→export and proposal→export lag stats, because the lag is the process leak that causes the drift.
+35. **Open-posting escalation** — an open posting past `POSTING_ESCALATION_DAYS` (default 21, never below the grace window) stops being a report line and joins the approver queue (`GET /queue`) as an action item with the ERP failure reason attached; `/metrics` counts the escalated items.
 
 ## Quickstart
 
@@ -110,7 +113,7 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 250 tests
+make test        # 277 tests
 make evals       # golden set: 30/30 outcome + match status, credit-note 1/1, recovery 1/1
 ```
 
@@ -158,6 +161,7 @@ Everything is environment variables (`.env` supported; real env wins). The full 
 | `RECOVERY_CASE_SLA_DAYS` | Days a recovery case may sit in one status before the queue flags it stuck (default 14) |
 | `MASTER_CHANGE_EXPIRY_DAYS` | Days a pending supplier-master change may sit undecided before it expires and must be re-proposed (default 30) |
 | `POSTING_RECEIPT_GRACE_DAYS` | Days an approved invoice may go without a posted receipt before the approved-not-posted report flags it (default 7) |
+| `POSTING_ESCALATION_DAYS` | Days an open posting may age before it escalates into the approver queue as an action item (default 21, never below the grace window) |
 | `API_KEY` | When set, data endpoints require `X-API-Key` |
 
 ## Architecture
@@ -179,7 +183,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            250 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            277 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -187,7 +191,7 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 250 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+2. `make test` — expect 277 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
 3. `make evals` — expect 30/30 + credit-note 1/1 + recovery pack 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000, MinIO console at :9001; `/readiness` reports the Postgres store. (First build is the verification run — the dev sandbox has no Docker daemon.)
