@@ -13,6 +13,8 @@ checkpointer, document blobs in S3-compatible object storage.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import queue
@@ -20,8 +22,8 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import env_str, load_dotenv, silence_langchain_deprecation_warnings
@@ -43,7 +45,7 @@ from .schemas import (
     StatementReconciliation,
     SupplierStatement,
 )
-from .service import InvoiceService
+from .service import AUDIT_COLUMNS, InvoiceService
 from .wiring import build_service_from_env
 
 # Load the repo-root .env at startup (real environment variables win), so
@@ -192,6 +194,37 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
     @app.get("/policies", dependencies=_AUTH)
     def list_policies() -> list[dict]:
         return POLICIES
+
+    @app.get("/metrics", dependencies=_AUTH)
+    def metrics() -> dict:
+        """Operational metrics over the stored runs (volumes,
+        outcomes, decisions, latency, model spend) — aggregated from
+        the records at read time; see service.metrics_snapshot."""
+        return svc.metrics_snapshot()
+
+    @app.get("/audit/export", dependencies=_AUTH)
+    def audit_export(format: str = Query(default="json")):
+        """The audit trail export: one row per processed invoice —
+        conclusion, human decision, dispatch. ``format=json``
+        (default) or ``format=csv`` (downloadable)."""
+        rows = svc.audit_rows()
+        if format == "json":
+            return {"records": rows, "count": len(rows)}
+        if format == "csv":
+            buffer = io.StringIO()
+            writer = csv.DictWriter(buffer, fieldnames=AUDIT_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+            return PlainTextResponse(
+                buffer.getvalue(),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": "attachment; filename=ap-audit-export.csv"
+                },
+            )
+        raise HTTPException(
+            status_code=422, detail="format must be 'json' or 'csv'."
+        )
 
     @app.get("/samples", dependencies=_AUTH)
     def list_samples() -> list[dict]:

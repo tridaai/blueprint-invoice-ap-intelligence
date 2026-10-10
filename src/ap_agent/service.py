@@ -6,7 +6,9 @@ no supplier portal call, nothing bound). The one opt-in exception is
 output routing: when ``ACTION_WEBHOOK_URL`` is configured, the
 approved packet is POSTed to that endpoint — the customer's system
 of choice — and the outcome is recorded on the result (see
-``dispatch_approval_webhook``).
+``dispatch_approval_webhook``). When ``ACTION_WEBHOOK_SECRET`` is
+also set, the body is HMAC-SHA256 signed (``X-Trida-Signature``
+header) so the receiver can verify origin and integrity.
 
 Records live in an approval store (``store.py``): PostgreSQL when
 ``DATABASE_URL`` is set (production — analyses and decisions survive
@@ -24,6 +26,8 @@ thread never blocks a decision.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import threading
 import urllib.request
@@ -51,7 +55,34 @@ from .schemas import (
 from .store import ApprovalRecord, default_store, find_duplicate, supplier_summary
 from .vision import get_vision_engine
 
-__all__ = ["ApprovalRecord", "BatchItem", "InvoiceService", "Store"]
+__all__ = [
+    "AUDIT_COLUMNS",
+    "ApprovalRecord",
+    "BatchItem",
+    "InvoiceService",
+    "Store",
+]
+
+# The audit export's stable column order (see InvoiceService.audit_rows).
+AUDIT_COLUMNS = [
+    "invoice_id",
+    "supplier_name",
+    "invoice_number",
+    "total_amount",
+    "currency",
+    "outcome",
+    "severity",
+    "match_status",
+    "status",
+    "decision",
+    "decided_by",
+    "decision_reason",
+    "dispatch_status",
+    "external_action_taken",
+    "backend",
+    "model",
+    "estimated_cost_usd",
+]
 
 
 # Store protocol re-export for call sites that typed against the service.
@@ -96,10 +127,21 @@ def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
             "ap_packet": result.drafts.ap_packet if result.drafts else "",
         },
     }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    secret = env_str("ACTION_WEBHOOK_SECRET")
+    if secret:
+        # HMAC-SHA256 over the exact body bytes, so the receiving
+        # system can verify the packet came from this agent and was
+        # not altered in transit: hex(HMAC(secret, body)).
+        signature = hmac.new(
+            secret.encode("utf-8"), body, hashlib.sha256
+        ).hexdigest()
+        headers["X-Trida-Signature"] = f"sha256={signature}"
     request = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        data=body,
+        headers=headers,
         method="POST",
     )
     timeout = env_float("ACTION_WEBHOOK_TIMEOUT_SECONDS", 5.0)
@@ -430,6 +472,93 @@ class InvoiceService:
     def get(self, invoice_id: str) -> AgentResult | None:
         record = self._get_store().get(invoice_id)
         return record.result if record else None
+
+    def metrics_snapshot(self) -> dict:
+        """Operational metrics over the stored runs: volumes,
+        outcomes, decisions, latency and model spend.
+
+        Aggregated from the records at read time — the store is the
+        system of record, so the numbers can never drift from a
+        separate counters table. Token/cost totals sum only the runs
+        that reported them (provider mode); when none did, they are
+        null rather than a dressed-up zero.
+        """
+        records = self._get_store().list_records()
+        by_status: dict[str, int] = {}
+        by_outcome: dict[str, int] = {}
+        latencies: list[float] = []
+        input_tokens = 0
+        output_tokens = 0
+        tokens_seen = False
+        costs: list[float] = []
+        for record in records:
+            result = record.result
+            by_status[result.status] = by_status.get(result.status, 0) + 1
+            outcome = result.triage.outcome
+            by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+            telemetry = result.telemetry
+            if telemetry is None:
+                continue
+            latencies.append(telemetry.latency_seconds)
+            if telemetry.input_tokens is not None:
+                tokens_seen = True
+                input_tokens += telemetry.input_tokens
+                output_tokens += telemetry.output_tokens or 0
+            if telemetry.estimated_cost_usd is not None:
+                costs.append(telemetry.estimated_cost_usd)
+        return {
+            "runs_total": len(records),
+            "by_status": by_status,
+            "by_outcome": by_outcome,
+            "decisions": {
+                "approved": by_status.get("approved", 0),
+                "rejected": by_status.get("rejected", 0),
+                "awaiting_approver": by_status.get("awaiting_approver", 0),
+            },
+            "mean_latency_seconds": (
+                round(sum(latencies) / len(latencies), 3) if latencies else None
+            ),
+            "total_input_tokens": input_tokens if tokens_seen else None,
+            "total_output_tokens": output_tokens if tokens_seen else None,
+            "total_estimated_cost_usd": (
+                round(sum(costs), 4) if costs else None
+            ),
+        }
+
+    def audit_rows(self) -> list[dict]:
+        """The audit trail: one flat row per processed invoice —
+        what the pipeline concluded, what the human decided, and what
+        left the building (dispatch). Column order is stable; the
+        API renders it as JSON or CSV."""
+        rows: list[dict] = []
+        for record in self._get_store().list_records():
+            result = record.result
+            invoice = record.invoice or {}
+            telemetry = result.telemetry
+            rows.append(
+                {
+                    "invoice_id": result.invoice_id,
+                    "supplier_name": result.supplier_name,
+                    "invoice_number": invoice.get("invoice_number", ""),
+                    "total_amount": invoice.get("total_amount"),
+                    "currency": invoice.get("currency", ""),
+                    "outcome": result.triage.outcome,
+                    "severity": result.triage.severity,
+                    "match_status": result.facts.match_status,
+                    "status": result.status,
+                    "decision": result.decision,
+                    "decided_by": result.decided_by,
+                    "decision_reason": result.decision_reason,
+                    "dispatch_status": result.dispatch_status,
+                    "external_action_taken": result.external_action_taken,
+                    "backend": telemetry.backend if telemetry else "",
+                    "model": telemetry.model if telemetry else "",
+                    "estimated_cost_usd": (
+                        telemetry.estimated_cost_usd if telemetry else None
+                    ),
+                }
+            )
+        return rows
 
     def match_credit_note(
         self, note: CreditNoteInput | dict
