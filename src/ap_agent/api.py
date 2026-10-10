@@ -423,18 +423,20 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/payment-runs/{run_id}/handoff", response_model=PaymentRun, dependencies=_AUTH)
-    def export_payment_run_handoff(run_id: str, request: DecisionRequest, as_of: str = Query(default="")) -> PaymentRun:
+    def export_payment_run_handoff(run_id: str, request: DecisionRequest, as_of: str = Query(default=""), format: str = Query(default="csv")) -> PaymentRun:
         """Generate the confirmed run's bank-ready hand-off file
-        (CSV, layout in handoff.py) into object storage. The run
-        gains the export receipt (object key + content hash);
-        generating the file changes no payment state. Member
-        discounts are re-verified as of the export date (``as_of``,
-        default today): a member whose discount window closed since
+        into object storage — CSV layout v1 by default, or the
+        ISO 20022 pain.001 XML with ``?format=pain001`` (mapping
+        in docs/handoff-formats.md). The run gains the export
+        receipt (object key + content hash + format); generating
+        the file changes no payment state. Member discounts are
+        re-verified as of the export date (``as_of``, default
+        today): a member whose discount window closed since
         confirmation is exported at full gross, with the drift
         itemised on the run (``handoff_drift``)."""
         try:
             return svc.export_payment_run_handoff(
-                run_id, actor=_decision_actor(request), as_of=as_of
+                run_id, actor=_decision_actor(request), as_of=as_of, format=format
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -443,13 +445,23 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
 
     @app.get("/payment-runs/{run_id}/handoff", dependencies=_AUTH)
     def download_payment_run_handoff(run_id: str) -> PlainTextResponse:
-        """Download the stored hand-off CSV. 404 until a hand-off
-        has been generated for the run."""
+        """Download the stored hand-off file, in whichever format
+        the run was last exported. 404 until a hand-off has been
+        generated for the run."""
         data = svc.get_payment_run_handoff(run_id)
         if data is None:
             raise HTTPException(
                 status_code=404,
                 detail="No hand-off file generated for this run yet.",
+            )
+        run = svc.get_payment_run(run_id)
+        if run is not None and run.handoff_format == "pain001":
+            return PlainTextResponse(
+                data.decode("utf-8"),
+                media_type="application/xml",
+                headers={
+                    "Content-Disposition": f"attachment; filename={run_id}-handoff.pain001.xml"
+                },
             )
         return PlainTextResponse(
             data.decode("utf-8"),

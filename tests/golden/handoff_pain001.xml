@@ -1,0 +1,81 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">
+  <CstmrCdtTrfInitn>
+    <GrpHdr>
+      <MsgId>RUN-USD-2026-10-05-2026-10-11</MsgId>
+      <CreDtTm>2026-10-05T09:30:00+00:00</CreDtTm>
+      <NbOfTxs>2</NbOfTxs>
+      <CtrlSum>2336.40</CtrlSum>
+      <InitgPty>
+        <Nm>Trida AI Blueprint - AP Agent</Nm>
+      </InitgPty>
+    </GrpHdr>
+    <PmtInf>
+      <PmtInfId>RUN-USD-2026-10-05-2026-10-11</PmtInfId>
+      <PmtMtd>TRF</PmtMtd>
+      <NbOfTxs>2</NbOfTxs>
+      <CtrlSum>2336.40</CtrlSum>
+      <ReqExctnDt>2026-10-11</ReqExctnDt>
+      <Dbtr>
+        <Nm>Debtor account holder (completed at import)</Nm>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <Othr>
+            <Id>DEBTOR-ACCOUNT-AT-IMPORT</Id>
+          </Othr>
+        </Id>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <Othr>
+            <Id>DEBTOR-AGENT-AT-IMPORT</Id>
+          </Othr>
+        </FinInstnId>
+      </DbtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtTrfTxInf>
+        <PmtId>
+          <EndToEndId>INV-1001</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="USD">1156.40</InstdAmt>
+        </Amt>
+        <Cdtr>
+          <Nm>Northbeam Office Supplies</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <Othr>
+              <Id>SUPPLIER-MASTER-AT-IMPORT</Id>
+            </Othr>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>Invoice NB-4471 (INV-1001)</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <EndToEndId>INV-1008</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="USD">1180.00</InstdAmt>
+        </Amt>
+        <Cdtr>
+          <Nm>Northbeam Office Supplies</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <Othr>
+              <Id>SUPPLIER-MASTER-AT-IMPORT</Id>
+            </Othr>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>Invoice NB-4480 (INV-1008)</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+    </PmtInf>
+  </CstmrCdtTrfInitn>
+</Document>

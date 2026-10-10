@@ -861,15 +861,18 @@ class PaymentRun(BaseModel):
     second_confirmed_at: Optional[str] = None
     note: str = ""
     # The execution hand-off: the confirmed run rendered as a
-    # bank-ready CSV and stored through the object-store port. The
-    # file is the routing adapter to the customer's banking / ERP
-    # system — generating it changes no payment state. These fields
-    # are the export's receipt: where the file lives, who generated
-    # it, and the sha256 of the exact bytes stored.
+    # bank-ready file (CSV layout v1, or ISO 20022 pain.001 XML —
+    # ``handoff_format`` says which) and stored through the
+    # object-store port. The file is the routing adapter to the
+    # customer's banking / ERP system — generating it changes no
+    # payment state. These fields are the export's receipt: where
+    # the file lives, who generated it, and the sha256 of the
+    # exact bytes stored.
     handoff_key: Optional[str] = None
     handoff_sha256: Optional[str] = None
     handoff_generated_at: Optional[str] = None
     handoff_generated_by: Optional[str] = None
+    handoff_format: str = ""  # "" until exported; csv | pain001
     # Discount drift found at export time: members whose confirmed
     # discount was no longer capturable when the hand-off was
     # generated. The exported lines above already carry the

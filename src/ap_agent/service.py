@@ -1471,28 +1471,42 @@ class InvoiceService:
         return run
 
     def export_payment_run_handoff(
-        self, run_id: str, actor: str, as_of: str = ""
+        self, run_id: str, actor: str, as_of: str = "", format: str = "csv"
     ) -> PaymentRun:
         """Render a confirmed run's hand-off file and store it
         through the object-store port.
 
-        The file (``handoff.py``, layout v1) is the routing adapter
-        to the customer's banking/ERP system. Generating it changes
+        The file (``handoff.py`` — CSV layout v1, or ISO 20022
+        pain.001 when ``format="pain001"``; the mapping is in
+        ``docs/handoff-formats.md``) is the routing adapter to the
+        customer's banking/ERP system. Generating it changes
         no payment state — the run stays confirmed, its invoices
         stay approved; the run record gains only the export receipt
-        (object key + sha256 of the stored bytes). Re-exporting
-        renders the same bytes and refreshes the receipt.
+        (object key + sha256 of the stored bytes, and the format).
+        Re-exporting renders the same bytes and refreshes the
+        receipt; exporting in the other format stores that format's
+        file alongside and moves the receipt to it.
 
-        Before rendering, every member's discount is re-verified
-        as of the export date (``as_of``, default today): a window
-        that closed since confirmation means the confirmed net
-        figure is stale, so the member is exported at its
-        export-time figure — full gross once the window has closed,
-        because the full total is what is owed — and the drift is
-        itemised on the run record (``handoff_drift``). The export
-        proceeds for the clean members; drift is flagged, never
-        silently exported and never a reason to short-pay.
+        The gates are the same in either format: the run must be
+        confirmed, and a four-eyes run must carry its second
+        confirmation. Before rendering, every member's discount is
+        re-verified as of the export date (``as_of``, default
+        today): a window that closed since confirmation means the
+        confirmed net figure is stale, so the member is exported at
+        its export-time figure — full gross once the window has
+        closed, because the full total is what is owed — and the
+        drift is itemised on the run record (``handoff_drift``).
+        The export proceeds for the clean members; drift is
+        flagged, never silently exported and never a reason to
+        short-pay.
         """
+        from .handoff import HANDOFF_FORMATS
+
+        if format not in HANDOFF_FORMATS:
+            raise ValueError(
+                f"Unknown hand-off format {format!r} — expected one of "
+                f"{HANDOFF_FORMATS}"
+            )
         store = self._get_store()
         run = store.get_payment_run(run_id)
         if run is None:
@@ -1522,7 +1536,7 @@ class InvoiceService:
                 "inject an object store): the hand-off file has nowhere "
                 "to live"
             )
-        from .handoff import handoff_key, render_handoff_csv
+        from .handoff import handoff_content_type, handoff_key, render_handoff
 
         anchor = _parse_date(as_of) if as_of else None
         if as_of and anchor is None:
@@ -1556,15 +1570,16 @@ class InvoiceService:
                 f"{lost} — the drifted member(s) are exported at "
                 "their full gross amounts; see handoff_drift."
             )
-        data = render_handoff_csv(run)
-        key = handoff_key(run.run_id)
-        object_store.put(key, data, content_type="text/csv")
+        data = render_handoff(run, format)
+        key = handoff_key(run.run_id, format)
+        object_store.put(key, data, content_type=handoff_content_type(format))
         run.handoff_key = key
         run.handoff_sha256 = hashlib.sha256(data).hexdigest()
         run.handoff_generated_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
         )
         run.handoff_generated_by = actor
+        run.handoff_format = format
         store.save_payment_run(run)
         return run
 
