@@ -87,6 +87,8 @@ from .schemas import (
     MarkerWorklist,
     InvoiceBundleInput,
     InvoiceInput,
+    LagSegmentProposal,
+    LagSegmentProposalEvent,
     MasterChangeEvent,
     MasterChangeRequest,
     OpenPostingItem,
@@ -1506,6 +1508,22 @@ class InvoiceService:
                     if p.status == state
                 )
                 for state in ("pending", "approved", "rejected")
+            },
+            # The drift watch's governed follow-through:
+            # lag-segment proposals by state, and the segments
+            # standing excluded from the forecast's candidate set
+            # under approved decisions — an exclusion nobody can
+            # see is a forecast nobody can explain.
+            "lag_segment_proposals": {
+                **{
+                    state: sum(
+                        1
+                        for p in self._get_store().list_lag_segment_proposals()
+                        if p.status == state
+                    )
+                    for state in ("pending", "approved", "rejected")
+                },
+                "excluded_segments": self.excluded_lag_segments(),
             },
             # The priced four-eyes wait against its monthly
             # budgets (FOUR_EYES_WAIT_BUDGETS): this month's
@@ -3254,6 +3272,236 @@ class InvoiceService:
         store.save_profile_change_proposal(proposal)
         return proposal
 
+    # --- Governed lag-segment proposals (the drift watch's
+    # standing decisions) --------------------------------------
+
+    def _excluded_lag_segments(self) -> set[str]:
+        """The lag segments standing excluded from the forecast's
+        candidate set, derived from the lag-segment proposal
+        ledger (the latest approved decision per segment rules —
+        see ``lag_segment_proposals.excluded_segments``)."""
+        from .lag_segment_proposals import excluded_segments
+
+        return excluded_segments(
+            self._get_store().list_lag_segment_proposals()
+        )
+
+    def excluded_lag_segments(self) -> list[str]:
+        """The excluded segments, sorted — the read the console
+        and /metrics name."""
+        return sorted(self._excluded_lag_segments())
+
+    def draft_lag_segment_proposals(
+        self, *, actor: str
+    ) -> list[LagSegmentProposal]:
+        """Draft lag-segment proposals from the drift watch (see
+        ``lag_segment_proposals.py``).
+
+        The watch demotes a decaying statistic inside the
+        selection, run by run; this sweep turns its readings
+        into governed questions: each degrading statistic that
+        still stands admitted gets a retirement proposal, and
+        each excluded segment whose recent record has recovered
+        gets a re-grade proposal — each carrying the watch's
+        account as its basis and its readings as evidence,
+        pending a second operator's decision. Drafting applies
+        NOTHING: no segment leaves or re-enters the candidate
+        set until an approval lands. One open question per
+        segment and kind — a segment with a pending proposal of
+        the same kind is not re-drafted, so re-running the sweep
+        is a no-op until the open questions are decided. Returns
+        the proposals this sweep drafted."""
+        from .lag_segment_proposals import (
+            excluded_segments,
+            next_lag_proposal_id,
+            proposals_from_watch,
+        )
+
+        if not (actor or "").strip():
+            raise ValueError(
+                "Provide 'actor' — a lag-segment proposal is "
+                "governed forecast work; an unattributed draft "
+                "is refused"
+            )
+        store = self._get_store()
+        runs = store.list_payment_runs()
+        watch = lag_grade_drift_watch(runs)
+        grades = grade_lag_statistics(runs)
+        existing = store.list_lag_segment_proposals()
+        specs = proposals_from_watch(
+            watch, grades, excluded_segments(existing)
+        )
+        open_keys = {
+            (p.segment, p.kind) for p in existing if p.status == "pending"
+        }
+        ids = [p.proposal_id for p in existing]
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        drafted: list[LagSegmentProposal] = []
+        for spec in specs:
+            if (spec["segment"], spec["kind"]) in open_keys:
+                continue  # the question is already open — one per segment+kind
+            proposal_id = next_lag_proposal_id(ids)
+            ids.append(proposal_id)
+            proposal = LagSegmentProposal(
+                proposal_id=proposal_id,
+                segment=spec["segment"],
+                kind=spec["kind"],
+                basis=spec["basis"],
+                evidence=spec["evidence"],
+                proposed_by=actor,
+                proposed_at=stamp,
+                history=[
+                    LagSegmentProposalEvent(
+                        status="proposed",
+                        actor=actor,
+                        at=stamp,
+                        note="drafted from the drift watch",
+                    )
+                ],
+            )
+            store.save_lag_segment_proposal(proposal)
+            drafted.append(proposal)
+        return drafted
+
+    def list_lag_segment_proposals(
+        self, status: str = ""
+    ) -> list[LagSegmentProposal]:
+        """The lag-segment proposals on file, oldest first — or
+        only those in one state (pending | approved | rejected)."""
+        proposals = self._get_store().list_lag_segment_proposals()
+        if status:
+            proposals = [p for p in proposals if p.status == status]
+        return proposals
+
+    def get_lag_segment_proposal(
+        self, proposal_id: str
+    ) -> LagSegmentProposal | None:
+        return self._get_store().get_lag_segment_proposal(proposal_id)
+
+    def decide_lag_segment_proposal(
+        self,
+        proposal_id: str,
+        *,
+        actor: str,
+        approve: bool,
+        note: str = "",
+    ) -> LagSegmentProposal:
+        """Record the second operator's decision on a
+        lag-segment proposal.
+
+        Four-eyes, as on profile changes: the drafter cannot
+        decide their own proposal. Rejection leaves the
+        selection exactly as it was (the watch's own demotion
+        still applies, run by run). Approval applies the
+        decision — and because the exclusion state is DERIVED
+        from this ledger, applying is the recording itself: an
+        approved retirement takes the segment out of the
+        forecast's candidate set, an approved re-grade lets it
+        back in. The application is guarded against the watch
+        having moved since the draft: a retirement whose
+        statistic no longer reads degrading, and a re-grade
+        whose segment is not excluded or still reads degrading,
+        are refused — the evidence the proposal answered no
+        longer stands, so it must be rejected and re-drafted
+        against a fresh watch, not applied on a stale one."""
+        from .lag_segment_proposals import segment_label
+
+        store = self._get_store()
+        proposal = store.get_lag_segment_proposal(proposal_id)
+        if proposal is None:
+            raise KeyError(
+                f"Unknown lag-segment proposal: {proposal_id} "
+                "(draft it first)"
+            )
+        if proposal.status != "pending":
+            detail = (
+                f" (decided by {proposal.decided_by})"
+                if proposal.decided_by
+                else ""
+            )
+            raise ValueError(
+                f"Lag-segment proposal {proposal_id} is already "
+                f"{proposal.status}{detail}"
+            )
+        if actor == proposal.proposed_by:
+            raise ValueError(
+                "four-eyes on governed forecast decisions: "
+                f"{proposal.proposed_by} drafted this proposal "
+                "and cannot also decide it — a second operator "
+                "must approve or reject a lag-segment decision"
+            )
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if not approve:
+            proposal.status = "rejected"
+            proposal.decided_by = actor
+            proposal.decided_at = stamp
+            proposal.decision_note = note
+            proposal.history.append(
+                LagSegmentProposalEvent(
+                    status="rejected", actor=actor, at=stamp, note=note
+                )
+            )
+            store.save_lag_segment_proposal(proposal)
+            return proposal
+        runs = store.list_payment_runs()
+        watch = lag_grade_drift_watch(runs)
+        entry = watch.get(proposal.segment) or {}
+        label = segment_label(proposal.segment)
+        excluded = self._excluded_lag_segments()
+        if proposal.kind == "retire_segment":
+            if proposal.segment in excluded:
+                raise ValueError(
+                    f"The {label} statistic already stands "
+                    "excluded — this retirement has nothing to "
+                    "apply to; reject it and let the ledger stand"
+                )
+            if not entry.get("degrading"):
+                raise ValueError(
+                    f"The {label} statistic no longer reads "
+                    "degrading on the current watch — the decay "
+                    "this retirement answered has recovered since "
+                    "the draft; reject the proposal (the watch's "
+                    "own demotion lifts with the record) rather "
+                    "than retiring a statistic on stale evidence"
+                )
+            applied = (
+                "segment retired from the forecast's candidate set"
+            )
+        elif proposal.kind == "regrade_segment":
+            if proposal.segment not in excluded:
+                raise ValueError(
+                    f"The {label} statistic does not stand "
+                    "excluded — a re-grade re-admits an excluded "
+                    "segment, and this one is not out; reject the "
+                    "proposal as moot"
+                )
+            if entry.get("degrading") or not entry.get("assessed"):
+                raise ValueError(
+                    f"The {label} statistic does not read "
+                    "recovered on the current watch — re-admitting "
+                    "it now would crown a record the watch has not "
+                    "cleared; reject the proposal and re-draft "
+                    "when the recent record stands"
+                )
+            applied = "segment re-admitted to the forecast's candidate set"
+        else:  # a kind this build does not draft — refuse, never guess
+            raise ValueError(
+                f"Unknown lag-segment proposal kind: {proposal.kind!r}"
+            )
+        proposal.status = "approved"
+        proposal.decided_by = actor
+        proposal.decided_at = stamp
+        proposal.decision_note = note
+        proposal.applied_at = stamp
+        proposal.history.append(
+            LagSegmentProposalEvent(
+                status="approved", actor=actor, at=stamp,
+                note=note or applied,
+            )
+        )
+        store.save_lag_segment_proposal(proposal)
+        return proposal
+
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)
 
@@ -3312,6 +3560,7 @@ class InvoiceService:
             lag_grades=grade_lag_statistics(runs),
             lag_drift_watch=lag_grade_drift_watch(runs),
             profile_id=profile.profile_id if profile else "",
+            excluded_segments=self._excluded_lag_segments(),
         )
         run.drift_forecast = forecast
         run.drift_forecast_basis = basis

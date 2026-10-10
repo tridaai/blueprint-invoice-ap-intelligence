@@ -53,6 +53,9 @@ from .schemas import (
     MasterChangeDecisionRequest,
     InformationReplyRequest,
     InformationWaitItem,
+    LagSegmentProposal,
+    LagSegmentProposalDecisionRequest,
+    LagSegmentProposalDraftRequest,
     MasterChangeReproposeRequest,
     MasterChangeFromInvoiceRequest,
     MasterChangeProposeRequest,
@@ -625,6 +628,58 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         exactly as it was."""
         try:
             return svc.decide_profile_change_proposal(
+                proposal_id,
+                actor=_decision_actor(request),
+                approve=request.approve,
+                note=request.note,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/forecast/lag-segment-proposals/draft", response_model=list[LagSegmentProposal], dependencies=_AUTH)
+    def draft_lag_segment_proposals(request: LagSegmentProposalDraftRequest) -> list[LagSegmentProposal]:
+        """Drafting sweep: turn the drift watch's readings into
+        governed lag-segment proposals. A statistic the watch
+        names degrading drafts its retirement from the forecast's
+        candidate set; an excluded segment whose recent record
+        recovered drafts its re-grade. One open question per
+        segment and kind. Drafting applies nothing; a segment
+        leaves or re-enters the candidate set only when a second
+        operator approves the proposal that asks."""
+        actor = _decision_actor(request)
+        if not (actor or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Provide 'actor' — a lag-segment proposal is governed forecast work; an unattributed draft is refused.",
+            )
+        try:
+            return svc.draft_lag_segment_proposals(actor=actor)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/forecast/lag-segment-proposals", response_model=list[LagSegmentProposal], dependencies=_AUTH)
+    def list_lag_segment_proposals(status: str = Query(default="")) -> list[LagSegmentProposal]:
+        return svc.list_lag_segment_proposals(status=status)
+
+    @app.get("/forecast/lag-segment-proposals/{proposal_id}", response_model=LagSegmentProposal, dependencies=_AUTH)
+    def get_lag_segment_proposal(proposal_id: str) -> LagSegmentProposal:
+        proposal = svc.get_lag_segment_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Lag-segment proposal not drafted yet.")
+        return proposal
+
+    @app.post("/forecast/lag-segment-proposals/{proposal_id}/decide", response_model=LagSegmentProposal, dependencies=_AUTH)
+    def decide_lag_segment_proposal(proposal_id: str, request: LagSegmentProposalDecisionRequest) -> LagSegmentProposal:
+        """The second operator's decision: proposer ≠ decider.
+        Approval applies the decision — a retirement takes the
+        segment out of the forecast's candidate set, a re-grade
+        re-admits it — guarded against the watch having moved
+        since the draft. Rejection leaves the selection exactly
+        as it was."""
+        try:
+            return svc.decide_lag_segment_proposal(
                 proposal_id,
                 actor=_decision_actor(request),
                 approve=request.approve,

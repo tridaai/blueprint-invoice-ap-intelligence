@@ -207,6 +207,7 @@ def drift_forecast(
     lag_grades: dict | None = None,
     lag_drift_watch: dict | None = None,
     profile_id: str = "",
+    excluded_segments: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[PaymentRunForecast], str]:
     """Forecast, at confirmation, which of a run's discounted
     members will lapse before the run is likely to be exported.
@@ -245,11 +246,17 @@ def drift_forecast(
     why = ""
     if lag_segments is not None:
         chosen, label, why = _select_lag_statistic(
-            run, lag_segments, lag_grades or {}, profile_id, lag_drift_watch
+            run,
+            lag_segments,
+            lag_grades or {},
+            profile_id,
+            lag_drift_watch,
+            excluded_segments,
         )
         if chosen is None:
             return [], (
-                "no forecast: no exported runs yet, so there is no "
+                why
+                or "no forecast: no exported runs yet, so there is no "
                 "measured proposal→export lag to project from"
             )
         lag_stats = chosen
@@ -637,6 +644,7 @@ def _select_lag_statistic(
     grades: dict,
     profile_id: str,
     drift_watch: dict | None = None,
+    excluded_segments: set[str] | frozenset[str] | None = None,
 ) -> tuple[dict | None, str, str]:
     """Choose the lag statistic that projects this run's export,
     and say why — (stats, label, why); (None, "", "") when no
@@ -660,6 +668,15 @@ def _select_lag_statistic(
     the best standing graded candidate, or, when every graded
     candidate is demoted, to the most specific adequately-
     measured segment — and the why names the demotion either way.
+
+    A governed exclusion (``excluded_segments`` — segment keys an
+    approved lag-segment proposal retired, derived from the
+    proposal ledger by the service) is stronger than a demotion:
+    the candidate is not in the set at all, however good its
+    record, and the why names the exclusion. When EVERY
+    candidate stands excluded there is nothing the selection
+    may crown — it returns no statistic and says why, rather
+    than quietly re-admitting a statistic a named human retired.
     """
     candidates: list[tuple[int, str, str, dict]] = []
     profile_stats = (
@@ -681,17 +698,53 @@ def _select_lag_statistic(
         candidates.append((0, "global", "global", global_stats))
     if not candidates:
         return None, "", ""
+    excluded = set(excluded_segments or ())
+    excluded_here = [c for c in candidates if c[1] in excluded]
+    if excluded_here:
+        candidates = [c for c in candidates if c[1] not in excluded]
+        if not candidates:
+            names = "; ".join(
+                f"the {c[2]} statistic" for c in excluded_here
+            )
+            return (
+                None,
+                "",
+                "no forecast: every candidate lag statistic is "
+                f"under a governed exclusion ({names} — retired "
+                "by approved lag-segment proposals) and no "
+                "statistic may project this run until a re-grade "
+                "re-admits one",
+            )
+    exclusion_clause = ""
+    if excluded_here:
+        exclusion_clause = "; " + "; ".join(
+            f"the {c[2]} statistic stands excluded under a "
+            "governed lag-segment decision and was not a candidate"
+            for c in excluded_here
+        )
     eligible = [
         c for c in candidates if (c[3].get("count") or 0) >= _MIN_SEGMENT_RUNS
     ]
     if not eligible:
+        if "global" in excluded:
+            # The pre-selection fallback IS the global pool; an
+            # excluded pool is no fallback. Nothing may project.
+            return (
+                None,
+                "",
+                "no forecast: no segment holds an adequately-"
+                "measured lag, and the global pool — the fallback "
+                "of last resort — stands excluded under a governed "
+                "lag-segment decision",
+            )
         stats, label = global_stats, "global"
         return (
             stats,
             label,
             "the only segment with a measured lag so far — segment "
             "statistics govern once one holds "
-            f"{_MIN_SEGMENT_RUNS} or more exported runs",
+            f"{_MIN_SEGMENT_RUNS} or more exported runs"
+            + exclusion_clause,
         )
     graded = [
         c
@@ -746,7 +799,7 @@ def _select_lag_statistic(
             )
             if demoted:
                 why = f"{why}; {demotion_clause()}"
-            return best[3], best[2], why
+            return best[3], best[2], why + exclusion_clause
         # Every graded candidate is demoted: the forecast falls
         # back to the most specific adequately-measured segment,
         # with the demotions named — never to a statistic the
@@ -756,7 +809,8 @@ def _select_lag_statistic(
             best[3],
             best[2],
             f"{demotion_clause()}; no graded candidate stands, so "
-            "the most specific adequately-measured segment governs",
+            "the most specific adequately-measured segment governs"
+            + exclusion_clause,
         )
     best = max(eligible, key=lambda c: c[0])
     return (
@@ -764,7 +818,8 @@ def _select_lag_statistic(
         best[2],
         "no candidate statistic has graded history over "
         f"{_MIN_GRADED_MEMBERS} or more members yet, so the most "
-        "specific adequately-measured segment governs",
+        "specific adequately-measured segment governs"
+        + exclusion_clause,
     )
 
 

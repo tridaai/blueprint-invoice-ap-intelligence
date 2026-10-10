@@ -30,6 +30,7 @@ from .schemas import (
     BundleResult,
     EscalationDigest,
     HandoffProfile,
+    LagSegmentProposal,
     MasterChangeRequest,
     PaymentRun,
     ProfileChangeProposal,
@@ -222,6 +223,7 @@ class InMemoryStore:
         self._digests: dict[str, str] = {}
         self._handoff_profiles: dict[str, str] = {}
         self._profile_proposals: dict[str, str] = {}
+        self._lag_proposals: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
@@ -358,6 +360,30 @@ class InMemoryStore:
                 for k in sorted(self._profile_proposals)
             ]
         return [ProfileChangeProposal.model_validate_json(p) for p in payloads]
+
+    def save_lag_segment_proposal(self, proposal: LagSegmentProposal) -> None:
+        with self._lock:
+            self._lag_proposals[proposal.proposal_id] = (
+                proposal.model_dump_json()
+            )
+
+    def get_lag_segment_proposal(
+        self, proposal_id: str
+    ) -> LagSegmentProposal | None:
+        with self._lock:
+            payload = self._lag_proposals.get(proposal_id)
+        return (
+            LagSegmentProposal.model_validate_json(payload)
+            if payload
+            else None
+        )
+
+    def list_lag_segment_proposals(self) -> list[LagSegmentProposal]:
+        with self._lock:
+            payloads = [
+                self._lag_proposals[k] for k in sorted(self._lag_proposals)
+            ]
+        return [LagSegmentProposal.model_validate_json(p) for p in payloads]
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -668,6 +694,33 @@ class PostgresStore:
         proposals = [
             ProfileChangeProposal.model_validate(d)
             for d in self._all_blobs("profile_change_proposals")
+        ]
+        return sorted(proposals, key=lambda p: p.proposal_id)
+
+    # --- Round-18 artefacts: lag-segment proposals
+    # (migration 0013). Same blob pattern, keyed by proposal id;
+    # the forecast's exclusion state is derived from this ledger.
+
+    def save_lag_segment_proposal(self, proposal: LagSegmentProposal) -> None:
+        self._save_blob(
+            "lag_segment_proposals",
+            "proposal_id",
+            proposal.proposal_id,
+            proposal.model_dump_json(),
+        )
+
+    def get_lag_segment_proposal(
+        self, proposal_id: str
+    ) -> LagSegmentProposal | None:
+        data = self._get_blob(
+            "lag_segment_proposals", "proposal_id", proposal_id
+        )
+        return LagSegmentProposal.model_validate(data) if data is not None else None
+
+    def list_lag_segment_proposals(self) -> list[LagSegmentProposal]:
+        proposals = [
+            LagSegmentProposal.model_validate(d)
+            for d in self._all_blobs("lag_segment_proposals")
         ]
         return sorted(proposals, key=lambda p: p.proposal_id)
 

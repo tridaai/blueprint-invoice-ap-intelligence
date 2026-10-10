@@ -1421,6 +1421,92 @@ class ProfileChangeProposal(BaseModel):
     history: list[ProfileProposalEvent] = Field(default_factory=list)
 
 
+class LagSegmentProposalEvent(BaseModel):
+    """One entry in a lag-segment proposal's audit trail: the
+    drafting, and the decision that closed it."""
+
+    status: str = ""  # proposed | approved | rejected
+    actor: str = ""
+    at: str = ""  # ISO timestamp
+    note: str = ""
+
+
+class LagSegmentProposal(BaseModel):
+    """A governed decision about a lag statistic, drafted from
+    the drift watch.
+
+    The drift watch (``paymentruns.lag_grade_drift_watch``)
+    demotes a decaying statistic inside the forecast's
+    selection, run by run — sound, but automatic and silent: no
+    human ever decided the segment's fate, and the demotion
+    lifts the moment the recent window turns over, however
+    briefly. This is the governed path from the watch to a
+    standing decision, under the same discipline as the
+    profile-change proposals (drafted from the evidence by one
+    operator, decided by a second, applied only on approval):
+
+    - ``retire_segment`` — the watch names the segment's
+      statistic degrading; approval takes it out of the
+      forecast's candidate set altogether (the selection skips
+      it and says so in the basis) until a re-grade re-admits
+      it. Nothing the statistic computed is rewritten; it is
+      removed from the set of statistics that may project.
+    - ``regrade_segment`` — an excluded segment whose recent
+      record has recovered (the watch assesses it again and no
+      longer names it degrading); approval re-admits it to the
+      candidate set, re-graded on the record as it now stands.
+      The ordinary grading then decides whether it wins.
+
+    Which segments stand excluded is DERIVED from this ledger —
+    the latest approved decision per segment — so the proposals
+    are the audit trail and the state in one document, and
+    drafting applies nothing: left undecided, a proposal is a
+    question, not an exclusion.
+    """
+
+    proposal_id: str  # LSP-0001 …
+    segment: str  # the statistic key: global | currency:EUR | profile:<id>
+    kind: str  # retire_segment | regrade_segment
+    basis: str = ""  # the watch's account the proposal answers
+    # The watch + grade readings the draft rests on (recalls,
+    # graded members) — the decider compares evidence, not prose.
+    evidence: dict = Field(default_factory=dict)
+    proposed_by: str = ""
+    proposed_at: str = ""
+    status: str = "pending"  # pending | approved | rejected
+    decided_by: Optional[str] = None
+    decided_at: Optional[str] = None
+    decision_note: str = ""
+    applied_at: Optional[str] = None  # when approval landed the decision
+    history: list[LagSegmentProposalEvent] = Field(default_factory=list)
+
+
+class LagSegmentProposalDraftRequest(BaseModel):
+    """Draft lag-segment proposals from the drift watch: the
+    operator running the drafting sweep."""
+
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class LagSegmentProposalDecisionRequest(BaseModel):
+    """The second operator's decision on a lag-segment proposal:
+    proposer ≠ decider, as on profile changes."""
+
+    approve: bool
+    note: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
 class ProfileProposalDraftRequest(BaseModel):
     """Draft profile-change proposals from the effectiveness
     grades: the operator running the drafting sweep."""
