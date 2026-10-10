@@ -1403,7 +1403,7 @@ class InvoiceService:
                 costs.append(telemetry.estimated_cost_usd)
         from .digest import digest_store_coverage
         from .handoff_profiles import profile_effectiveness
-        from .posting import approved_not_posted
+        from .posting import approved_not_posted, posting_ladder_analytics
         from .supplier_master import master_coverage
 
         coverage = master_coverage(
@@ -1483,6 +1483,14 @@ class InvoiceService:
                     for entry in r.result.posting_escalations
                     if entry.level >= 2
                 ),
+                # The ladder, graded: which rung a posting
+                # followed (a posted receipt after that rung,
+                # before any higher one), which episodes closed
+                # without the ladder resolving them, and which
+                # stand open exactly as they stood when the
+                # last rung fired — the wait follow-through's
+                # question, asked of the ERP loop.
+                "escalation_ladder": posting_ladder_analytics(records),
             },
             # Information waits: the aging threshold that puts a
             # wait on the worklist, the escalation threshold (2×)
