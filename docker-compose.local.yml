@@ -22,7 +22,7 @@ services:
 
   minio:
     ports:
-      - "9000:9000"
+      - "8333:8333"
 
   ollama:
     image: ollama/ollama:latest
