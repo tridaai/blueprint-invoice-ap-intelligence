@@ -246,6 +246,14 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             status_code=422, detail="format must be 'json' or 'csv'."
         )
 
+    @app.get("/audit/twins", dependencies=_AUTH)
+    def audit_twins() -> dict:
+        """The duplicate-twin graph: clusters of records the
+        cross-shape duplicate screen links as the same invoice —
+        members with arrival shapes, screened edges, and the
+        canonical-key evidence each cluster rests on."""
+        return svc.duplicate_twins()
+
     @app.get("/samples", dependencies=_AUTH)
     def list_samples() -> list[dict]:
         return load_sample_invoices()

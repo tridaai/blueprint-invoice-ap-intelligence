@@ -47,6 +47,14 @@ class ApprovalRecord:
     rejected_by: str = ""
     reject_reason: str = ""
     dispatch_status: str | None = None
+    # The arrival shape this record entered through: "single" (a
+    # structured submission, alone or in a batch) or
+    # "bundle_segment" (cut out of a multi-invoice bundle). The
+    # duplicate-twin graph (twins.py) reads it so a reviewer can
+    # see WHICH shapes a duplicate cluster spans. Stamped at
+    # analysis time; records saved before the stamp existed load
+    # as "single" (see _load_record).
+    arrival_shape: str = "single"
 
 
 def history_entry(record: ApprovalRecord) -> dict:
@@ -167,6 +175,7 @@ def _dump_record(record: ApprovalRecord) -> str:
             "rejected_by": record.rejected_by,
             "reject_reason": record.reject_reason,
             "dispatch_status": record.dispatch_status,
+            "arrival_shape": record.arrival_shape,
         }
     )
 
@@ -182,6 +191,7 @@ def _load_record(payload: str | dict) -> ApprovalRecord:
         rejected_by=data.get("rejected_by", ""),
         reject_reason=data.get("reject_reason", ""),
         dispatch_status=data.get("dispatch_status"),
+        arrival_shape=data.get("arrival_shape") or "single",
     )
 
 

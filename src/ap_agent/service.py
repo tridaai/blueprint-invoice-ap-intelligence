@@ -116,6 +116,11 @@ AUDIT_COLUMNS = [
     "estimated_cost_usd",
     "posting_status",
     "posting_reference",
+    "duplicate_of",
+    "arrival_shape",
+    "twin_arrival_shape",
+    "twin_cluster",
+    "twin_cluster_size",
 ]
 
 
@@ -620,6 +625,7 @@ class InvoiceService:
         backend: ModelBackend,
         retriever: Retriever,
         event_sink: EventSink | None = None,
+        arrival_shape: str = "single",
     ) -> AgentResult:
         # Governed master changes whose effective date has arrived
         # land in the supplier master before screening runs, so the
@@ -665,7 +671,11 @@ class InvoiceService:
             duplicate_of=duplicate_of,
         )
         self._get_store().save(
-            ApprovalRecord(result=result, invoice=model.model_dump(mode="json"))
+            ApprovalRecord(
+                result=result,
+                invoice=model.model_dump(mode="json"),
+                arrival_shape=arrival_shape,
+            )
         )
         return result
 
@@ -1129,12 +1139,31 @@ class InvoiceService:
         """The audit trail: one flat row per processed invoice —
         what the pipeline concluded, what the human decided, and what
         left the building (dispatch). Column order is stable; the
-        API renders it as JSON or CSV."""
+        API renders it as JSON or CSV.
+
+        The twin columns close each row's duplicate story: the
+        record it duplicates (``duplicate_of``), the shape this
+        record arrived in and the shape its twin arrived in
+        (``arrival_shape`` / ``twin_arrival_shape``), and the twin
+        cluster it belongs to (``twin_cluster`` / ``twin_cluster_size``
+        from :mod:`ap_agent.twins`) — the whole cluster is one
+        filter away, without opening each record."""
+        from .twins import cluster_membership, record_arrival_shape, twin_clusters
+
+        records = self._get_store().list_records()
+        clusters = twin_clusters(records)
+        membership = cluster_membership(clusters)
+        shapes = {
+            record.result.invoice_id: record_arrival_shape(record)
+            for record in records
+        }
         rows: list[dict] = []
-        for record in self._get_store().list_records():
+        for record in records:
             result = record.result
             invoice = record.invoice or {}
             telemetry = result.telemetry
+            duplicate_of = result.facts.duplicate_of or ""
+            cluster = membership.get(result.invoice_id, {})
             rows.append(
                 {
                     "invoice_id": result.invoice_id,
@@ -1166,9 +1195,28 @@ class InvoiceService:
                         if result.posting_receipt
                         else ""
                     ),
+                    "duplicate_of": duplicate_of,
+                    "arrival_shape": shapes[result.invoice_id],
+                    "twin_arrival_shape": (
+                        shapes.get(duplicate_of, "") if duplicate_of else ""
+                    ),
+                    "twin_cluster": cluster.get("cluster_id", ""),
+                    "twin_cluster_size": cluster.get("size", 0),
                 }
             )
         return rows
+
+    def duplicate_twins(self) -> dict:
+        """The duplicate-twin graph over the stored records
+        (``twins.twin_clusters``): every cluster of records the
+        cross-shape screen links as the same invoice — members
+        with their arrival shapes, the screened edges, and the
+        canonical-key evidence — for a reviewer who wants the
+        whole cluster at once (``GET /audit/twins``)."""
+        from .twins import twin_clusters
+
+        clusters = twin_clusters(self._get_store().list_records())
+        return {"clusters": clusters, "count": len(clusters)}
 
     def match_credit_note(
         self, note: CreditNoteInput | dict
@@ -1301,7 +1349,9 @@ class InvoiceService:
             try:
                 backend = self.backend or get_backend()
                 retriever = self.retriever or get_retriever()
-                result = self._analyze_model(invoice, backend, retriever)
+                result = self._analyze_model(
+                    invoice, backend, retriever, arrival_shape="bundle_segment"
+                )
                 outcomes.append(
                     BundleInvoiceOutcome(
                         invoice_id=invoice.invoice_id,
