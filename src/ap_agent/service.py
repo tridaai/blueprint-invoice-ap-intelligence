@@ -388,10 +388,18 @@ def dispatch_posting_escalation_webhook(
     item: OpenPostingItem,
     *,
     escalation_days: int,
+    level: int = 1,
 ) -> str | None:
-    """POST the ``posting_escalation`` event for one open posting
-    past its escalation threshold (off by default — the same
-    opt-in seam, secret, and signature as the approval webhook).
+    """POST one rung of the posting-escalation ladder for one open
+    posting (off by default — the same opt-in seam, secret, and
+    signature as the approval webhook).
+
+    Level 1 is the ``posting_escalation`` event, fired past the
+    escalation threshold; level 2 is ``posting_escalation_urgent``,
+    fired past twice the threshold for a posting the first shout
+    did not close — the payload names its rung (``level``,
+    ``urgent``) so one receiver can route the two differently.
+    ``escalation_days`` is the firing rung's own threshold.
 
     The payload is the posting's snapshot at the crossing: which
     invoice, which supplier, how much, who approved it, how long
@@ -402,7 +410,9 @@ def dispatch_posting_escalation_webhook(
     unconfigured, else ``"sent"`` / ``"failed"`` (see
     :func:`_post_signed_webhook`)."""
     payload = {
-        "event": "posting_escalation",
+        "event": (
+            "posting_escalation" if level < 2 else "posting_escalation_urgent"
+        ),
         "invoice_id": item.invoice_id,
         "supplier_name": item.supplier_name,
         "invoice_number": item.invoice_number,
@@ -417,6 +427,9 @@ def dispatch_posting_escalation_webhook(
         "escalation_days": escalation_days,
         "escalated": True,
     }
+    if level >= 2:
+        payload["level"] = level
+        payload["urgent"] = True
     return _post_signed_webhook(payload)
 
 
@@ -975,11 +988,19 @@ class InvoiceService:
                 "escalation_days": max(
                     posting_escalation_days(), posting_receipt_grace_days()
                 ),
-                # posting_escalation webhooks recorded on the
+                # posting escalation webhooks recorded on the
                 # invoice records (the sweep's ledger): pushes
-                # fired, as opposed to items merely past the line.
+                # fired, as opposed to items merely past the line —
+                # split by ladder rung, so the urgent second shouts
+                # are countable apart from the first crossings.
                 "escalations_recorded": sum(
                     len(r.result.posting_escalations) for r in records
+                ),
+                "escalations_recorded_urgent": sum(
+                    1
+                    for r in records
+                    for entry in r.result.posting_escalations
+                    if entry.level >= 2
                 ),
             },
             "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
@@ -1374,25 +1395,36 @@ class InvoiceService:
         unposted past the escalation threshold
         (``POSTING_ESCALATION_DAYS``, never below the receipt
         grace window); this is the push counterpart — for each
-        crossed posting, fire the signed ``posting_escalation``
-        webhook (the opt-in ``ACTION_WEBHOOK_URL`` seam) with the
-        posting's snapshot, so the customer's paging/ticketing
-        system hears that the ERP loop is open without anyone
-        watching the queue. The recovery cases got this treatment
-        first; an unposted approval is the same shape of silence.
+        crossed posting, fire the signed escalation webhook (the
+        opt-in ``ACTION_WEBHOOK_URL`` seam) with the posting's
+        snapshot, so the customer's paging/ticketing system hears
+        that the ERP loop is open without anyone watching the
+        queue. The recovery cases got this treatment first; an
+        unposted approval is the same shape of silence.
 
-        One escalation per episode: the dispatch is recorded in
-        the invoice record's own escalation ledger
-        (``result.posting_escalations``, beside the receipt
-        fields), deduped by (receipt state, episode start) — an
-        episode runs from the approval while no receipt exists,
-        or from the latest failed receipt, because a failure is
-        new information worth one escalation of its own once its
-        episode crosses. A posted receipt closes the item
-        outright: the reset. With no webhook configured the sweep
-        is a no-op that records nothing — there is nothing to
-        dedupe against a dispatch that never happened. Returns
-        the items escalated by this sweep.
+        The escalation is a ladder of two rungs, so a posting
+        nobody acts on does not shout once and then go quiet
+        forever: past the threshold, level 1 fires
+        (``posting_escalation``); past *twice* the threshold —
+        the first shout unanswered — level 2 fires
+        (``posting_escalation_urgent``) in the same shape with
+        the rung named. Each rung fires once per episode: the
+        dispatch is recorded in the invoice record's own
+        escalation ledger (``result.posting_escalations``, beside
+        the receipt fields), deduped by (receipt state, episode
+        start, level) — an episode runs from the approval while
+        no receipt exists, or from the latest failed receipt,
+        because a failure is new information worth a ladder of
+        its own once its episode crosses. A sweep climbs at most
+        one rung per posting — a posting first *seen* past the
+        second threshold still hears level 1 first, and level 2
+        on the next sweep — so the two events stay distinguishable
+        in the receiver's log instead of arriving as a pair. A
+        posted receipt closes the item outright: the reset. With
+        no webhook configured the sweep is a no-op that records
+        nothing — there is nothing to dedupe against a dispatch
+        that never happened. Returns the items escalated by this
+        sweep, at either rung.
         """
         from .posting import approved_not_posted
 
@@ -1402,6 +1434,7 @@ class InvoiceService:
             raise ValueError(f"as_of {as_of!r} is not an ISO date")
         anchor = anchor or datetime.now(timezone.utc).date()
         threshold = max(posting_escalation_days(), posting_receipt_grace_days())
+        rungs = [(1, threshold), (2, 2 * threshold)]
         report = approved_not_posted(
             store.list_records(), as_of=anchor, grace_days=threshold
         )
@@ -1423,14 +1456,25 @@ class InvoiceService:
                 episode_since = (
                     anchor - timedelta(days=item.age_days or 0)
                 ).isoformat()
-            if any(
-                entry.receipt_state == item.receipt_state
-                and entry.episode_since == episode_since
+            fired = {
+                (entry.receipt_state, entry.episode_since, entry.level)
                 for entry in result.posting_escalations
-            ):
-                continue  # this episode already escalated — once is the rule
+            }
+            age = item.age_days or 0
+            due = next(
+                (
+                    (level, rung_days)
+                    for level, rung_days in rungs
+                    if age > rung_days
+                    and (item.receipt_state, episode_since, level) not in fired
+                ),
+                None,
+            )
+            if due is None:
+                continue  # every due rung already fired — once per rung is the rule
+            level, rung_days = due
             outcome = dispatch_posting_escalation_webhook(
-                item, escalation_days=threshold
+                item, escalation_days=rung_days, level=level
             )
             if outcome is None:
                 continue  # webhook off: nothing fired, nothing recorded
@@ -1438,7 +1482,8 @@ class InvoiceService:
                 PostingEscalation(
                     receipt_state=item.receipt_state,
                     episode_since=episode_since,
-                    escalation_days=threshold,
+                    escalation_days=rung_days,
+                    level=level,
                     age_days=item.age_days,
                     dispatched_at=datetime.now(timezone.utc).isoformat(
                         timespec="seconds"

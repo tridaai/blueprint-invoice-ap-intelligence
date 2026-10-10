@@ -499,25 +499,30 @@ class PostingReceipt(BaseModel):
 
 
 class PostingEscalation(BaseModel):
-    """One escalation for an open posting: the signed
-    ``posting_escalation`` webhook fired when the posting crossed
-    the escalation threshold (``POSTING_ESCALATION_DAYS``) still
-    unposted.
+    """One escalation for an open posting: a signed webhook fired
+    when the posting crossed an escalation threshold still
+    unposted. The escalation is a *ladder*, not a single shout:
+    level 1 (``posting_escalation``) fires past
+    ``POSTING_ESCALATION_DAYS``; level 2
+    (``posting_escalation_urgent``) fires past twice that, for an
+    item that has already been escalated once and is *still*
+    open — neglect compounds loudly instead of expiring.
 
     The ledger lives on the invoice record, beside the receipt
-    fields it escalates against. Dedupe is per *episode* —
-    (receipt_state, episode_since): an episode runs from the
-    approval while no receipt exists, or from the latest failed
-    receipt (a failure is new information, worth one escalation
-    of its own once the episode crosses). A posted receipt closes
-    the item and ends the story; it is the reset. An attempt is
-    recorded whether the receiver answered (``sent``) or not
-    (``failed``): the ledger is the record that the crossing was
-    escalated, once."""
+    fields it escalates against. Dedupe is per *episode and
+    rung* — (receipt_state, episode_since, level): an episode
+    runs from the approval while no receipt exists, or from the
+    latest failed receipt (a failure is new information, worth a
+    ladder of its own once the episode crosses). A posted
+    receipt closes the item and ends the story; it is the reset.
+    An attempt is recorded whether the receiver answered
+    (``sent``) or not (``failed``): the ledger is the record
+    that the crossing was escalated, once per rung."""
 
     receipt_state: str = ""  # none | failed — the state escalated against
     episode_since: str = ""  # ISO date the episode began — the crossing's identity
-    escalation_days: int = 0  # the threshold in force when it fired
+    escalation_days: int = 0  # the rung's threshold in force when it fired
+    level: int = 1  # ladder rung: 1 = posting_escalation, 2 = posting_escalation_urgent
     age_days: Optional[int] = None  # the posting's age at the crossing
     dispatched_at: str = ""  # ISO timestamp of the dispatch
     dispatch_status: str = ""  # sent | failed

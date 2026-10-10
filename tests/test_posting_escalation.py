@@ -104,8 +104,9 @@ def test_sweep_is_deduped_per_episode_and_a_posted_receipt_resets(service, monke
     monkeypatch.setenv("ACTION_WEBHOOK_URL", "https://example.invalid/hook")
     result = _approved(service)
     first = service.escalate_open_postings(as_of=_plus(result.decided_at, 30))
-    second = service.escalate_open_postings(as_of=_plus(result.decided_at, 45))
-    assert len(first) == 1 and second == []  # once per episode
+    second = service.escalate_open_postings(as_of=_plus(result.decided_at, 31))
+    assert len(first) == 1 and second == []  # once per rung (the ladder's
+    # second rung, past 2x the threshold, is test_posting_escalation_ladder.py)
     # The receipt arrives: the item closes, the story resets —
     # later sweeps find nothing open to escalate.
     service.record_posting_receipt(
@@ -141,8 +142,15 @@ def test_a_failed_receipt_starts_a_new_episode_that_escalates_again(service, mon
     assert entries[1].receipt_state == "failed"
     receipt = service.get("INV-1001").posting_receipt
     assert entries[1].episode_since == receipt.recorded_at[:10]
-    # And the new episode dedupes like the old one.
-    assert service.escalate_open_postings(as_of=_plus(result.decided_at, 60)) == []
+    # The new episode dedupes per rung like the old one — and,
+    # past twice the threshold, climbs its own ladder to level 2
+    # (test_posting_escalation_ladder.py has the full ladder).
+    climbed = service.escalate_open_postings(as_of=_plus(result.decided_at, 60))
+    assert len(climbed) == 1
+    entries = service.get("INV-1001").posting_escalations
+    assert len(entries) == 3 and entries[2].level == 2
+    assert entries[2].receipt_state == "failed"
+    assert service.escalate_open_postings(as_of=_plus(result.decided_at, 61)) == []
 
 
 def test_no_webhook_configured_records_nothing(service, monkeypatch):

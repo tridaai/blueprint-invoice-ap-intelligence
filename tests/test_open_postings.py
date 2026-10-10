@@ -148,6 +148,7 @@ def test_report_endpoint_and_metrics(service):
         "escalated_count": 0,
         "escalation_days": 21,
         "escalations_recorded": 0,
+        "escalations_recorded_urgent": 0,
     }
     record = service._get_store().get("INV-1001")
     record.result.decided_at = _plus(result.decided_at, -30) + "T00:00:00+00:00"

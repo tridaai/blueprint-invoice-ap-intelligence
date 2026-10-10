@@ -596,13 +596,17 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
 
     @app.post("/postings/escalate", response_model=list[OpenPostingItem], dependencies=_AUTH)
     def escalate_open_postings(as_of: str = Query(default="")) -> list[OpenPostingItem]:
-        """Sweep: fire the signed ``posting_escalation`` webhook
-        for every approved invoice still unposted past the
-        escalation threshold, and record the dispatch on the
-        invoice record's own escalation ledger (beside the receipt
-        fields). One escalation per open episode — re-running the
-        sweep does not re-fire; a posted receipt closes the item,
-        a new failed receipt starts a new episode; with no webhook
+        """Sweep: climb the posting-escalation ladder for every
+        approved invoice still unposted past its rung, and record
+        each dispatch on the invoice record's own escalation
+        ledger (beside the receipt fields). Level 1 fires the
+        signed ``posting_escalation`` webhook past the escalation
+        threshold; level 2 fires ``posting_escalation_urgent``
+        past twice the threshold, for a posting the first shout
+        did not close. One firing per rung per open episode —
+        re-running the sweep does not re-fire; a posted receipt
+        closes the item, a new failed receipt starts a new
+        episode with a ladder of its own; with no webhook
         configured nothing fires and nothing is recorded.
         ``as_of`` (ISO date) anchors the aging; default today."""
         try:
