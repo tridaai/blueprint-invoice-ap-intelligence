@@ -67,6 +67,23 @@
     <section id="sec-checks"></section>
     <section id="sec-gate"></section>
   </div>
+  <section id="sec-queue">
+    <h2>AP aging queue (awaiting approver)</h2>
+    <div class="gate">
+      <button id="loadqueue" class="secondary">Load queue</button>
+      <span class="note" id="queuenote">Invoices waiting at the gate, most overdue first, with the triage mix.</span>
+    </div>
+    <div id="queuebody"></div>
+  </section>
+  <section id="sec-payruns">
+    <h2>Payment runs (proposals — the agent never pays)</h2>
+    <div class="gate">
+      <button id="propose">Propose payment run</button>
+      <input type="text" id="lead" placeholder="Finance lead (for confirm)" size="22">
+      <span class="note" id="paynote">Groups the approved invoices by currency + due window. Confirming records the lead's acceptance; the AP system of record executes the run.</span>
+    </div>
+    <div id="payrunsbody"></div>
+  </section>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -200,7 +217,46 @@ $("run").onclick = async () => {
   } finally { $("run").disabled = false; }
 };
 
-loadSamples(); loadEvals();
+async function loadQueue() {
+  const res = await fetch("/queue", {headers: headers()});
+  const q = await res.json();
+  if (!res.ok) { $("queuenote").textContent = `Queue failed to load (${res.status}).`; return; }
+  const mix = Object.entries(q.triage_mix || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
+  $("queuenote").textContent = `${q.count} awaiting · ${q.overdue_count} overdue · as of ${q.as_of}${mix ? " · mix: " + mix : ""}`;
+  $("queuebody").innerHTML = (q.items || []).length ? `<table><tr><th>Invoice</th><th>Supplier</th><th>Outcome</th><th>Amount</th><th>Due</th><th>Aging</th><th>Discount by</th></tr>${q.items.map(i => `<tr><td>${esc(i.invoice_id)}<br><span class="note">${esc(i.invoice_number || "")}</span></td><td>${esc(i.supplier_name)}</td><td>${pill(i.outcome, i.outcome === "clean_match" ? "ok" : "warn")} ${sevPill(i.severity)}</td><td>${esc(i.currency)} ${i.total_amount ?? "—"}</td><td>${esc(i.due_date || "—")}</td><td>${i.days_overdue > 0 ? pill(i.days_overdue + "d overdue", "bad") : i.bucket === "due_today" ? pill("due today", "warn") : esc(String(i.bucket).replaceAll("_", " "))}</td><td>${i.discount_deadline ? esc(i.discount_deadline) + (i.discount_days_left != null ? ` (${i.discount_days_left}d left)` : "") : "—"}</td></tr>`).join("")}</table>` : `<p class="kv">Nothing is waiting at the gate.</p>`;
+}
+
+function renderRuns(runs) {
+  $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
+    <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b> · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || ""), "ok") : pill("proposed", "info")} ${run.status !== "confirmed" ? `<button class="secondary" data-confirm="${esc(run.run_id)}">Confirm run</button>` : ""}</p>
+    <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
+    ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
+  document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
+}
+async function loadRuns() {
+  const res = await fetch("/payment-runs", {headers: headers()});
+  if (!res.ok) return;
+  renderRuns(await res.json());
+}
+async function confirmRun(runId) {
+  const actor = $("lead").value.trim();
+  if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — confirmations are attributable."; return; }
+  const res = await fetch(`/payment-runs/${runId}/confirm`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("paynote").textContent = `Confirm refused (${res.status}): ${body.detail || ""}`; return; }
+  $("paynote").textContent = `Run ${runId} confirmed by ${body.confirmed_by}. No payment was made — the run is the pay list for the AP system of record.`;
+  loadRuns();
+}
+$("propose").onclick = async () => {
+  const res = await fetch("/payment-runs/propose", {method: "POST", headers: headers(), body: JSON.stringify({window_days: 7})});
+  const runs = await res.json();
+  if (!res.ok) { $("paynote").textContent = `Proposal failed (${res.status}).`; return; }
+  $("paynote").textContent = runs.length ? `Proposed ${runs.length} run(s) from the approved invoices.` : "No approved invoices are waiting to be grouped into a run.";
+  loadRuns();
+};
+$("loadqueue").onclick = loadQueue;
+
+loadSamples(); loadEvals(); loadRuns();
 </script>
 </body>
 </html>
