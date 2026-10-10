@@ -85,9 +85,17 @@
     </div>
     <div id="payrunsbody"></div>
   </section>
+  <section id="sec-openitems">
+    <h2>Approved, not yet posted (ERP loop open items)</h2>
+    <div class="gate">
+      <button id="loadopen" class="secondary">Load open items</button>
+      <span class="note" id="openote">Approved invoices with no posted receipt past the grace window — the postings the ERP still owes an answer for. A failed receipt keeps its item open, with the ERP's reason.</span>
+    </div>
+    <div id="openbody"></div>
+  </section>
   <section id="sec-master">
     <h2>Supplier master changes (governed — proposer ≠ approver)</h2>
-    <p class="note">A bank-detail change is proposed here, decided by a second operator with the out-of-band verification reference recorded, and applied only from its effective date. Until then the fraud screen keeps matching documents against the current record — the new details still read as a mismatch.</p>
+    <p class="note">A bank-detail change is proposed here, decided by a second operator with the out-of-band verification reference recorded, and applied only from its effective date. Until then the fraud screen keeps matching documents against the current record — the new details still read as a mismatch. A request nobody decides within the expiry window (30 days by default) expires and must be re-proposed.</p>
     <div class="gate">
       <input type="text" id="mc-supplier" placeholder="Supplier name" size="24">
       <input type="text" id="mc-account" placeholder="New account number" size="18">
@@ -102,6 +110,7 @@
       <input type="text" id="mc-invoice" placeholder="Invoice id (e.g. INV-1010)" size="20">
       <button id="mc-from-invoice" class="secondary">Propose from invoice</button>
       <button id="mc-load" class="secondary">Load changes</button>
+      <button id="mc-expire" class="secondary">Expire stale</button>
       <span class="note" id="mcnote">Proposing from an invoice turns the bank details its documents state into a pending request — nothing is applied by proposing.</span>
     </div>
     <div id="mcbody"></div>
@@ -339,6 +348,7 @@ function runControls(run) {
 function renderRuns(runs) {
   $("payrunsbody").innerHTML = (runs || []).length ? runs.map(run => `
     <p class="kv" style="margin-top:12px"><b>${esc(run.run_id)}</b> · ${esc(run.currency)} · window ${esc(run.window_start)} → ${esc(run.window_end)} · ${run.invoice_count} invoice(s) · gross ${run.total_gross} · discounts ${run.total_discount} · <b>net ${run.total_net}</b> · ${run.status === "confirmed" ? pill("confirmed by " + (run.confirmed_by || "") + (run.second_confirmed_by ? " + " + run.second_confirmed_by : ""), "ok") : pill("proposed", "info")} ${runControls(run)}</p>
+    ${(run.handoff_drift || []).map(d => `<p class="note" style="margin:2px 0">${pill("discount drift", "warn")} ${esc(d.invoice_id)} — ${esc(run.currency)} ${d.discount_lost} of discount lost: ${esc(d.reason)}</p>`).join("")}
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
@@ -361,7 +371,8 @@ async function exportHandoff(runId) {
   const res = await fetch(`/payment-runs/${runId}/handoff`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
   const body = await res.json();
   if (!res.ok) { $("paynote").textContent = `Hand-off refused (${res.status}): ${body.detail || ""}`; return; }
-  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.`;
+  const drift = (body.handoff_drift || []).length ? ` Discount drift flagged on the run: ${body.handoff_drift.map(d => d.invoice_id + " lost " + d.discount_lost).join(", ")} — drifted members are exported at full gross.` : "";
+  $("paynote").textContent = `Hand-off for ${runId} stored at ${body.handoff_key} (sha256 ${String(body.handoff_sha256 || "").slice(0, 12)}…). Download it and hand it to your banking/ERP system — generating it changed no payment state.${drift}`;
   loadRuns();
 }
 async function downloadHandoff(runId) {
@@ -404,7 +415,7 @@ async function loadChanges() {
 }
 function renderChanges(changes) {
   $("mcbody").innerHTML = (changes || []).length ? changes.map(c => `
-    <p class="kv" style="margin-top:12px"><b>${esc(c.request_id)}</b> · ${esc(c.supplier_name)} · ${c.status === "pending" ? pill("pending", "warn") : c.status === "approved" ? pill("approved" + (c.applied_at ? " · applied " + esc(c.applied_at.slice(0, 10)) : " · effective " + esc(c.effective_from || "")), "ok") : pill("rejected", "bad")} · source ${esc(c.source)}${c.source_invoice_id ? " (" + esc(c.source_invoice_id) + ")" : ""} · proposed by ${esc(c.proposed_by || "")}${c.decided_by ? ` · decided by ${esc(c.decided_by)}` : ""}<br>
+    <p class="kv" style="margin-top:12px"><b>${esc(c.request_id)}</b> · ${esc(c.supplier_name)} · ${c.status === "pending" ? pill("pending", "warn") : c.status === "approved" ? pill("approved" + (c.applied_at ? " · applied " + esc(c.applied_at.slice(0, 10)) : " · effective " + esc(c.effective_from || "")), "ok") : c.status === "expired" ? pill("expired — re-propose", "bad") : pill("rejected", "bad")} · source ${esc(c.source)}${c.source_invoice_id ? " (" + esc(c.source_invoice_id) + ")" : ""} · proposed by ${esc(c.proposed_by || "")}${c.decided_by ? ` · decided by ${esc(c.decided_by)}` : ""}<br>
     <span class="note">current: ${esc(recSummary(c.current))} → proposed: ${esc(recSummary(c.proposed))}${c.verification_ref ? ` · verified: ${esc(c.verification_ref)}` : ""}${c.reason ? `<br>${esc(c.reason)}` : ""}</span></p>
     ${(c.history || []).map(h => `<p class="note" style="margin:2px 0">· <b>${esc(h.status)}</b> — ${esc(h.actor)} · ${esc(h.at)}${h.note ? " · " + esc(h.note) : ""}</p>`).join("")}
     ${c.status === "pending" ? `<div class="gate"><input type="text" id="mcv-${esc(c.request_id)}" placeholder="Out-of-band verification reference (to approve)" size="44"><button class="secondary" data-mc-approve="${esc(c.request_id)}">Approve change</button><button class="secondary" data-mc-reject="${esc(c.request_id)}">Reject</button></div>` : ""}`).join("") : `<p class="kv">No master changes proposed yet.</p>`;
@@ -445,6 +456,22 @@ $("mc-from-invoice").onclick = async () => {
   loadChanges();
 };
 $("mc-load").onclick = loadChanges;
+$("mc-expire").onclick = async () => {
+  const res = await fetch("/suppliers/master-changes/expire-stale", {method: "POST", headers: headers()});
+  const body = await res.json();
+  if (!res.ok) { $("mcnote").textContent = `Expiry sweep failed (${res.status}): ${body.detail || ""}`; return; }
+  $("mcnote").textContent = body.expired.length ? `Expired ${body.expired.join(", ")} — undecided past the window; re-propose to restart those changes.` : "No pending change is past its decision window.";
+  loadChanges();
+};
+async function loadOpenItems() {
+  const res = await fetch("/reconciliation/approved-not-posted", {headers: headers()});
+  const r = await res.json();
+  if (!res.ok) { $("openote").textContent = `Open items failed to load (${res.status}): ${r.detail || ""}`; return; }
+  const totals = Object.entries(r.totals_by_currency || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
+  $("openote").textContent = `${r.count} open item(s) past the ${r.grace_days}-day grace window · as of ${r.as_of}${totals ? " · " + totals : ""}`;
+  $("openbody").innerHTML = (r.items || []).length ? `<table><tr><th>Invoice</th><th>Supplier</th><th>Amount</th><th>Approved by</th><th>Age</th><th>Receipt</th></tr>${r.items.map(i => `<tr><td>${esc(i.invoice_id)}<br><span class="note">${esc(i.invoice_number || "")}</span></td><td>${esc(i.supplier_name)}</td><td>${esc(i.currency)} ${i.total_amount ?? "—"}</td><td>${esc(i.decided_by || "—")}</td><td>${pill((i.age_days ?? "—") + "d since " + i.age_basis, "warn")}</td><td>${i.receipt_state === "failed" ? pill("posting failed", "bad") + `<br><span class="note">${esc(i.receipt_detail)}</span>` : pill("no receipt", "warn")}</td></tr>`).join("")}</table>` : `<p class="kv">No open items — every approval past the grace window has its posted receipt.</p>`;
+}
+$("loadopen").onclick = loadOpenItems;
 
 $("propose").onclick = async () => {
   const res = await fetch("/payment-runs/propose", {method: "POST", headers: headers(), body: JSON.stringify({window_days: 7})});
