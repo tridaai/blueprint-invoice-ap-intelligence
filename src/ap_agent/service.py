@@ -40,6 +40,7 @@ from .checkpoints import get_checkpointer
 from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
 from .matching import _parse_date
+from .paymentruns import discount_drift
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
 from .queue import build_queue, recovery_case_aging
@@ -1313,7 +1314,9 @@ class InvoiceService:
         store.save_payment_run(run)
         return run
 
-    def export_payment_run_handoff(self, run_id: str, actor: str) -> PaymentRun:
+    def export_payment_run_handoff(
+        self, run_id: str, actor: str, as_of: str = ""
+    ) -> PaymentRun:
         """Render a confirmed run's hand-off file and store it
         through the object-store port.
 
@@ -1323,6 +1326,16 @@ class InvoiceService:
         stay approved; the run record gains only the export receipt
         (object key + sha256 of the stored bytes). Re-exporting
         renders the same bytes and refreshes the receipt.
+
+        Before rendering, every member's discount is re-verified
+        as of the export date (``as_of``, default today): a window
+        that closed since confirmation means the confirmed net
+        figure is stale, so the member is exported at its
+        export-time figure — full gross once the window has closed,
+        because the full total is what is owed — and the drift is
+        itemised on the run record (``handoff_drift``). The export
+        proceeds for the clean members; drift is flagged, never
+        silently exported and never a reason to short-pay.
         """
         store = self._get_store()
         run = store.get_payment_run(run_id)
@@ -1355,6 +1368,38 @@ class InvoiceService:
             )
         from .handoff import handoff_key, render_handoff_csv
 
+        anchor = _parse_date(as_of) if as_of else None
+        if as_of and anchor is None:
+            raise ValueError(f"as_of {as_of!r} is not an ISO date")
+        anchor = anchor or datetime.now(timezone.utc).date()
+        records = {
+            record.result.invoice_id: record for record in store.list_records()
+        }
+        adjusted, drift = discount_drift(run, records, as_of=anchor)
+        if drift:
+            # The exported figures become the run's figures: the
+            # file the bank receives is the run of record. The
+            # confirmation itself (who, when, four-eyes) is
+            # untouched, and the drift entries preserve what the
+            # run was confirmed with.
+            run.lines = adjusted.lines
+            run.total_discount = adjusted.total_discount
+            run.total_net = adjusted.total_net
+            run.handoff_drift = drift
+            run.handoff_drift_total = round(
+                sum(entry.discount_lost for entry in drift), 2
+            )
+            lost = ", ".join(
+                f"{entry.invoice_id} lost {run.currency} "
+                f"{entry.discount_lost:.2f} (window closed "
+                f"{entry.discount_deadline})"
+                for entry in drift
+            )
+            run.note += (
+                f" Discount drift at export ({anchor.isoformat()}): "
+                f"{lost} — the drifted member(s) are exported at "
+                "their full gross amounts; see handoff_drift."
+            )
         data = render_handoff_csv(run)
         key = handoff_key(run.run_id)
         object_store.put(key, data, content_type="text/csv")

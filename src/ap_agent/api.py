@@ -410,14 +410,18 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/payment-runs/{run_id}/handoff", response_model=PaymentRun, dependencies=_AUTH)
-    def export_payment_run_handoff(run_id: str, request: DecisionRequest) -> PaymentRun:
+    def export_payment_run_handoff(run_id: str, request: DecisionRequest, as_of: str = Query(default="")) -> PaymentRun:
         """Generate the confirmed run's bank-ready hand-off file
         (CSV, layout in handoff.py) into object storage. The run
         gains the export receipt (object key + content hash);
-        generating the file changes no payment state."""
+        generating the file changes no payment state. Member
+        discounts are re-verified as of the export date (``as_of``,
+        default today): a member whose discount window closed since
+        confirmation is exported at full gross, with the drift
+        itemised on the run (``handoff_drift``)."""
         try:
             return svc.export_payment_run_handoff(
-                run_id, actor=_decision_actor(request)
+                run_id, actor=_decision_actor(request), as_of=as_of
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

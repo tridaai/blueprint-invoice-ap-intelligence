@@ -21,14 +21,20 @@ confirms. The agent's part stops exactly where its authority stops:
   configured threshold stamps the run ``four_eyes_required``, and
   the hand-off export (service layer) refuses it until a second,
   different confirmer has also confirmed the run.
+- Discounts are re-verified at export: a window can close between
+  confirmation and hand-off, so :func:`discount_drift` re-prices
+  every discounted member as of the export date and itemises any
+  drift on the run record — the exported file never promises a
+  discount the bank run can no longer take.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 
+from .discounts import evaluate_discount
 from .matching import _parse_date
-from .schemas import PaymentRun, PaymentRunLine
+from .schemas import InvoiceInput, PaymentRun, PaymentRunDrift, PaymentRunLine
 from .store import ApprovalRecord
 
 DEFAULT_WINDOW_DAYS = 7
@@ -154,3 +160,85 @@ def propose_payment_runs(
 
 def run_member_ids(run: PaymentRun) -> set[str]:
     return {line.invoice_id for line in run.lines}
+
+
+def discount_drift(
+    run: PaymentRun,
+    records: dict[str, ApprovalRecord],
+    *,
+    as_of: date,
+) -> tuple[PaymentRun, list[PaymentRunDrift]]:
+    """Re-verify a confirmed run's discounts at export time.
+
+    A run is confirmed against the discounts capturable on proposal
+    day; the hand-off can be generated days later, after a member's
+    discount window has closed — and a file that still nets off a
+    lapsed discount short-pays the supplier (the full total is what
+    is owed once the window closes) while telling the bank a figure
+    nobody can take. So export re-prices every member that carries
+    a discount, from its stored invoice, as of the export date:
+
+    - Still capturable at the confirmed figure → the line stands.
+    - No longer capturable (or capturable at a different figure) →
+      the line is adjusted to the export-time figure — full gross
+      when the window has closed — and the drift is itemised in
+      the returned entries: which invoice, which deadline, how
+      much discount was lost, and why.
+
+    The export proceeds with the adjusted figures; the drift is
+    never silent and never blocks the clean members. Pure: the
+    input run is not mutated — the service layer applies the
+    adjusted copy to the stored run alongside the export receipt.
+    """
+    adjusted = run.model_copy(deep=True)
+    drift: list[PaymentRunDrift] = []
+    for line in adjusted.lines:
+        if line.discount_amount <= 0:
+            continue
+        record = records.get(line.invoice_id)
+        capturable = 0.0
+        if record is None:
+            reason = (
+                "the invoice record is no longer in the store, so "
+                "its discount cannot be re-verified"
+            )
+        else:
+            invoice = InvoiceInput.model_validate(record.invoice or {})
+            evaluation = evaluate_discount(invoice, as_of=as_of)
+            if evaluation is not None and evaluation.worthwhile:
+                capturable = round(float(evaluation.gross_discount), 2)
+            if capturable > 0:
+                reason = (
+                    "the discount re-priced at export differs from "
+                    "the figure the run was confirmed with"
+                )
+            else:
+                reason = (
+                    f"the discount window closed on "
+                    f"{line.discount_deadline} — the discount is no "
+                    "longer capturable, so the member is exported at "
+                    "its full gross amount"
+                )
+        if abs(capturable - line.discount_amount) <= 0.005:
+            continue  # still capturable at the confirmed figure
+        drift.append(
+            PaymentRunDrift(
+                invoice_id=line.invoice_id,
+                supplier_name=line.supplier_name,
+                discount_deadline=line.discount_deadline,
+                discount_at_proposal=line.discount_amount,
+                discount_at_export=capturable,
+                discount_lost=round(line.discount_amount - capturable, 2),
+                reason=reason,
+            )
+        )
+        line.discount_amount = capturable
+        line.net_amount = round(line.gross_amount - capturable, 2)
+    if drift:
+        adjusted.total_discount = round(
+            sum(line.discount_amount for line in adjusted.lines), 2
+        )
+        adjusted.total_net = round(
+            sum(line.net_amount for line in adjusted.lines), 2
+        )
+    return adjusted, drift

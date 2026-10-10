@@ -766,6 +766,24 @@ class PaymentRunLine(BaseModel):
     net_amount: float = 0.0  # gross - discount
 
 
+class PaymentRunDrift(BaseModel):
+    """One run member whose discount figure drifted between the
+    run's confirmation and its hand-off export: the discount the
+    run was confirmed with is no longer the discount the bank run
+    can take (its window closed in between). The export re-prices
+    every member (see ``paymentruns.discount_drift``) and itemises
+    each drift here — the exported file pays the drifted member at
+    its export-time figure, never silently at the stale one."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    discount_deadline: str = ""  # the deadline the run was confirmed against
+    discount_at_proposal: float = 0.0
+    discount_at_export: float = 0.0  # what is still capturable at export
+    discount_lost: float = 0.0  # proposal − export, the drift amount
+    reason: str = ""
+
+
 class PaymentRun(BaseModel):
     """A proposed payment run: approved invoices grouped by currency
     and due window, totals computed in code. The run is a draft
@@ -805,6 +823,14 @@ class PaymentRun(BaseModel):
     handoff_sha256: Optional[str] = None
     handoff_generated_at: Optional[str] = None
     handoff_generated_by: Optional[str] = None
+    # Discount drift found at export time: members whose confirmed
+    # discount was no longer capturable when the hand-off was
+    # generated. The exported lines above already carry the
+    # export-time figures (a drifted member is paid at full gross —
+    # the amount actually owed once its window has closed); this is
+    # the itemised receipt of what drifted and how much was lost.
+    handoff_drift: list[PaymentRunDrift] = Field(default_factory=list)
+    handoff_drift_total: float = 0.0  # sum of the members' discount_lost
 
 
 class PaymentRunRequest(BaseModel):

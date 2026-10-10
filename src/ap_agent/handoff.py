@@ -29,6 +29,13 @@ separators; dates ISO):
 The renderer is pure — same run in, same bytes out — so the sha256
 recorded on the run is a stable content hash of the file the bank
 receives.
+
+The run it renders is the export-time run: before rendering, the
+service re-verifies each member's discount (``paymentruns.
+discount_drift``) and adjusts any member whose window closed since
+confirmation to its full gross amount, itemising the drift on the
+run record. The file therefore never nets off a discount the bank
+run can no longer take.
 """
 
 from __future__ import annotations
