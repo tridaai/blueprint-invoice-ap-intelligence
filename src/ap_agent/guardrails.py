@@ -79,6 +79,68 @@ _PROMISE_PATTERNS = [
     r"\bby (tomorrow|end of day|eod|end of week|monday|tuesday|wednesday|thursday|friday)\b[^.]{0,30}\b(will|you|payment|decision|credit)\b",
 ]
 
+# Currency amounts as a letter states them: with a symbol ($1,180.00),
+# with a currency code (USD 1180 / 1180 USD), or labelled in prose
+# ("subtotal of 999.00"). The supplier letter is prose a model writes;
+# figures in it must trace to the computed fact block (see the
+# figures_must_trace check below) — the judge pack caught letters
+# restating computed arithmetic in prose and drifting (a subtotal
+# stated as 1000.00 against a computed 1070.00).
+_AMOUNT_SYMBOL = re.compile(r"[$€£]\s?(\d[\d,]*(?:\.\d{1,2})?)")
+_AMOUNT_CODE_AFTER = re.compile(
+    r"\b(?:USD|EUR|GBP|INR|CAD|AUD|CHF|JPY)\s?(\d[\d,]*(?:\.\d{1,2})?)", re.I
+)
+_AMOUNT_CODE_BEFORE = re.compile(
+    r"(\d[\d,]*(?:\.\d{1,2})?)\s?(?:USD|EUR|GBP|INR|CAD|AUD|CHF|JPY)\b", re.I
+)
+_AMOUNT_LABELLED = re.compile(
+    r"\b(?:subtotal|total|amount|tax|balance|gross|net|sum)\b"
+    r"[^.\d]{0,24}?(\d[\d,]*\.\d{1,2})\b",
+    re.I,
+)
+
+
+def _letter_amounts(letter: str) -> list[float]:
+    """Every currency amount the supplier letter states, as floats."""
+    found: list[float] = []
+    for pattern in (
+        _AMOUNT_SYMBOL,
+        _AMOUNT_CODE_AFTER,
+        _AMOUNT_CODE_BEFORE,
+        _AMOUNT_LABELLED,
+    ):
+        for match in pattern.finditer(letter):
+            try:
+                value = float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if value > 0:
+                found.append(round(value, 2))
+    return found
+
+
+def _invoice_amounts(invoice: InvoiceInput) -> list[float]:
+    """The fallback figure registry, derived from the invoice itself:
+    its stated totals, tax, line products and unit prices. Callers
+    with the computed match facts pass the fuller registry (graph.py's
+    facts view) — this fallback keeps direct callers honest."""
+    amounts: list[float] = []
+    for value in (invoice.total_amount, invoice.tax_amount):
+        if value is not None:
+            amounts.append(float(value))
+    for line in invoice.line_items:
+        amounts.append(round(line.quantity * line.unit_price, 2))
+        amounts.append(float(line.unit_price))
+    po = invoice.purchase_order
+    if po is not None:
+        if po.total is not None:
+            amounts.append(float(po.total))
+        for line in po.lines:
+            amounts.append(round(line.quantity * line.unit_price, 2))
+            amounts.append(float(line.unit_price))
+    return amounts
+
+
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _PASSPORT = re.compile(r"\b[A-Z]\d{8}\b")
 
@@ -107,9 +169,13 @@ def validate_drafts(
     invoice: InvoiceInput,
     drafts: Drafts,
     citations: list[str],
+    allowed_amounts: list[float] | None = None,
 ) -> Validation:
     """Run all guardrail checks over the drafts. ``passed`` is the
-    conjunction — every check here is blocking."""
+    conjunction — every check here is blocking. ``allowed_amounts``
+    is the verified figure registry the letter's amounts must trace
+    to (the computed match facts); when omitted it is derived from
+    the invoice itself."""
     letter = drafts.supplier_letter or ""
     packet = drafts.ap_packet or ""
     combined = f"{drafts.subject}\n{letter}\n{packet}"
@@ -218,6 +284,44 @@ def validate_drafts(
                     f"drafts cite policies that were not retrieved: "
                     f"{unretrieved} — citations come from the retrieved "
                     "set, never from memory"
+                )
+            ),
+        )
+    )
+
+    # Figures in the supplier letter must trace to the verified fact
+    # block. Figures live in structured fields and the packet's
+    # tables; a letter that restates arithmetic in prose drifts (the
+    # judge pack: a subtotal of 1000.00 against a computed 1070.00).
+    # The packet is exempt — it prints the computed figures directly.
+    registry = {
+        round(float(v), 2)
+        for v in (
+            allowed_amounts
+            if allowed_amounts is not None
+            else _invoice_amounts(invoice)
+        )
+    }
+    registry.add(0.0)
+    stated = _letter_amounts(letter)
+    untraceable = sorted(
+        {a for a in stated if all(abs(a - r) > 0.011 for r in registry)}
+    )
+    checks.append(
+        GuardrailCheck(
+            name="figures_must_trace",
+            passed=not untraceable,
+            detail=(
+                f"every figure in the supplier letter traces to the "
+                f"computed fact block ({len(stated)} figure(s) checked)"
+                if not untraceable
+                else (
+                    "supplier letter states figure(s) that do not trace "
+                    "to the computed facts: "
+                    + ", ".join(f"{a:.2f}" for a in untraceable[:3])
+                    + " — figures live in the packet's tables; the letter "
+                    "refers to them, it does not restate amounts that were "
+                    "never computed"
                 )
             ),
         )

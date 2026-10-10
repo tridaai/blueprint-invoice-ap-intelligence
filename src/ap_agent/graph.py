@@ -273,6 +273,8 @@ def _facts_view(state: AgentState, sub: InvoiceInput) -> dict[str, Any]:
     for m in facts.line_matches:
         allowed.append(round(m.invoice_qty * m.invoice_price, 2))
         allowed.append(round(m.po_qty * m.po_price, 2))
+        allowed.append(float(m.invoice_price))
+        allowed.append(float(m.po_price))
     discount = state.get("discount")
     if discount:
         # The discount computation is code too: its figures are
@@ -655,7 +657,8 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
         sub = InvoiceInput.model_validate(state["invoice"])
         citations = [g["policy_id"] for g in state.get("policies", [])]
         drafts = Drafts.model_validate(state["drafts"])
-        validation = validate_drafts(sub, drafts, citations)
+        allowed = _facts_view(state, sub)["allowed_amounts"]
+        validation = validate_drafts(sub, drafts, citations, allowed_amounts=allowed)
         update: dict[str, Any] = {
             "validation": validation.model_dump(),
             "repair_attempted": False,
@@ -678,7 +681,9 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
             except Exception:
                 break  # a failed redraft keeps the original drafts + failures
             candidate = Drafts(subject=subject, supplier_letter=letter, ap_packet=packet)
-            candidate_validation = validate_drafts(sub, candidate, citations)
+            candidate_validation = validate_drafts(
+                sub, candidate, citations, allowed_amounts=allowed
+            )
             if candidate_validation.passed or _failed_count(candidate_validation) < _failed_count(validation):
                 drafts, validation = candidate, candidate_validation
         update.update(

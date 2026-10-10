@@ -27,9 +27,12 @@ GOOD_PACKET = (
 )
 
 
-def _validate(letter: str = GOOD_LETTER, packet: str = GOOD_PACKET, citations=CITATIONS, subject: str = "Invoice INV-1001 received"):
+def _validate(letter: str = GOOD_LETTER, packet: str = GOOD_PACKET, citations=CITATIONS, subject: str = "Invoice INV-1001 received", allowed=None):
     return validate_drafts(
-        INV, Drafts(subject=subject, supplier_letter=letter, ap_packet=packet), citations
+        INV,
+        Drafts(subject=subject, supplier_letter=letter, ap_packet=packet),
+        citations,
+        allowed_amounts=allowed,
     )
 
 
@@ -129,3 +132,52 @@ def test_missing_next_step_fails():
     letter = "Dear Northbeam team,\n\nInvoice INV-1001 received and matched."
     validation = _validate(letter=letter)
     assert not _check(validation, "states_next_step").passed
+
+
+# --- figures_must_trace: the judge-pack drift family, policed as code ---
+
+def test_invented_total_in_letter_fails_figures_trace():
+    # A letter restating arithmetic in prose and drifting — the exact
+    # failure the judge pack kept finding (subtotal 1000 vs computed 1070).
+    letter = GOOD_LETTER + "\nThe subtotal is $9,999.00 and the total due is $10,500.00."
+    validation = _validate(letter=letter, allowed=[1000.0, 180.0, 1180.0])
+    check = _check(validation, "figures_must_trace")
+    assert not check.passed
+    assert "9999.00" in check.detail
+    assert not validation.passed
+
+
+def test_labelled_amount_drift_fails_figures_trace():
+    letter = GOOD_LETTER + "\nOur records show a subtotal of 999.00 for this invoice."
+    validation = _validate(letter=letter)
+    assert not _check(validation, "figures_must_trace").passed
+
+
+def test_traced_figures_in_letter_pass():
+    # The invoice's own computed figures, stated exactly, trace.
+    letter = GOOD_LETTER + "\nThe invoice total of $1,180.00 (tax $180.00) is set out in the packet."
+    validation = _validate(letter=letter)
+    assert _check(validation, "figures_must_trace").passed
+
+
+def test_packet_figures_are_not_the_letters_problem():
+    # The packet prints the computed tables directly; the trace check
+    # governs the letter's prose only.
+    packet = GOOD_PACKET + "\nLines total 1000.00 · tax 180.00 · total 1180.00"
+    validation = _validate(packet=packet)
+    assert _check(validation, "figures_must_trace").passed
+
+
+def test_sample_letters_pass_figures_trace():
+    # Every bundled sample, run through the offline pipeline: the
+    # template letters must satisfy the new check (their figures come
+    # from the computed facts by construction).
+    from ap_agent.service import InvoiceService
+    from ap_agent.store import InMemoryStore
+
+    svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
+    for sample in sample_invoice_models():
+        result = svc.analyze(sample)
+        assert result.validation is not None
+        check = _check(result.validation, "figures_must_trace")
+        assert check.passed, (sample.invoice_id, check.detail)

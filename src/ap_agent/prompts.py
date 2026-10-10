@@ -41,6 +41,14 @@ guardrails downstream:
   facts provided: never recompute one, never restate one from memory,
   and never present an unknown or unconfirmed value as a fact — if a
   value is not in the facts, write that it is not recorded.
+- The letter does not restate totals in its body: the figures live in
+  the packet's tables, and the letter refers to them ("the packet sets
+  out the line-by-line figures"). A figure stated in the letter that
+  is not in the computed facts is rejected by the figures_must_trace
+  guardrail — letters that re-derive arithmetic in prose drift.
+- Quantities: the goods receipt records the RECEIVED quantity. Never
+  write "delivered" for a received quantity, and never describe goods
+  as delivered unless the facts record a delivery.
 - Cite the governing AP policies inline like [AP-MATCH-02] using only
   the policy IDs provided. A citation outside the provided set is
   rejected by the guardrails, in the letter as much as the packet.

@@ -58,6 +58,8 @@ def _allowed_amounts(*records: ApprovalRecord) -> list[float]:
         for m in facts.line_matches:
             allowed.append(round(m.invoice_qty * m.invoice_price, 2))
             allowed.append(round(m.po_qty * m.po_price, 2))
+            allowed.append(float(m.invoice_price))
+            allowed.append(float(m.po_price))
     return allowed
 
 
@@ -207,7 +209,9 @@ def build_recovery_pack(
         retrieved_ids=citations,
         backend=backend,
     )
-    validation = validate_drafts(invoice, drafts, citations)
+    validation = validate_drafts(
+        invoice, drafts, citations, allowed_amounts=facts_view["allowed_amounts"]
+    )
     return RecoveryPack(
         pack_id=f"REC-{dup_result.invoice_id}",
         duplicate_invoice_id=dup_result.invoice_id,
