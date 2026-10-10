@@ -38,6 +38,9 @@ from dataclasses import dataclass, field
 from .checkpoints import get_checkpointer
 from .config import env_float, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
+from .matching import _parse_date
+from .paymentruns import propose_payment_runs as _propose_runs
+from .paymentruns import run_member_ids
 from .reconciliation import reconcile_statement as _reconcile
 from .graph import resume_approval, run_invoice
 from .model_backends import ModelBackend, get_backend
@@ -49,6 +52,7 @@ from .schemas import (
     CreditNoteInput,
     CreditNoteMatch,
     InvoiceInput,
+    PaymentRun,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -604,6 +608,72 @@ class InvoiceService:
         self, statement_id: str
     ) -> StatementReconciliation | None:
         return self._get_store().get_reconciliation(statement_id)
+
+    def propose_payment_runs(
+        self, window_days: int = 7, as_of: str = ""
+    ) -> list[PaymentRun]:
+        """Propose payment runs from the approved invoices.
+
+        Grouping and totals are computed in ``paymentruns.py`` over
+        the store's records. Invoices already inside a confirmed run
+        are excluded — a confirmed pay list is not re-proposed. Each
+        fresh proposal is stored as a draft object; re-proposing
+        refreshes an unconfirmed run with the same window, and never
+        overwrites a confirmed one.
+        """
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        confirmed_members: set[str] = set()
+        confirmed_ids: set[str] = set()
+        for existing in store.list_payment_runs():
+            if existing.status == "confirmed":
+                confirmed_ids.add(existing.run_id)
+                confirmed_members |= run_member_ids(existing)
+        runs = _propose_runs(
+            store.list_records(),
+            window_days=window_days,
+            as_of=anchor,
+            exclude_invoice_ids=confirmed_members,
+        )
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        saved: list[PaymentRun] = []
+        for run in runs:
+            if run.run_id in confirmed_ids:
+                continue  # a confirmed run is the record; never refreshed
+            run.proposed_at = stamp
+            store.save_payment_run(run)
+            saved.append(run)
+        return saved
+
+    def list_payment_runs(self) -> list[PaymentRun]:
+        return self._get_store().list_payment_runs()
+
+    def get_payment_run(self, run_id: str) -> PaymentRun | None:
+        return self._get_store().get_payment_run(run_id)
+
+    def confirm_payment_run(self, run_id: str, actor: str) -> PaymentRun:
+        """Record a finance lead's confirmation of a proposed run.
+
+        Confirmation touches the run record only: no invoice changes
+        state and no payment is executed — the confirmed run is the
+        pay list the customer's AP system of record acts on.
+        """
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        if run.status == "confirmed":
+            raise ValueError(
+                f"Payment run {run_id} was already confirmed by "
+                f"{run.confirmed_by}"
+            )
+        run.status = "confirmed"
+        run.confirmed_by = actor
+        run.confirmed_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        store.save_payment_run(run)
+        return run
 
     def confirm_reconciliation(
         self, statement_id: str, actor: str

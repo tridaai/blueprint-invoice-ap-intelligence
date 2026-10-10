@@ -42,6 +42,8 @@ from .schemas import (
     CreditNoteMatch,
     DecisionRequest,
     InvoiceInput,
+    PaymentRun,
+    PaymentRunRequest,
     StatementReconciliation,
     SupplierStatement,
 )
@@ -325,6 +327,38 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
             return svc.confirm_reconciliation(
                 statement_id, actor=_decision_actor(request)
             )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/payment-runs/propose", response_model=list[PaymentRun], dependencies=_AUTH)
+    def propose_payment_runs(request: PaymentRunRequest) -> list[PaymentRun]:
+        """Propose payment runs from the approved invoices: grouped
+        by currency + due window, totals computed in code. A proposal
+        pays nothing — a finance lead confirms the run, and the AP
+        system of record executes it."""
+        return svc.propose_payment_runs(
+            window_days=request.window_days, as_of=request.as_of
+        )
+
+    @app.get("/payment-runs", response_model=list[PaymentRun], dependencies=_AUTH)
+    def list_payment_runs() -> list[PaymentRun]:
+        return svc.list_payment_runs()
+
+    @app.get("/payment-runs/{run_id}", response_model=PaymentRun, dependencies=_AUTH)
+    def get_payment_run(run_id: str) -> PaymentRun:
+        run = svc.get_payment_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Payment run not proposed yet.")
+        return run
+
+    @app.post("/payment-runs/{run_id}/confirm", response_model=PaymentRun, dependencies=_AUTH)
+    def confirm_payment_run(run_id: str, request: DecisionRequest) -> PaymentRun:
+        """Record the finance lead's confirmation of a run (the run
+        record only — never an invoice, never a payment)."""
+        try:
+            return svc.confirm_payment_run(run_id, actor=_decision_actor(request))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

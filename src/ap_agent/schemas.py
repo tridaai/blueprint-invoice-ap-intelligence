@@ -576,6 +576,167 @@ class StatementReconciliation(BaseModel):
     confirmed_at: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Payment runs (proposed from approved invoices — never executed)
+# ---------------------------------------------------------------------------
+
+class PaymentRunLine(BaseModel):
+    """One approved invoice inside a proposed payment run. Amounts
+    are the invoice's stored figures; the discount columns come from
+    the run's stored discount evaluation — all computed, none
+    narrated."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    due_date: str = ""
+    gross_amount: float = 0.0
+    discount_amount: float = 0.0  # capturable early-payment discount, else 0
+    discount_deadline: str = ""
+    net_amount: float = 0.0  # gross - discount
+
+
+class PaymentRun(BaseModel):
+    """A proposed payment run: approved invoices grouped by currency
+    and due window, totals computed in code. The run is a draft
+    object — a finance lead confirms the proposal, and confirmation
+    still pays nothing: it records that a human accepted the run as
+    the pay list for the customer's AP system of record."""
+
+    run_id: str
+    currency: str = "USD"
+    window_start: str = ""  # ISO date; the earliest due date in the run
+    window_end: str = ""  # ISO date; the last day of the due window
+    window_days: int = 7
+    status: str = "proposed"  # proposed | confirmed
+    lines: list[PaymentRunLine] = Field(default_factory=list)
+    invoice_count: int = 0
+    total_gross: float = 0.0
+    total_discount: float = 0.0
+    total_net: float = 0.0
+    proposed_at: str = ""
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    note: str = ""
+
+
+class PaymentRunRequest(BaseModel):
+    window_days: int = 7
+    as_of: str = ""  # ISO date the windows are anchored on; "" = today
+
+
+# ---------------------------------------------------------------------------
+# AP aging queue (a read model over the awaiting invoices)
+# ---------------------------------------------------------------------------
+
+class QueueItem(BaseModel):
+    """One invoice waiting at the approver gate, aged by due date."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    status: str = "awaiting_approver"
+    outcome: str = ""
+    severity: str = ""
+    total_amount: Optional[float] = None
+    currency: str = "USD"
+    due_date: str = ""
+    days_overdue: Optional[int] = None  # None when no due date is known
+    bucket: str = "no_due_date"  # overdue_30_plus|overdue_8_30|overdue_1_7|due_today|due_within_7|due_later|no_due_date
+    age_days: Optional[int] = None  # since submission, when known
+    discount_deadline: str = ""
+    discount_days_left: Optional[int] = None
+
+
+class QueueView(BaseModel):
+    """The aging queue: awaiting invoices, overdue first, with the
+    triage mix — a pure read model over the store's records."""
+
+    as_of: str = ""
+    count: int = 0
+    overdue_count: int = 0
+    triage_mix: dict[str, int] = Field(default_factory=dict)
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    buckets: dict[str, int] = Field(default_factory=dict)
+    items: list[QueueItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-payment recovery packs
+# ---------------------------------------------------------------------------
+
+class RecoveryPack(BaseModel):
+    """The recovery case for a duplicate whose original was already
+    approved: the duplicate evidence (computed), a supplier recovery
+    letter and an internal memo — drafted, verified, and guardrail-
+    checked through the standard path, then stored for a human to
+    send and act on. The agent recovers nothing itself."""
+
+    pack_id: str
+    duplicate_invoice_id: str
+    original_invoice_id: str = ""  # the approved twin
+    supplier_name: str = ""
+    invoice_number: str = ""
+    currency: str = "USD"
+    amount: float = 0.0  # the duplicated amount, from the stored facts
+    exposure_status: str = ""  # twin_approved | both_approved
+    evidence: list[str] = Field(default_factory=list)
+    drafts: Optional[Drafts] = None
+    verification: Optional[VerifyResult] = None
+    validation: Optional[Validation] = None
+    status: str = "ready"  # ready | blocked (guardrails failed)
+    created_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Multi-invoice bundles (one arrival, several invoices)
+# ---------------------------------------------------------------------------
+
+class InvoiceBundleInput(BaseModel):
+    """One intake arrival carrying several invoices: typically a
+    supplier email plus a combined scan. The documents are segmented
+    in code by invoice-number anchors (bundles.py); each segment
+    becomes its own invoice run. ``purchase_orders`` /
+    ``goods_receipts`` are the system records segments reference by
+    PO number, so a bundled invoice can still three-way match."""
+
+    bundle_id: str
+    supplier_name: str = ""
+    supplier_email_text: str = ""
+    notes: str = ""
+    submitted_at: str = ""  # ISO datetime/date
+    currency: str = "USD"
+    documents: list[DocumentInput] = Field(default_factory=list)
+    purchase_orders: list[PurchaseOrder] = Field(default_factory=list)
+    goods_receipts: list[GoodsReceipt] = Field(default_factory=list)
+
+
+class BundleInvoiceOutcome(BaseModel):
+    invoice_id: str
+    invoice_number: str = ""
+    status: str = ""  # the run's status, or "error"
+    outcome: str = ""  # triage outcome, "" on error
+    severity: str = ""
+    total_amount: Optional[float] = None
+    currency: str = "USD"
+    error: Optional[str] = None
+
+
+class BundleResult(BaseModel):
+    """The bundle summary: one row per segmented invoice, counts and
+    totals computed in code. Each invoice also lives in the store as
+    its own run, with its own gate."""
+
+    bundle_id: str
+    supplier_name: str = ""
+    segment_count: int = 0
+    processed_count: int = 0
+    outcomes: list[BundleInvoiceOutcome] = Field(default_factory=list)
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    note: str = ""
+
+
 class AnalyzeRequest(BaseModel):
     invoice: InvoiceInput
 

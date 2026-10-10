@@ -25,7 +25,13 @@ import threading
 from dataclasses import dataclass, field
 
 from .config import env_str, load_dotenv
-from .schemas import AgentResult, StatementReconciliation
+from .schemas import (
+    AgentResult,
+    BundleResult,
+    PaymentRun,
+    RecoveryPack,
+    StatementReconciliation,
+)
 
 
 @dataclass
@@ -147,6 +153,9 @@ class InMemoryStore:
     def __init__(self) -> None:
         self._records: dict[str, ApprovalRecord] = {}
         self._reconciliations: dict[str, str] = {}
+        self._payment_runs: dict[str, str] = {}
+        self._recovery_packs: dict[str, str] = {}
+        self._bundles: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
@@ -167,6 +176,38 @@ class InMemoryStore:
             if payload
             else None
         )
+
+    def save_payment_run(self, run: PaymentRun) -> None:
+        with self._lock:
+            self._payment_runs[run.run_id] = run.model_dump_json()
+
+    def get_payment_run(self, run_id: str) -> PaymentRun | None:
+        with self._lock:
+            payload = self._payment_runs.get(run_id)
+        return PaymentRun.model_validate_json(payload) if payload else None
+
+    def list_payment_runs(self) -> list[PaymentRun]:
+        with self._lock:
+            payloads = [self._payment_runs[k] for k in sorted(self._payment_runs)]
+        return [PaymentRun.model_validate_json(p) for p in payloads]
+
+    def save_recovery_pack(self, pack: RecoveryPack) -> None:
+        with self._lock:
+            self._recovery_packs[pack.duplicate_invoice_id] = pack.model_dump_json()
+
+    def get_recovery_pack(self, invoice_id: str) -> RecoveryPack | None:
+        with self._lock:
+            payload = self._recovery_packs.get(invoice_id)
+        return RecoveryPack.model_validate_json(payload) if payload else None
+
+    def save_bundle(self, bundle: BundleResult) -> None:
+        with self._lock:
+            self._bundles[bundle.bundle_id] = bundle.model_dump_json()
+
+    def get_bundle(self, bundle_id: str) -> BundleResult | None:
+        with self._lock:
+            payload = self._bundles.get(bundle_id)
+        return BundleResult.model_validate_json(payload) if payload else None
 
     def get(self, invoice_id: str) -> ApprovalRecord | None:
         with self._lock:
@@ -293,6 +334,89 @@ class PostgresStore:
         return StatementReconciliation.model_validate(
             json.loads(payload) if isinstance(payload, str) else payload
         )
+
+    # --- Round-3 artefacts: payment runs, recovery packs, bundles.
+    # Same pattern as reconciliations: one row per id, the full
+    # object in the JSONB payload; the artefact tables never join
+    # back into approvals.
+
+    def _save_blob(self, table: str, key_col: str, key: str, payload: str,
+                   confirmed: bool | None = None) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if confirmed is None:
+                    cur.execute(
+                        f"INSERT INTO {table} ({key_col}, payload, updated_at) "
+                        "VALUES (%s, %s::jsonb, now()) "
+                        f"ON CONFLICT ({key_col}) DO UPDATE SET "
+                        "payload = EXCLUDED.payload, updated_at = now()",
+                        (key, payload),
+                    )
+                else:
+                    cur.execute(
+                        f"INSERT INTO {table} ({key_col}, payload, confirmed, updated_at) "
+                        "VALUES (%s, %s::jsonb, %s, now()) "
+                        f"ON CONFLICT ({key_col}) DO UPDATE SET "
+                        "payload = EXCLUDED.payload, "
+                        "confirmed = EXCLUDED.confirmed, updated_at = now()",
+                        (key, payload, confirmed),
+                    )
+            conn.commit()
+
+    def _get_blob(self, table: str, key_col: str, key: str):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT payload FROM {table} WHERE {key_col} = %s", (key,)
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        payload = row["payload"]
+        return json.loads(payload) if isinstance(payload, str) else payload
+
+    def _all_blobs(self, table: str) -> list:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT payload FROM {table} ORDER BY seq")
+                rows = cur.fetchall()
+        return [
+            json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"]
+            for r in rows
+        ]
+
+    def save_payment_run(self, run: PaymentRun) -> None:
+        self._save_blob(
+            "payment_runs", "run_id", run.run_id, run.model_dump_json(),
+            confirmed=run.status == "confirmed",
+        )
+
+    def get_payment_run(self, run_id: str) -> PaymentRun | None:
+        data = self._get_blob("payment_runs", "run_id", run_id)
+        return PaymentRun.model_validate(data) if data is not None else None
+
+    def list_payment_runs(self) -> list[PaymentRun]:
+        runs = [PaymentRun.model_validate(d) for d in self._all_blobs("payment_runs")]
+        return sorted(runs, key=lambda r: r.run_id)
+
+    def save_recovery_pack(self, pack: RecoveryPack) -> None:
+        self._save_blob(
+            "recovery_packs", "invoice_id", pack.duplicate_invoice_id,
+            pack.model_dump_json(),
+        )
+
+    def get_recovery_pack(self, invoice_id: str) -> RecoveryPack | None:
+        data = self._get_blob("recovery_packs", "invoice_id", invoice_id)
+        return RecoveryPack.model_validate(data) if data is not None else None
+
+    def save_bundle(self, bundle: BundleResult) -> None:
+        self._save_blob(
+            "bundles", "bundle_id", bundle.bundle_id, bundle.model_dump_json()
+        )
+
+    def get_bundle(self, bundle_id: str) -> BundleResult | None:
+        data = self._get_blob("bundles", "bundle_id", bundle_id)
+        return BundleResult.model_validate(data) if data is not None else None
 
     def _all_payloads(self) -> list:
         with self._connect() as conn:
