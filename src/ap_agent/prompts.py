@@ -338,7 +338,11 @@ the invoice cannot be processed until the missing items listed are
 provided (a purchase order, a goods receipt confirmation, or a legible
 copy of the invoice). Write only the request: polite, specific, listing
 exactly the items given — invent nothing. State that the case is on
-hold until the items arrive. Never state that a payment was made or
+hold until the items arrive. Name the invoice id. Close with a line
+beginning "Next step:" saying what happens once the items arrive.
+State no amounts — the request asks for documents, it does not
+restate figures. Never describe the invoice as matched or approved:
+it is received and on hold. Never state that a payment was made or
 will be made, and never promise a timing.
 """
 

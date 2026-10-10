@@ -498,3 +498,190 @@ def validate_drafts(
     )
 
     return Validation(passed=all(c.passed for c in checks), checks=checks)
+
+
+def validate_information_request(
+    invoice: InvoiceInput,
+    message: str,
+    outcome: str,
+    match_status: str,
+    allowed_amounts: list[float] | None = None,
+) -> Validation:
+    """Run the guardrails over an information-request message.
+
+    The information request (``clarify.py``) is a supplier-facing
+    letter that historically bypassed :func:`validate_drafts`
+    entirely — composed by a separate node, validated by nobody.
+    A supplier-facing letter is a supplier-facing letter, whichever
+    node composed it, so the same disciplines apply to its single
+    surface: it names its case, it carries no payment language, no
+    bank content, no promises, no PII; any figure it states traces
+    to the computed fact block; any outcome claim traces to the
+    computed outcome (an information request exists precisely
+    because the case did NOT cleanly match, so a "matched" claim
+    here is always an overstatement); and it states the next step.
+    The citation pair does not apply — the request cites no
+    policies, it asks for documents — and is omitted rather than
+    faked. Check names are the drafts' own, so repair directives
+    and reporting speak one vocabulary across both surfaces.
+    """
+    checks: list[GuardrailCheck] = []
+
+    present = invoice.invoice_id in message
+    checks.append(
+        GuardrailCheck(
+            name="references_invoice_id",
+            passed=present,
+            detail=(
+                f"invoice id {invoice.invoice_id} referenced"
+                if present
+                else f"the request never references invoice {invoice.invoice_id}"
+            ),
+        )
+    )
+
+    payment_hit = next(
+        (hit for hit in (_affirmative(p, message) for p in _PAYMENT_PATTERNS) if hit),
+        None,
+    )
+    bank_hit = next(
+        (m.group(0) for p in _BANK_PATTERNS if (m := re.search(p, message, re.IGNORECASE))),
+        None,
+    )
+    language_hit = payment_hit or bank_hit
+    checks.append(
+        GuardrailCheck(
+            name="no_payment_language",
+            passed=language_hit is None,
+            detail=(
+                "no payment-made / payment-promised language and no bank-detail content"
+                if language_hit is None
+                else (
+                    f"payment language found: '{payment_hit}' — the agent never states a payment was made or will be made"
+                    if payment_hit
+                    else f"bank-detail content found: '{bank_hit}' — bank changes are verified out-of-band, never echoed in a request [AP-BANK-01]"
+                )
+            ),
+        )
+    )
+
+    promise_hit = next(
+        (m.group(0) for p in _PROMISE_PATTERNS if (m := re.search(p, message, re.IGNORECASE))),
+        None,
+    )
+    checks.append(
+        GuardrailCheck(
+            name="no_prohibited_promises",
+            passed=promise_hit is None,
+            detail=(
+                "no outcome or timing promises"
+                if promise_hit is None
+                else f"prohibited promise found: '{promise_hit}'"
+            ),
+        )
+    )
+
+    pii_hit = None
+    if _SSN.search(message):
+        pii_hit = "what looks like a US Social Security number"
+    elif _find_card(message):
+        pii_hit = "what looks like a payment card number (Luhn-valid)"
+    elif _PASSPORT.search(message):
+        pii_hit = "what looks like a passport number"
+    checks.append(
+        GuardrailCheck(
+            name="no_pii_in_draft",
+            passed=pii_hit is None,
+            detail=(
+                "no SSN / card / passport patterns in the request"
+                if pii_hit is None
+                else f"PII in request: {pii_hit} — personal identifiers never belong in supplier-facing text"
+            ),
+        )
+    )
+
+    registry = {
+        round(float(v), 2)
+        for v in (
+            allowed_amounts
+            if allowed_amounts is not None
+            else _invoice_amounts(invoice)
+        )
+    }
+    registry.add(0.0)
+    stated = _letter_amounts(message)
+    untraceable = sorted(
+        {a for a in stated if all(abs(a - r) > 0.011 for r in registry)}
+    )
+    checks.append(
+        GuardrailCheck(
+            name="figures_must_trace",
+            passed=not untraceable,
+            detail=(
+                f"every figure in the request traces to the "
+                f"computed fact block ({len(stated)} figure(s) checked)"
+                if not untraceable
+                else (
+                    "request states figure(s) that do not trace "
+                    "to the computed facts: "
+                    + ", ".join(f"{a:.2f}" for a in untraceable[:3])
+                    + " — the request asks for documents; it does "
+                    "not restate amounts that were never computed"
+                )
+            ),
+        )
+    )
+
+    outcome_hit = next(
+        (
+            hit
+            for hit in (
+                _affirmative(p, message) for p in _OUTCOME_CLAIM_PATTERNS
+            )
+            if hit
+        ),
+        None,
+    )
+    full_hit = _affirmative(_FULL_MATCH_CLAIM_PATTERN, message)
+    outcome_bad = outcome_hit is not None and outcome != "clean_match"
+    match_bad = full_hit is not None and (match_status or "") != "full_match"
+    if outcome_bad:
+        claim_detail = (
+            f"request claims '{outcome_hit}' but the computed outcome "
+            f"is {outcome} (match {match_status or 'not computed'}) — "
+            "an information request exists because the case is "
+            "blocked; it is received and on hold, never 'matched'"
+        )
+    elif match_bad:
+        claim_detail = (
+            f"request claims '{full_hit}' but the computed match "
+            f"status is {match_status or 'not computed'} — the "
+            "match is stated as computed, never rounded up to full"
+        )
+    else:
+        claim_detail = (
+            f"no outcome claim exceeds the computed outcome "
+            f"({outcome} · match {match_status or 'not computed'})"
+        )
+    checks.append(
+        GuardrailCheck(
+            name="outcome_claim_must_trace",
+            passed=not (outcome_bad or match_bad),
+            detail=claim_detail,
+        )
+    )
+
+    next_step = "next step" in message.lower()
+    checks.append(
+        GuardrailCheck(
+            name="states_next_step",
+            passed=next_step,
+            detail=(
+                "the request states the next step"
+                if next_step
+                else "the request never states the next step for the supplier"
+            ),
+        )
+    )
+
+    return Validation(passed=all(c.passed for c in checks), checks=checks)

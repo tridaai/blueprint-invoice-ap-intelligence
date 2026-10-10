@@ -823,6 +823,7 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
             facts=facts,
             extractions=[DocumentExtraction.model_validate(e) for e in state["extractions"]],
             backend=backend,
+            allowed_amounts=_facts_view(state, sub)["allowed_amounts"],
         )
         return {
             "autonomy": autonomy.model_dump(),

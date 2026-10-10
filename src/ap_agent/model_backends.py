@@ -682,6 +682,20 @@ class _BaseLLMBackend:
                 f"- {item}" for item in context.get("missing_items", [])
             ),
         )
+        feedback = context.get("repair_feedback")
+        if feedback:
+            # Guardrail repair (clarify.py polices the request with
+            # the same checks as the drafts): the previous version
+            # failed named checks — hand the model exactly which
+            # ones and the fix each requires.
+            user += (
+                "\n\nCORRECTION REQUIRED — a previous version of "
+                "this request failed the guardrail checks listed "
+                "below. Rewrite the request, fixing every failed "
+                "check exactly as its fix line directs, and "
+                "introduce no claim the facts above do not "
+                f"support:\n{feedback}"
+            )
         text = self._complete(INFO_REQUEST_SYSTEM_PROMPT, user, max_tokens=_budget("info_request"))
         return text.strip() or None
 

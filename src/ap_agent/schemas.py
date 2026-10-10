@@ -398,6 +398,15 @@ class InformationRequest(BaseModel):
     needed: bool = False
     missing_items: list[str] = Field(default_factory=list)
     message: str = ""
+    # The request is a supplier-facing letter, so it is policed
+    # like one (guardrails.validate_information_request): the
+    # stored message's validation rides on the record, with the
+    # message's provenance — template | provider |
+    # provider_repaired | template_fallback — and, when a provider
+    # draft was not stored, the checks it failed.
+    validation: Optional[Validation] = None
+    draft_source: str = "template"
+    rejected_draft_checks: list[str] = Field(default_factory=list)
 
 
 class AutonomyRecommendation(BaseModel):
