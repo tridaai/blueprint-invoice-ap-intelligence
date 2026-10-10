@@ -42,7 +42,7 @@ confirms. The agent's part stops exactly where its authority stops:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from .discounts import evaluate_discount
 from .matching import _parse_date
@@ -1266,7 +1266,191 @@ def group_answer_metrics(runs: list[PaymentRun]) -> dict:
     }
 
 
-def handoff_metrics(runs: list[PaymentRun]) -> dict:
+def _answer_day_stats(days: list[int]) -> dict | None:
+    """count / median / mean / max over day counts — the
+    follow-through gradings' shared shape (the information-wait
+    grading's days-to-answer block). None when nothing was
+    measured, never a dressed-up zero block."""
+    if not days:
+        return None
+    ordered = sorted(days)
+    count = len(ordered)
+    median = (
+        ordered[count // 2]
+        if count % 2 == 1
+        else round((ordered[count // 2 - 1] + ordered[count // 2]) / 2, 2)
+    )
+    return {
+        "count": count,
+        "median": median,
+        "mean": round(sum(ordered) / count, 2),
+        "max": ordered[-1],
+    }
+
+
+def _stamp_datetime(value: str) -> datetime | None:
+    """A stored stamp as a datetime, for ordering events that
+    share a calendar day (a rejection recorded in the morning
+    and the re-export it caused in the afternoon are one
+    episode's end and the next one's start, not a tie). Falls
+    back to the date at midnight when only a date parses."""
+    if not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        parsed = _parse_date(value)
+        if parsed is None:
+            return None
+        stamp = datetime(parsed.year, parsed.month, parsed.day)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
+def group_answer_follow_through(
+    runs: list[PaymentRun], *, as_of: date, aging_days: int
+) -> dict:
+    """Grade the aged bank silences against what happened next:
+    did the chase window's passing move the bank?
+
+    The ageing read (:func:`ap_agent.queue.unanswered_group_items`)
+    names the groups the bank has not answered past
+    ``aging_days`` — a snapshot. This is the same loop graded
+    over time, the information-wait escalation grading's shape
+    applied to the bank loop. Each (group, file) pair is an
+    *episode*: the whole-file export opens one, each solo
+    re-export opens the next. An episode that stayed unanswered
+    past the aging threshold is graded by how it ended:
+
+    - ``answered_after_ageing`` — a receipt was recorded for
+      the episode, after the crossing (accepted and rejected
+      counted apart). The bank moved, late.
+    - ``reexported_after_ageing`` — the episode's late answer
+      was a rejection and the group was re-presented alone: the
+      silence ended with the file itself being redone, which is
+      a different lesson than a late booking.
+    - ``still_silent`` — the episode is the group's current one
+      and no answer has come: the silence the queue ages today.
+
+    Episodes that closed inside the threshold never aged and
+    are not graded — a bank being a bank is not a finding.
+    Days-to-answer runs from the episode's file going out to
+    its answer landing, over the answered and re-exported
+    episodes. Pure over the runs given; the receipts and
+    re-exports on the run are the record, never recomputed."""
+    from .handoff import batch_group_members
+
+    graded = answered = answered_accepted = answered_rejected = 0
+    reexported = still_silent = 0
+    answer_days: list[int] = []
+    silent_groups: list[dict] = []
+    for run in runs:
+        if not run.handoff_batch_booking or not run.handoff_generated_at:
+            continue
+        members_by_group = batch_group_members(run)
+        if not members_by_group:
+            continue
+        export_stamp = _stamp_datetime(run.handoff_generated_at)
+        if export_stamp is None:
+            continue
+        reexports_by_group: dict[str, list] = {}
+        for entry in run.handoff_group_reexports:
+            reexports_by_group.setdefault(entry.execution_date, []).append(
+                entry
+            )
+        receipts_by_group: dict[str, list] = {}
+        for receipt in run.handoff_group_receipts:
+            receipts_by_group.setdefault(receipt.execution_date, []).append(
+                receipt
+            )
+        for execution_date in members_by_group:
+            sends: list[datetime] = [export_stamp]
+            for entry in sorted(
+                reexports_by_group.get(execution_date, []),
+                key=lambda e: e.reexported_at,
+            ):
+                sent = _stamp_datetime(entry.reexported_at)
+                if sent is not None and sent > sends[-1]:
+                    sends.append(sent)
+            receipts = sorted(
+                receipts_by_group.get(execution_date, []),
+                key=lambda r: r.recorded_at,
+            )
+            for index, sent in enumerate(sends):
+                next_send = (
+                    sends[index + 1] if index + 1 < len(sends) else None
+                )
+                episode_receipt = None
+                episode_recorded: datetime | None = None
+                for receipt in receipts:
+                    recorded = _stamp_datetime(receipt.recorded_at)
+                    if recorded is None or recorded < sent:
+                        continue  # an earlier file's answer
+                    if next_send is not None and recorded >= next_send:
+                        continue  # the next file's answer, not this one's
+                    episode_receipt = receipt
+                    episode_recorded = recorded
+                    break
+                if episode_recorded is not None:
+                    end = episode_recorded.date()
+                elif next_send is not None:
+                    end = next_send.date()
+                else:
+                    end = as_of
+                if (end - sent.date()).days <= aging_days:
+                    continue  # closed (or stands) inside the threshold
+                graded += 1
+                if episode_receipt is None:
+                    if next_send is None:
+                        still_silent += 1
+                        silent_groups.append(
+                            {
+                                "run_id": run.run_id,
+                                "execution_date": execution_date,
+                            }
+                        )
+                    # No answer and yet a later file exists cannot
+                    # happen (a re-export needs the rejection), so
+                    # there is nothing else to grade here.
+                    continue
+                answer_days.append((end - sent.date()).days)
+                if (
+                    next_send is not None
+                    and episode_receipt.status == "rejected"
+                ):
+                    reexported += 1
+                    continue
+                answered += 1
+                if episode_receipt.status == "accepted":
+                    answered_accepted += 1
+                elif episode_receipt.status == "rejected":
+                    answered_rejected += 1
+    return {
+        "aging_threshold_days": aging_days,
+        "episodes_graded": graded,
+        "answered_after_ageing": answered,
+        "answered_accepted": answered_accepted,
+        "answered_rejected": answered_rejected,
+        "reexported_after_ageing": reexported,
+        "still_silent": still_silent,
+        "silence_ended_rate": (
+            round((answered + reexported) / graded, 4) if graded else None
+        ),
+        "days_to_answer": _answer_day_stats(answer_days),
+        "still_silent_groups": sorted(
+            silent_groups,
+            key=lambda g: (g["run_id"], g["execution_date"]),
+        ),
+    }
+
+
+def handoff_metrics(
+    runs: list[PaymentRun],
+    *,
+    as_of: date | None = None,
+    group_aging_days: int = 5,
+) -> dict:
     """The hand-off story, aggregated over the stored runs — the
     ``payment_runs`` section of ``/metrics``.
 
@@ -1356,6 +1540,16 @@ def handoff_metrics(runs: list[PaymentRun]) -> dict:
         "lag_grade_drift_watch": lag_grade_drift_watch(runs),
         "creditor_completion": creditor_completion_metrics(runs),
         "group_answers": group_answer_metrics(runs),
+        # The bank-silence loop, graded: the aged group waits
+        # read against what happened next — a late answer, a
+        # re-presentation, or silence still standing — so the
+        # ageing's chase has a measured effect beside its
+        # coverage counts.
+        "group_answer_follow_through": group_answer_follow_through(
+            runs,
+            as_of=as_of or datetime.now(timezone.utc).date(),
+            aging_days=group_aging_days,
+        ),
         "four_eyes_wait": {
             "runs_second_confirmed": second_confirmed_runs,
             "cost_by_currency": wait_cost_value,

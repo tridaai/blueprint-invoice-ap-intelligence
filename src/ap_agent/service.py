@@ -1510,7 +1510,11 @@ class InvoiceService:
             # overlay item does the unblocking — and the suppliers
             # whose replies most often change nothing.
             "reanalysis": reanalysis_analytics(records),
-            "payment_runs": handoff_metrics(self._get_store().list_payment_runs()),
+            "payment_runs": handoff_metrics(
+                self._get_store().list_payment_runs(),
+                as_of=datetime.now(timezone.utc).date(),
+                group_aging_days=group_receipt_aging_days(),
+            ),
             "handoff_profiles": _handoff_profile_summary(
                 self._get_store().list_handoff_profiles()
             ),
