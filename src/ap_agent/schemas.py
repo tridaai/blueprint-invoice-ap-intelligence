@@ -635,6 +635,7 @@ class MarkerWorklistItem(BaseModel):
     # neither field.
     in_flight_days_to_expiry: Optional[int] = None
     in_flight_expiring_soon: bool = False
+    in_flight_reproposes: str = ""  # rejected change the live one re-proposes
     rejected_change_id: str = ""  # the rejected change's request id
     rejected_by: str = ""  # who rejected it
     rejected_at: str = ""  # ISO timestamp of the rejection
@@ -860,6 +861,7 @@ class MasterChangeRequest(BaseModel):
     current: Optional[SupplierMasterRecord] = None  # None = new supplier
     source: str = "operator"  # operator | document
     source_invoice_id: str = ""  # set when source == "document"
+    reproposes: str = ""  # the rejected change this one re-proposes
     reason: str = ""
     proposed_by: str = ""
     proposed_at: str = ""
@@ -908,6 +910,19 @@ class MasterChangeDecisionRequest(BaseModel):
     approve: bool
     verification_ref: str = ""  # required to approve: the out-of-band check
     note: str = ""
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class MasterChangeReproposeRequest(BaseModel):
+    """Re-propose a rejected master change, answering the refusal."""
+
+    response: str = ""  # how the new attempt answers the rejection
+    effective_from: str = ""  # ISO date; "" = effective on approval
     actor: Optional[str] = None
     approver: Optional[str] = None
     reviewer: Optional[str] = None

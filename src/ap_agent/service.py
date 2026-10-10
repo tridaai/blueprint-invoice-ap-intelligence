@@ -1829,6 +1829,93 @@ class InvoiceService:
             reason=full_reason,
         )
 
+    def repropose_master_change(
+        self,
+        request_id: str,
+        *,
+        actor: str,
+        response: str,
+        effective_from: str = "",
+    ) -> MasterChangeRequest:
+        """Re-propose a REJECTED master change, answering the refusal.
+
+        A rejection is information: the reviewer found something
+        the first attempt did not answer. The assist carries that
+        record into the second attempt — the new proposal's reason
+        quotes the rejection (decider and decision note) beside
+        the proposer's response to it, and ``reproposes`` links
+        the lineage — and the evidence is re-verified, not copied:
+        a document-sourced original is re-derived from the stored
+        invoice against the CURRENT master (the master may have
+        moved since), while an operator-sourced original restates
+        the operator's own proposed record against a fresh
+        snapshot of the master. The response is required: a
+        re-proposal that does not say what it addresses is a
+        resubmission, and the governed path is not a retry loop.
+        Only a rejected change is re-proposed this way — a pending
+        one is decidable, an approved one is done, and an expired
+        one is re-proposed plainly, with fresh eyes, through
+        :meth:`propose_master_change`. Four-eyes is untouched: the
+        re-proposer still cannot decide their own change.
+        """
+        if not response.strip():
+            raise ValueError(
+                "a re-proposal must answer the rejection: say what "
+                "the new attempt addresses that the refused one "
+                "did not"
+            )
+        store = self._get_store()
+        original = store.get_master_change(request_id)
+        if original is None:
+            raise KeyError(
+                f"Unknown master change: {request_id} (propose it first)"
+            )
+        if original.status != "rejected":
+            raise ValueError(
+                f"Master change {request_id} is {original.status} — "
+                "only a rejected change is re-proposed with its "
+                "refusal answered"
+            )
+        rejection = f"rejected by {original.decided_by or 'the reviewer'}" + (
+            f": {original.decision_note}"
+            if original.decision_note
+            else " (no reason recorded)"
+        )
+        reason = (
+            f"Re-proposal of {original.request_id} — {rejection}. "
+            f"Response: {response.strip()}"
+        )
+        if original.source == "document":
+            record = store.get(original.source_invoice_id)
+            if record is None:
+                raise ValueError(
+                    f"Master change {request_id} was proposed from "
+                    f"invoice {original.source_invoice_id}, which is "
+                    "no longer on record — its evidence cannot be "
+                    "re-verified, so the change cannot be re-proposed "
+                    "from it; propose the change directly instead"
+                )
+            invoice = InvoiceInput.model_validate(record.invoice or {})
+            current = self._get_supplier_master().get_supplier(
+                invoice.supplier_name
+            )
+            proposed, notes = proposed_from_invoice(invoice, current)
+            if notes:
+                reason = f"{reason} — {'; '.join(notes)}"
+        else:
+            proposed = original.proposed.model_copy(deep=True)
+        change = self.propose_master_change(
+            proposed,
+            actor=actor,
+            source=original.source,
+            source_invoice_id=original.source_invoice_id,
+            reason=reason,
+            effective_from=effective_from,
+        )
+        change.reproposes = original.request_id
+        store.save_master_change(change)
+        return change
+
     def list_master_changes(self, status: str = "") -> list[MasterChangeRequest]:
         changes = self._get_store().list_master_changes()
         return [c for c in changes if not status or c.status == status]

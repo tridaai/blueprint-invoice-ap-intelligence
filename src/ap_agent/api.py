@@ -51,6 +51,7 @@ from .schemas import (
     InvoiceBundleInput,
     InvoiceInput,
     MasterChangeDecisionRequest,
+    MasterChangeReproposeRequest,
     MasterChangeFromInvoiceRequest,
     MasterChangeProposeRequest,
     MasterChangeRequest,
@@ -764,6 +765,25 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
                 approve=request.approve,
                 verification_ref=request.verification_ref,
                 note=request.note,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/suppliers/master-changes/{request_id}/repropose", response_model=MasterChangeRequest, dependencies=_AUTH)
+    def repropose_master_change(request_id: str, request: MasterChangeReproposeRequest) -> MasterChangeRequest:
+        """Re-propose a rejected change, answering the refusal: the
+        rejection (decider + note) and the proposer's response ride
+        into the new proposal's reason, the lineage is linked, and
+        a document-sourced original's evidence is re-derived from
+        the stored invoice rather than copied."""
+        try:
+            return svc.repropose_master_change(
+                request_id,
+                actor=_decision_actor(request),
+                response=request.response,
+                effective_from=request.effective_from,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -107,6 +107,7 @@ def _flow_state(
             "in_flight_expiring_soon": (
                 days_left is not None and days_left <= expiry_warning_days
             ),
+            "in_flight_reproposes": change.reproposes,
         }
     if change.status == "approved" and not change.applied_at:
         return {

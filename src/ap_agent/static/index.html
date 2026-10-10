@@ -485,12 +485,14 @@ async function loadChanges() {
 }
 function renderChanges(changes) {
   $("mcbody").innerHTML = (changes || []).length ? changes.map(c => `
-    <p class="kv" style="margin-top:12px"><b>${esc(c.request_id)}</b> · ${esc(c.supplier_name)} · ${c.status === "pending" ? pill("pending", "warn") : c.status === "approved" ? pill("approved" + (c.applied_at ? " · applied " + esc(c.applied_at.slice(0, 10)) : " · effective " + esc(c.effective_from || "")), "ok") : c.status === "expired" ? pill("expired — re-propose", "bad") : pill("rejected", "bad")} · source ${esc(c.source)}${c.source_invoice_id ? " (" + esc(c.source_invoice_id) + ")" : ""} · proposed by ${esc(c.proposed_by || "")}${c.decided_by ? ` · decided by ${esc(c.decided_by)}` : ""}<br>
+    <p class="kv" style="margin-top:12px"><b>${esc(c.request_id)}</b> · ${esc(c.supplier_name)} · ${c.status === "pending" ? pill("pending", "warn") : c.status === "approved" ? pill("approved" + (c.applied_at ? " · applied " + esc(c.applied_at.slice(0, 10)) : " · effective " + esc(c.effective_from || "")), "ok") : c.status === "expired" ? pill("expired — re-propose", "bad") : pill("rejected", "bad")} · source ${esc(c.source)}${c.source_invoice_id ? " (" + esc(c.source_invoice_id) + ")" : ""} · proposed by ${esc(c.proposed_by || "")}${c.reproposes ? ` · re-proposes ${esc(c.reproposes)}` : ""}${c.decided_by ? ` · decided by ${esc(c.decided_by)}` : ""}<br>
     <span class="note">current: ${esc(recSummary(c.current))} → proposed: ${esc(recSummary(c.proposed))}${c.verification_ref ? ` · verified: ${esc(c.verification_ref)}` : ""}${c.reason ? `<br>${esc(c.reason)}` : ""}</span></p>
     ${(c.history || []).map(h => `<p class="note" style="margin:2px 0">· <b>${esc(h.status)}</b> — ${esc(h.actor)} · ${esc(h.at)}${h.note ? " · " + esc(h.note) : ""}</p>`).join("")}
-    ${c.status === "pending" ? `<div class="gate"><input type="text" id="mcv-${esc(c.request_id)}" placeholder="Out-of-band verification reference (to approve)" size="44"><button class="secondary" data-mc-approve="${esc(c.request_id)}">Approve change</button><button class="secondary" data-mc-reject="${esc(c.request_id)}">Reject</button></div>` : ""}`).join("") : `<p class="kv">No master changes proposed yet.</p>`;
+    ${c.status === "pending" ? `<div class="gate"><input type="text" id="mcv-${esc(c.request_id)}" placeholder="Out-of-band verification reference (to approve)" size="44"><button class="secondary" data-mc-approve="${esc(c.request_id)}">Approve change</button><button class="secondary" data-mc-reject="${esc(c.request_id)}">Reject</button></div>` : ""}
+    ${c.status === "rejected" ? `<div class="gate"><input type="text" id="mcr-${esc(c.request_id)}" placeholder="How does the new attempt answer the rejection?" size="44"><button class="secondary" data-mc-repropose="${esc(c.request_id)}">Re-propose, answering the rejection</button></div>` : ""}`).join("") : `<p class="kv">No master changes proposed yet.</p>`;
   document.querySelectorAll("[data-mc-approve]").forEach(btn => btn.onclick = () => decideChange(btn.dataset.mcApprove, true));
   document.querySelectorAll("[data-mc-reject]").forEach(btn => btn.onclick = () => decideChange(btn.dataset.mcReject, false));
+  document.querySelectorAll("[data-mc-repropose]").forEach(btn => btn.onclick = () => reproposeChange(btn.dataset.mcRepropose));
 }
 async function decideChange(requestId, approve) {
   const actor = $("mc-actor").value.trim();
@@ -502,6 +504,17 @@ async function decideChange(requestId, approve) {
   $("mcnote").textContent = approve
     ? `Change ${requestId} approved by ${body.decided_by}${body.applied_at ? " and applied to the master" : " — it applies from " + body.effective_from}.`
     : `Change ${requestId} rejected by ${body.decided_by}. The master record is unchanged.`;
+  loadChanges();
+}
+async function reproposeChange(requestId) {
+  const actor = $("mc-actor").value.trim();
+  if (!actor) { $("mcnote").textContent = "Enter your name first — a re-proposal is attributable like any proposal."; return; }
+  const response = ($(`mcr-${requestId}`) || {}).value?.trim() || "";
+  if (!response) { $("mcnote").textContent = "Say how the new attempt answers the rejection — a re-proposal without a response is a resubmission, and the governed path is not a retry loop."; return; }
+  const res = await fetch(`/suppliers/master-changes/${requestId}/repropose`, {method: "POST", headers: headers(), body: JSON.stringify({actor, response})});
+  const body = await res.json();
+  if (!res.ok) { $("mcnote").textContent = `Re-proposal refused (${res.status}): ${body.detail || ""}`; return; }
+  $("mcnote").textContent = `Change ${body.request_id} re-proposed for ${body.supplier_name}, answering ${requestId} — the rejection and your response ride into its reason. Pending a second operator's decision.`;
   loadChanges();
 }
 $("mc-propose").onclick = async () => {
@@ -559,7 +572,7 @@ async function loadWorklist() {
   const totals = Object.entries(w.totals_by_currency || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
   $("worklistnote").textContent = `${w.supplier_count} supplier(s) still exporting marked${totals ? " · marked value " + totals : ""}${w.in_flight_count ? ` · ${w.in_flight_count} onboarding in flight (do not chase twice)` : ""}${w.expiring_soon_count ? ` · ${w.expiring_soon_count} with a decision window closing` : ""}${w.rejected_count ? ` · ${w.rejected_count} with a rejected change on record` : ""}${w.resolved_supplier_count ? ` · ${w.resolved_supplier_count} supplier(s) onboarded since (resolved)` : ""}.`;
   const stateCell = i => {
-    if (i.onboarding_state === "in_flight") return `<span class="pill info">Onboarding in flight</span><br><span class="note">${esc(i.in_flight_change_id)} proposed by ${esc(i.in_flight_proposed_by || "—")}${i.in_flight_age_days != null ? ` · ${i.in_flight_age_days}d waiting` : ""} · decision owed by a second operator</span>${i.in_flight_expiring_soon ? `<br>${pill("window closing — " + (i.in_flight_days_to_expiry ?? "?") + "d left", "bad")}` : (i.in_flight_days_to_expiry != null ? `<br><span class="note">${i.in_flight_days_to_expiry}d of decision window left</span>` : "")}`;
+    if (i.onboarding_state === "in_flight") return `<span class="pill info">Onboarding in flight</span><br><span class="note">${esc(i.in_flight_change_id)} proposed by ${esc(i.in_flight_proposed_by || "—")}${i.in_flight_age_days != null ? ` · ${i.in_flight_age_days}d waiting` : ""} · decision owed by a second operator</span>${i.in_flight_reproposes ? `<br><span class="note">re-proposes ${esc(i.in_flight_reproposes)}, answering its rejection</span>` : ""}${i.in_flight_expiring_soon ? `<br>${pill("window closing — " + (i.in_flight_days_to_expiry ?? "?") + "d left", "bad")}` : (i.in_flight_days_to_expiry != null ? `<br><span class="note">${i.in_flight_days_to_expiry}d of decision window left</span>` : "")}`;
     if (i.onboarding_state === "rejected") return `<span class="pill bad">Change rejected</span><br><span class="note">${esc(i.rejected_change_id)} rejected by ${esc(i.rejected_by || "—")}${i.rejected_at ? " on " + esc(String(i.rejected_at).slice(0, 10)) : ""}${i.rejection_note ? " — " + esc(i.rejection_note) : ""} · re-propose deliberately</span>`;
     return `<span class="pill warn">Open</span>`;
   };
