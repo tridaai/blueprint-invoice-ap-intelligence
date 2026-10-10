@@ -34,7 +34,10 @@ at the original 300 tokens a live slice lost 4 of 6 verdicts to
 "judge reply was not a JSON object" — the budget ran out
 mid-thought and the answer channel came back empty. The budget
 is the judge's alone; the pipeline's drafting budgets are
-unchanged.
+unchanged. The results file records both the judge budget and
+the pipeline's completion budgets in force
+(``completion_budgets``), so a starved run can be explained
+from the record.
 
 Exit codes: 0 = pack passed, 1 = pack ran and failed, 2 = NOT RUN —
 no real provider configured. The refusal is loud on purpose: an
@@ -58,6 +61,7 @@ from ap_agent.model_backends import (  # noqa: E402
     estimate_cost_usd,
     get_backend,
     parse_json_object,
+    run_completion_budgets,
 )
 from ap_agent.prompts import JUDGE_SYSTEM_PROMPT, JUDGE_USER_TEMPLATE  # noqa: E402
 from ap_agent.retriever import get_retriever  # noqa: E402
@@ -215,6 +219,7 @@ def main() -> int:
         "model": model,
         "judge_model": args.judge_model or model,
         "judge_max_tokens": judge_budget,
+        "completion_budgets": run_completion_budgets(),
         "cases": total,
         "outcome_match": f"{outcome_hits}/{total}",
         "drafts_grounded": f"{grounded}/{total}",

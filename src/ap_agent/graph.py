@@ -59,7 +59,11 @@ from .events import NullSink, RunEvent
 from .extractor import extract_documents, extraction_discrepancies
 from .guardrails import repair_directive, validate_drafts
 from .matching import compute_match, format_match_summary
-from .model_backends import DraftContext, estimate_cost_usd
+from .model_backends import (
+    DraftContext,
+    estimate_cost_usd,
+    run_completion_budgets,
+)
 from .ocr import get_ocr_engine, run_ocr
 from .options import build_options
 from .resilience import ResilientBackend
@@ -1141,6 +1145,10 @@ def _run_telemetry(backend, started: float, budget_status: dict | None) -> dict:
         "estimated_cost_usd": estimate_cost_usd(model, input_tokens, output_tokens),
         "latency_seconds": round(time.perf_counter() - started, 3),
         "budget": budget_status,
+        # The budgets this run actually ran with, per call site,
+        # resolved at run time (env overrides included) — so a
+        # starved-reply post-mortem reads them off the record.
+        "completion_budgets": run_completion_budgets(),
     }
 
 

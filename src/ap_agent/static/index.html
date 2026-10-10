@@ -247,7 +247,7 @@ function render(r) {
     Independent review: <b>${esc((rev.verdict || "—").toUpperCase())}</b> (${esc(rev.source || "—")})${r.reviewer_blocked ? " — REVIEWER BLOCKED" : ""}${(rev.findings || []).length ? " — " + rev.findings.map(esc).join("; ") : ""}</p>
     <table><tr><th></th><th>Guardrail</th><th>Detail</th></tr>${checkRows}</table>
     ${r.repair_attempted ? `<p class="kv">Repair attempted (${r.repair_attempts}): ${r.repaired ? "redraft passed" : "still failing"}</p>` : ""}
-    <p class="kv">Telemetry: ${esc(tel.backend || "—")}${tel.model ? " · " + esc(tel.model) : ""} · ${tel.model_calls ?? 0} model call(s) · ${tel.input_tokens == null ? "tokens n/a (offline)" : tel.input_tokens + " in / " + tel.output_tokens + " out"} · ${tel.latency_seconds ?? "—"}s</p>`;
+    <p class="kv">Telemetry: ${esc(tel.backend || "—")}${tel.model ? " · " + esc(tel.model) : ""} · ${tel.model_calls ?? 0} model call(s) · ${tel.input_tokens == null ? "tokens n/a (offline)" : tel.input_tokens + " in / " + tel.output_tokens + " out"} · ${tel.latency_seconds ?? "—"}s${tel.completion_budgets ? `<br>Completion budgets in force (max tokens): ${Object.entries(tel.completion_budgets).map(([k, v]) => `${esc(k)} ${v}`).join(" · ")}` : ""}</p>`;
 
   const fraud = r.bank_change_blocked;
   $("sec-gate").className = fraud ? "fraud" : "";

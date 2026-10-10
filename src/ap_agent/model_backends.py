@@ -101,6 +101,27 @@ def completion_budgets_in_force() -> dict[str, int]:
     }
 
 
+def run_completion_budgets() -> dict[str, int]:
+    """Every completion budget a run can spend, as resolved now:
+    the provider-call registry plus the document ports' budgets
+    (``OCR_MAX_TOKENS`` / ``VISION_MAX_TOKENS`` over their audited
+    defaults). This is the stamp run telemetry carries: a
+    starved-reply post-mortem reads the budgets off the run's own
+    record instead of re-deriving them from the code and the
+    environment the run happened to start in."""
+    budgets = completion_budgets_in_force()
+    from .ocr import DEFAULT_OCR_MAX_TOKENS
+    from .vision import DEFAULT_VISION_MAX_TOKENS
+
+    budgets["ocr"] = completion_budget(
+        "OCR_MAX_TOKENS", DEFAULT_OCR_MAX_TOKENS
+    )
+    budgets["vision"] = completion_budget(
+        "VISION_MAX_TOKENS", DEFAULT_VISION_MAX_TOKENS
+    )
+    return budgets
+
+
 def _budget(call: str) -> int:
     """The completion budget in force for one provider call."""
     env_name, default = COMPLETION_BUDGETS[call]

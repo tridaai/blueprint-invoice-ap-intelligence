@@ -423,6 +423,12 @@ class RunTelemetry(BaseModel):
     estimated_cost_usd: Optional[float] = None
     latency_seconds: float = 0.0
     budget: Optional[dict[str, Any]] = None
+    # The completion budgets in force for this run, per call site
+    # (the provider-call registry plus the OCR/vision ports), as
+    # resolved when the run executed — env overrides included. A
+    # starved or truncated reply is explained from the record, not
+    # re-derived from code after the fact.
+    completion_budgets: Optional[dict[str, int]] = None
 
 
 class TraceStep(BaseModel):
