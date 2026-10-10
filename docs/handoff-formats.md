@@ -159,3 +159,26 @@ exactly as they hold for the file. Batch booking is a pain.001
 shape only — the CSV stays the flat list — and the default
 single-`PmtInf` document is byte-identical to before (both
 shapes are pinned by golden files).
+
+### Bank feedback — the bank answers per `PmtInf`
+
+The bank answers a batch-booked file per group, not per file:
+one group books, another bounces. Those answers are recorded
+against the run (`POST /payment-runs/{run_id}/handoff/group-receipts`)
+— one receipt per group, named by the group's requested
+execution date and stamped with its `PmtInfId` (`<run id>-<date>`)
+and its members, read from the export's completion receipt (the
+file the bank actually saw, never a recomputation from the
+lines). Each member therefore carries its group's fate on the
+run record. The discipline is the posting receipt's: recording
+is bookkeeping and moves no payment state; a **rejected** answer
+must carry the bank's reason, verbatim enough to act on; an
+**accepted** group is final (its money is booked — a second
+answer is a bank-side correction, not a receipt); and a rejected
+group's later answer **supersedes** the first, which stays on
+the run marked as such. A recording is validated whole — one
+answer naming a group the file never made, a duplicate group,
+or a reasonless rejection refuses the entire recording, so the
+run never carries a half-filed answer set. A fresh export is a
+fresh file and clears the previous file's answers: the new
+file starts unanswered.

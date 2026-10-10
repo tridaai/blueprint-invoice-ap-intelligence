@@ -124,6 +124,12 @@
       <span class="note" id="hppropnote">A grade that names configuration theatre — a profile governing no exports, or routing no safer than ungoverned with its marker flag off — becomes a governed proposal here: drafted from the evidence by one operator, decided by a second (drafter ≠ decider), applied only on approval. A retirement deletes the profile; a tightening sets markers_rejected through the profile's own path.</span>
     </div>
     <div id="hppropbody"></div>
+    <div class="gate" style="margin-top:12px">
+      <button id="lg-draft" class="secondary">Draft lag-segment proposals</button>
+      <button id="lg-proposals-load" class="secondary">Load lag-segment proposals</button>
+      <span class="note" id="lgpropnote">The drift forecast's lag statistics are graded against the export ledger, and the drift watch demotes a statistic whose recent recall decays — automatically, run by run. A standing ruling is a governed proposal here: a degrading statistic drafts its retirement from the forecast's candidate set; an excluded segment whose recent record recovered drafts its re-grade back in. Drafter ≠ decider; the exclusion state is derived from the decided proposals themselves.</span>
+    </div>
+    <div id="lgpropbody"></div>
   </section>
   <section id="sec-openitems">
     <h2>Approved, not yet posted (ERP loop open items)</h2>
@@ -459,12 +465,50 @@ function renderRuns(runs) {
     ${(run.handoff_drift || []).map(d => `<p class="note" style="margin:2px 0">${pill("discount drift", "warn")} ${esc(d.invoice_id)} — ${esc(run.currency)} ${d.discount_lost} of discount lost: ${esc(d.reason)}</p>`).join("")}
     ${(run.handoff_profile_flags || []).map(f => `<p class="note" style="margin:2px 0">${pill("bank rejects markers", "bad")} ${esc(f)}</p>`).join("")}
     ${(run.drift_forecast || []).map(f => `<p class="note" style="margin:2px 0">${pill("drift forecast", "warn")} ${esc(f.invoice_id)} — ${esc(f.message)}</p>`).join("")}
+    ${groupReceiptLines(run)}
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
     ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
   document.querySelectorAll("[data-second]").forEach(btn => btn.onclick = () => confirmSecond(btn.dataset.second));
   document.querySelectorAll("[data-handoff]").forEach(btn => btn.onclick = () => exportHandoff(btn.dataset.handoff, btn.dataset.format));
   document.querySelectorAll("[data-download]").forEach(btn => btn.onclick = () => downloadHandoff(btn.dataset.download, btn.dataset.format));
+  document.querySelectorAll("[data-group-receipt]").forEach(btn => btn.onclick = () => recordGroupReceipt(btn.dataset.groupReceipt));
+}
+function groupReceiptLines(run) {
+  if (!run.handoff_batch_booking || !run.handoff_generated_at) return "";
+  const groups = {};
+  (run.handoff_creditor_entries || []).forEach(e => { if (e.execution_date) (groups[e.execution_date] = groups[e.execution_date] || []).push(e.invoice_id); });
+  const standing = {};
+  (run.handoff_group_receipts || []).forEach(r => { if (!r.superseded) standing[r.execution_date] = r; });
+  return Object.keys(groups).sort().map(date => {
+    const r = standing[date];
+    const state = r
+      ? (r.status === "accepted" ? pill("bank: accepted" + (r.bank_reference ? " · ref " + r.bank_reference : ""), "ok") : pill("bank: rejected", "bad") + ` <span class="note">${esc(r.detail || "")} — recorded by ${esc(r.recorded_by || "—")}; a corrected group can be answered again (the new answer supersedes)</span>`)
+      : pill("bank: no answer yet", "warn");
+    const canRecord = !r || r.status === "rejected";
+    return `<p class="note" style="margin:2px 0">${pill("PmtInf · " + date, "info")} members ${esc(groups[date].join(", "))} · ${state}${canRecord ? ` <button class="secondary" data-group-receipt="${esc(run.run_id)}|${esc(date)}">Record bank answer</button>` : ""}</p>`;
+  }).join("");
+}
+async function recordGroupReceipt(key) {
+  const [runId, date] = key.split("|");
+  const actor = $("lead").value.trim();
+  if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — bank feedback is recorded against a name."; return; }
+  const status = (prompt(`Bank answer for run ${runId}, PmtInf group ${date} — type "accepted" or "rejected":`) || "").trim().toLowerCase();
+  if (!status) return;
+  let detail = "", bank_reference = "";
+  if (status === "rejected") {
+    detail = prompt("The bank's reason for rejecting the group (required — a rejection without it cannot be acted on):") || "";
+    if (!detail.trim()) { $("paynote").textContent = "A rejection needs the bank's reason — nothing was recorded."; return; }
+  } else if (status === "accepted") {
+    bank_reference = prompt("Bank reference for the group (blank for none):") || "";
+  } else {
+    $("paynote").textContent = `Unknown status "${status}" — the bank accepts a group or rejects it; nothing was recorded.`; return;
+  }
+  const res = await fetch(`/payment-runs/${runId}/handoff/group-receipts`, {method: "POST", headers: headers(), body: JSON.stringify({actor, receipts: [{execution_date: date, status, detail, bank_reference}]})});
+  const body = await res.json();
+  if (!res.ok) { $("paynote").textContent = `Bank answer refused (${res.status}): ${body.detail || ""}`; return; }
+  $("paynote").textContent = `Group ${date} of run ${runId} recorded as ${status} by ${actor} — the answer is stamped on the run against the group's PmtInf id and members. No payment state moved.`;
+  loadRuns();
 }
 async function confirmSecond(runId) {
   const actor = $("lead").value.trim();
@@ -689,6 +733,38 @@ $("hp-draft").onclick = async () => {
   if (!res.ok) { $("hppropnote").textContent = `Drafting refused (${res.status}): ${body.detail || ""}`; return; }
   $("hppropnote").textContent = body.length ? `Drafted ${body.length} proposal(s): ${body.map(p => p.proposal_id + " (" + p.profile_id + " — " + p.kind.replaceAll("_", " ") + ")").join(", ")}. Nothing was applied — each waits for a second operator.` : "No new proposals — no grade names configuration theatre, or its question is already open.";
   loadProposals();
+};
+async function loadLagProposals() {
+  const res = await fetch("/forecast/lag-segment-proposals", {headers: headers()});
+  const ps = await res.json();
+  if (!res.ok) { $("lgpropnote").textContent = `Lag-segment proposals failed to load (${res.status}): ${ps.detail || ""}`; return; }
+  const pending = ps.filter(p => p.status === "pending").length;
+  $("lgpropnote").textContent = ps.length ? `${ps.length} lag-segment proposal(s) on file · ${pending} pending a second operator's decision. Exclusion state is derived from the approved decisions — retire excludes, re-grade re-admits.` : "No lag-segment proposals on file — draft from the drift watch when a statistic reads degrading (or an excluded one has recovered).";
+  $("lgpropbody").innerHTML = ps.length ? `<table><tr><th>Proposal</th><th>Segment</th><th>Decision asked</th><th>Basis (the watch's account)</th><th>State</th><th>Decide</th></tr>${ps.map(p => `<tr><td>${esc(p.proposal_id)}<br><span class="note">by ${esc(p.proposed_by || "—")} · ${esc((p.proposed_at || "").slice(0, 10))}</span></td><td>${esc(p.segment)}<br><span class="note">recall earlier ${p.evidence && p.evidence.earlier_recall != null ? p.evidence.earlier_recall : "—"} → recent ${p.evidence && p.evidence.recent_recall != null ? p.evidence.recent_recall : "—"}</span></td><td>${p.kind === "retire_segment" ? pill("retire from the candidate set", "warn") : pill("re-grade: re-admit", "info")}</td><td><span class="note">${esc(p.basis)}</span></td><td>${p.status === "pending" ? pill("pending", "warn") : p.status === "approved" ? pill("approved · applied " + esc((p.applied_at || "").slice(0, 10)), "ok") + `<br><span class="note">by ${esc(p.decided_by || "—")}</span>` : pill("rejected", "bad") + `<br><span class="note">by ${esc(p.decided_by || "—")}${p.decision_note ? " — " + esc(p.decision_note) : ""}</span>`}</td><td>${p.status === "pending" ? `<button class="secondary" data-lg-approve="${esc(p.proposal_id)}">Approve + apply</button><br><button class="secondary" data-lg-reject="${esc(p.proposal_id)}" style="margin-top:4px">Reject</button>` : ""}</td></tr>`).join("")}</table>` : "";
+  $("lgpropbody").querySelectorAll("button[data-lg-approve]").forEach(btn =>
+    btn.addEventListener("click", () => decideLagProposal(btn.dataset.lgApprove, true)));
+  $("lgpropbody").querySelectorAll("button[data-lg-reject]").forEach(btn =>
+    btn.addEventListener("click", () => decideLagProposal(btn.dataset.lgReject, false)));
+}
+async function decideLagProposal(proposalId, approve) {
+  const actor = $("hp-actor").value.trim();
+  if (!actor) { $("lgpropnote").textContent = "Enter your name in the profile form first — a decision is attributable, and the drafter cannot decide their own proposal."; return; }
+  const note = prompt((approve ? "Approve + apply " : "Reject ") + proposalId + " — decision note (goes on the record):") || "";
+  const res = await fetch(`/forecast/lag-segment-proposals/${proposalId}/decide`, {method: "POST", headers: headers(), body: JSON.stringify({actor, approve, note})});
+  const body = await res.json();
+  if (!res.ok) { $("lgpropnote").textContent = `Decision refused (${res.status}): ${body.detail || ""}`; return; }
+  $("lgpropnote").textContent = `${proposalId} ${body.status} by ${body.decided_by}${body.applied_at ? " — applied " + body.applied_at.slice(0, 10) : ""}: ${body.kind === "retire_segment" ? "the segment is out of the forecast's candidate set" : "the segment is a candidate again"}.`;
+  loadLagProposals();
+}
+$("lg-proposals-load").onclick = loadLagProposals;
+$("lg-draft").onclick = async () => {
+  const actor = $("hp-actor").value.trim();
+  if (!actor) { $("lgpropnote").textContent = "Enter your name in the profile form first — a drafted proposal names its drafter."; return; }
+  const res = await fetch("/forecast/lag-segment-proposals/draft", {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("lgpropnote").textContent = `Drafting refused (${res.status}): ${body.detail || ""}`; return; }
+  $("lgpropnote").textContent = body.length ? `Drafted ${body.length} proposal(s): ${body.map(p => p.proposal_id + " (" + p.segment + " — " + p.kind.replaceAll("_", " ") + ")").join(", ")}. Nothing was applied — each waits for a second operator.` : "No new proposals — no statistic reads degrading, no excluded segment has recovered, or its question is already open.";
+  loadLagProposals();
 };
 $("hp-set").onclick = async () => {
   const actor = $("hp-actor").value.trim();
