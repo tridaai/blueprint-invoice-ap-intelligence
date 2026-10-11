@@ -124,9 +124,8 @@ def test_credit_note_matching_changes_no_invoice_state(service):
 
 
 def test_bundled_sample_credit_note_settles(service):
-    notes = sample_credit_note_models()
-    assert len(notes) == 1
-    match = service.match_credit_note(notes[0])
+    notes = {n.credit_note_id: n for n in sample_credit_note_models()}
+    match = service.match_credit_note(notes["CN-3001"])
     assert match.status == "settles_variance"
     assert match.matched_invoice_id == "INV-1002"
 
