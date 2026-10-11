@@ -38,6 +38,7 @@ from .policies_data import POLICIES
 from .samples import (
     load_sample_credit_notes,
     load_sample_invoices,
+    load_sample_statement_documents,
     load_sample_statements,
 )
 from .schemas import (
@@ -49,6 +50,7 @@ from .schemas import (
     CreditNoteInput,
     CreditNoteMatch,
     PayablePosition,
+    SupplierPositions,
     DecisionRequest,
     DigestHistory,
     DigestStoreSweep,
@@ -79,6 +81,7 @@ from .schemas import (
     ProfileProposalDecisionRequest,
     ProfileProposalDraftRequest,
     PaymentRunRequest,
+    DocumentInput,
     QueueView,
     RecoveryPack,
     RecoveryTransitionRequest,
@@ -288,6 +291,10 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
     def list_sample_credit_notes() -> list[dict]:
         return load_sample_credit_notes()
 
+    @app.get("/samples/statement-documents", dependencies=_AUTH)
+    def list_sample_statement_documents() -> list[dict]:
+        return load_sample_statement_documents()
+
     @app.post("/invoices/analyze", response_model=AgentResult, dependencies=_AUTH)
     def analyze(invoice: InvoiceInput) -> AgentResult:
         return svc.analyze(invoice)
@@ -402,6 +409,27 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         invoices. The report is stored for confirmation; no invoice
         record changes."""
         return svc.reconcile_statement(statement)
+
+    @app.post("/statements/reconcile-document", response_model=StatementReconciliation, dependencies=_AUTH)
+    def reconcile_document(document: DocumentInput) -> StatementReconciliation:
+        """Reconcile a supplier statement that arrived as a document:
+        the OCR + vision ports read it, deterministic code parses it
+        into the structured statement shape, and the same
+        reconciliation runs — the reads riding on the record with
+        their confidences, low-confidence lines flagged. A document
+        that is not a statement comes back as a stored refusal with
+        its reason. No invoice record changes."""
+        return svc.reconcile_statement_document(document)
+
+    @app.get("/suppliers/positions", response_model=SupplierPositions, dependencies=_AUTH)
+    def supplier_positions(as_of: str = Query(default="")) -> SupplierPositions:
+        """The per-supplier open-position roll-up: one row per
+        supplier per currency — gross invoiced, credits recorded,
+        open payable, the disputed amount from the supplier's latest
+        reconciliation, and the oldest open invoice's age. Each row
+        is the sum of its invoices' payable positions. Read-only;
+        ``as_of`` (ISO date) anchors the ages, default today."""
+        return svc.supplier_positions(as_of=as_of)
 
     @app.get("/statements/{statement_id}", response_model=StatementReconciliation, dependencies=_AUTH)
     def get_reconciliation(statement_id: str) -> StatementReconciliation:

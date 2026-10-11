@@ -249,6 +249,15 @@ class InMemoryStore:
             else None
         )
 
+    def list_reconciliations(self) -> list[StatementReconciliation]:
+        with self._lock:
+            payloads = [
+                self._reconciliations[k] for k in sorted(self._reconciliations)
+            ]
+        return [
+            StatementReconciliation.model_validate_json(p) for p in payloads
+        ]
+
     def save_credit_application(self, application: CreditApplication) -> None:
         with self._lock:
             self._credit_applications[application.credit_note_id] = (
@@ -575,6 +584,23 @@ class PostgresStore:
         return StatementReconciliation.model_validate(
             json.loads(payload) if isinstance(payload, str) else payload
         )
+
+    def list_reconciliations(self) -> list[StatementReconciliation]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT payload FROM reconciliations ORDER BY statement_id"
+                )
+                rows = cur.fetchall()
+        reports = []
+        for row in rows:
+            payload = row["payload"]
+            reports.append(
+                StatementReconciliation.model_validate(
+                    json.loads(payload) if isinstance(payload, str) else payload
+                )
+            )
+        return reports
 
     # --- Round-3 artefacts: payment runs, recovery packs, bundles.
     # Same pattern as reconciliations: one row per id, the full

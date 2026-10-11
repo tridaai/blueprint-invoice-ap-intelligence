@@ -905,6 +905,15 @@ class StatementLine(BaseModel):
     invoice_number: str
     amount: Optional[float] = None
     date: str = ""
+    # A credit line: a credit the supplier shows against the account
+    # on the statement (marked as a credit in the document, or signed
+    # negative). It reconciles as a credit line — never matched
+    # against an invoice as if the supplier were billing it again.
+    is_credit: bool = False
+    # The confidence of the document read this line came from
+    # (document intake only; structured input leaves it None and
+    # claims no read quality either way).
+    confidence: Optional[float] = None
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -936,11 +945,17 @@ class SupplierStatement(BaseModel):
 
 class StatementLineResult(BaseModel):
     invoice_number: str
-    status: str = "missing_from_ap"  # matched | amount_differs | missing_from_ap
+    status: str = "missing_from_ap"  # matched | amount_differs | missing_from_ap | credit_line
     statement_amount: Optional[float] = None
     ap_amount: Optional[float] = None
     ap_invoice_id: str = ""
     difference: Optional[float] = None  # statement - AP, when both known
+    # The document read behind the line (document intake only): a
+    # line read below the OCR trust threshold is flagged, never
+    # silently trusted — the figures stand, but the approver is
+    # told to verify them against the document itself.
+    confidence: Optional[float] = None
+    low_confidence: bool = False
     # Duplicate screening (round 7): a statement line is also where a
     # duplicate payment hides — the supplier bills twice for an
     # invoice AP already processed twice, or lists the same number
@@ -949,6 +964,42 @@ class StatementLineResult(BaseModel):
     duplicate_suspected: bool = False
     duplicate_invoice_id: str = ""  # the second processed record, when AP holds one
     duplicate_of: str = ""  # the original, when the matched record is itself the duplicate
+
+
+class StatementLineRead(BaseModel):
+    """One statement line as read from a statement document: the
+    extracted values plus the confidence of the read itself. The
+    raw row rides along so the approver can see exactly what the
+    document said."""
+
+    invoice_number: str
+    amount: Optional[float] = None
+    date: str = ""
+    is_credit: bool = False
+    confidence: float = 0.0
+    low_confidence: bool = False
+    raw: str = ""
+
+
+class StatementExtraction(BaseModel):
+    """The document read behind a document-path reconciliation:
+    the classification verdict, the header fields with their
+    confidences (the ``FieldExtraction`` shape the invoice path
+    uses), and the lines as read. It rides on the reconciliation
+    record, so what the document said — and how well it was read —
+    is part of the record a human confirms."""
+
+    document_id: str = ""
+    detected_type: str = ""  # the vision verdict's classification
+    classification_source: str = ""  # metadata | vlm — the vision port's source
+    accepted: bool = False
+    refusal_reason: str = ""  # set when the document was refused as not-a-statement
+    ocr_engine: str = ""
+    ocr_confidence: float = 0.0
+    header: list[FieldExtraction] = Field(default_factory=list)
+    lines: list[StatementLineRead] = Field(default_factory=list)
+    skipped_rows: int = 0  # text rows that could not be read as statement lines
+    notes: list[str] = Field(default_factory=list)
 
 
 class StatementReconciliation(BaseModel):
@@ -960,6 +1011,13 @@ class StatementReconciliation(BaseModel):
     supplier_name: str = ""
     statement_date: str = ""
     currency: str = "USD"
+    source: str = "structured"  # structured | document
+    # A document-path refusal: the document was classified as not a
+    # statement (or no statement could be read from it). The record
+    # is stored with the reason and no lines — the refusal is the
+    # outcome, on the record, not a silent drop.
+    refused: bool = False
+    refusal_reason: str = ""
     lines: list[StatementLineResult] = Field(default_factory=list)
     missing_from_statement: list[dict] = Field(default_factory=list)
     matched_count: int = 0
@@ -967,6 +1025,10 @@ class StatementReconciliation(BaseModel):
     missing_from_ap_count: int = 0
     missing_from_statement_count: int = 0
     duplicate_count: int = 0  # lines flagged by the duplicate screen
+    credit_line_count: int = 0  # credit lines shown on the statement
+    credit_total: float = 0.0  # signed sum of the credit lines (<= 0)
+    low_confidence_count: int = 0  # lines read from a document below the trust threshold
+    extraction: Optional[StatementExtraction] = None  # document path only
     statement_total: float = 0.0
     ap_total: float = 0.0
     claimed_total: Optional[float] = None  # what the statement claims its lines sum to
@@ -976,6 +1038,46 @@ class StatementReconciliation(BaseModel):
     summary_source: str = "template"  # the deterministic composer; never an LLM figure
     confirmed_by: Optional[str] = None
     confirmed_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Per-supplier open position (the roll-up read model)
+# ---------------------------------------------------------------------------
+
+class SupplierPosition(BaseModel):
+    """One supplier's open position in one currency, computed in
+    code from the same records the per-invoice payable endpoint
+    reads: the row is the sum of its invoices' payable positions,
+    so the two can never disagree. The dispute figure comes from
+    the supplier's latest reconciliation — the amounts that differ
+    plus the amounts the supplier lists that AP never processed.
+    A supplier billing in two currencies gets a row per currency;
+    figures are never summed across currencies."""
+
+    supplier_name: str
+    currency: str = "USD"
+    invoice_count: int = 0
+    open_invoice_count: int = 0  # invoices with an open amount above zero
+    gross_invoiced: float = 0.0
+    credits_applied: float = 0.0
+    open_amount: float = 0.0
+    disputed_amount: float = 0.0
+    disputed_invoice_numbers: list[str] = Field(default_factory=list)
+    dispute_statement_id: str = ""  # the reconciliation the dispute figure comes from
+    oldest_open_invoice_id: str = ""
+    oldest_open_invoice_number: str = ""
+    oldest_open_age_days: Optional[int] = None
+
+
+class SupplierPositions(BaseModel):
+    """The roll-up document: one row per supplier per currency,
+    with per-currency totals (never a cross-currency sum). A read
+    model — it writes nothing and changes no payment state."""
+
+    as_of: str = ""
+    suppliers: list[SupplierPosition] = Field(default_factory=list)
+    supplier_count: int = 0  # distinct suppliers across the rows
+    totals_by_currency: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

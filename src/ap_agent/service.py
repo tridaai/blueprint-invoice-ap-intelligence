@@ -61,6 +61,8 @@ from .queue import (
 )
 from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
+from .statement_intake import extract_statement_document
+from .supplier_positions import supplier_positions as _supplier_positions
 from .graph import resume_approval, run_invoice
 from .master_changes import change_age_days, is_change_expired
 from .master_changes import next_request_id, proposed_from_invoice
@@ -110,6 +112,7 @@ from .schemas import (
     RecoveryPack,
     StatementReconciliation,
     SupplierMasterRecord,
+    SupplierPositions,
     SupplierStatement,
 )
 from .store import ApprovalRecord, default_store, supplier_summary
@@ -1830,6 +1833,71 @@ class InvoiceService:
         self, statement_id: str
     ) -> StatementReconciliation | None:
         return self._get_store().get_reconciliation(statement_id)
+
+    def reconcile_statement_document(
+        self, document: DocumentInput | dict
+    ) -> StatementReconciliation:
+        """Reconcile a supplier statement that arrived as a document.
+
+        The document runs through the intake ports — OCR for the
+        read, vision for the classification — and deterministic
+        code parses it into the same ``SupplierStatement`` the
+        structured path reconciles (``statement_intake.py``), so a
+        document statement and its structured twin produce the same
+        report, the document's reads riding on the record with
+        their confidences. A document that is not a statement is
+        refused: the stored record carries the refusal and its
+        reason, and nothing is reconciled. Either way the report
+        is stored for confirmation, and no invoice record changes.
+        """
+        model = (
+            document
+            if isinstance(document, DocumentInput)
+            else DocumentInput.model_validate(document)
+        )
+        statement, extraction = extract_statement_document(
+            model,
+            ocr_engine=self.ocr_engine or get_ocr_engine(),
+            vision_engine=self.vision_engine or get_vision_engine(),
+        )
+        store = self._get_store()
+        if statement is None:
+            report = StatementReconciliation(
+                statement_id=model.document_id or "STMT-DOCUMENT",
+                supplier_name=model.fields.get("supplier_name", ""),
+                source="document",
+                refused=True,
+                refusal_reason=extraction.refusal_reason,
+                summary=extraction.refusal_reason,
+                extraction=extraction,
+            )
+            store.save_reconciliation(report)
+            return report
+        history = store.prior_invoices(exclude_invoice_id="")
+        report = _reconcile(statement, history)
+        report.source = "document"
+        report.extraction = extraction
+        store.save_reconciliation(report)
+        return report
+
+    def supplier_positions(self, as_of: str = "") -> SupplierPositions:
+        """The per-supplier open-position roll-up: one row per
+        supplier per currency — gross invoiced, credits recorded,
+        open payable, the disputed amount from the supplier's
+        latest reconciliation, and the oldest open invoice's age.
+
+        A pure read over the store (``supplier_positions.py``):
+        each row is the sum of its invoices' payable positions,
+        so it cannot disagree with ``GET /invoices/{id}/payable``.
+        Nothing is written and no payment state changes."""
+        store = self._get_store()
+        anchor = _parse_date(as_of) if as_of else None
+        return _supplier_positions(
+            store.list_records(),
+            store.list_credit_applications(),
+            store.list_reconciliations(),
+            as_of=anchor,
+        )
 
     def propose_payment_runs(
         self, window_days: int = 7, as_of: str = ""

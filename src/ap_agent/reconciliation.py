@@ -10,6 +10,16 @@ the two up by supplier invoice number and classifies every line:
   (never received, or received and not yet analysed).
 - ``missing_from_statement`` — AP processed it; the supplier does not
   list it (already paid, credited, or the statement is stale).
+- ``credit_line`` — a credit the supplier shows against the account
+  on the statement. It is not an invoice and is never matched as
+  one; it enters the recomputed total signed, and it is counted
+  and named in the summary.
+
+A line that arrived through document intake carries the confidence
+of its read; a line read below the OCR trust threshold is flagged
+on the report (``low_confidence``) — the figure stands and is
+reconciled like any other, but the approver is told to verify it
+against the document before acting on it.
 
 Lines are also **duplicate-screened**: a statement is a classic
 duplicate-payment path, so a line is flagged when AP holds two
@@ -43,6 +53,7 @@ an invoice.
 
 from __future__ import annotations
 
+from .ocr import LOW_CONFIDENCE_THRESHOLD
 from .schemas import (
     StatementLineResult,
     StatementReconciliation,
@@ -51,6 +62,15 @@ from .schemas import (
 from .store import duplicate_key
 
 _AMOUNT_TOLERANCE = 0.01
+
+
+def _read_flag(line) -> tuple[float | None, bool]:
+    """The (confidence, low_confidence) of a statement line's
+    document read. Structured lines carry no read and claim none."""
+    confidence = line.confidence
+    if confidence is None:
+        return None, False
+    return float(confidence), float(confidence) < LOW_CONFIDENCE_THRESHOLD
 
 
 def reconcile_statement(
@@ -75,14 +95,38 @@ def reconcile_statement(
 
     lines: list[StatementLineResult] = []
     matched = differs = missing_ap = duplicates = 0
+    credit_lines = 0
+    credit_total = 0.0
+    low_confidence_lines = 0
     statement_total = 0.0
     seen_numbers: set[str] = set()
     for line in statement.lines:
+        if line.amount is not None:
+            statement_total += float(line.amount)
+        confidence, low_confidence = _read_flag(line)
+        if low_confidence:
+            low_confidence_lines += 1
+        if line.is_credit:
+            # A credit the supplier shows against the account: it is
+            # not an invoice, so it is never matched as one and never
+            # marks an invoice as seen on the statement. Its signed
+            # amount already entered the recomputed total above.
+            credit_lines += 1
+            if line.amount is not None:
+                credit_total += float(line.amount)
+            lines.append(
+                StatementLineResult(
+                    invoice_number=line.invoice_number,
+                    status="credit_line",
+                    statement_amount=line.amount,
+                    confidence=confidence,
+                    low_confidence=low_confidence,
+                )
+            )
+            continue
         key = duplicate_key(statement.supplier_name, line.invoice_number)[1]
         repeated = key in seen_numbers and bool(key)
         seen_numbers.add(key)
-        if line.amount is not None:
-            statement_total += float(line.amount)
         group = by_number.get(key) or []
         entry = group[0] if group else None
         if entry is None:
@@ -92,6 +136,8 @@ def reconcile_statement(
                     invoice_number=line.invoice_number,
                     status="missing_from_ap",
                     statement_amount=line.amount,
+                    confidence=confidence,
+                    low_confidence=low_confidence,
                 )
             )
             continue
@@ -142,6 +188,8 @@ def reconcile_statement(
                 duplicate_suspected=duplicate_suspected,
                 duplicate_invoice_id=duplicate_invoice_id,
                 duplicate_of=duplicate_of,
+                confidence=confidence,
+                low_confidence=low_confidence,
             )
         )
 
@@ -188,6 +236,9 @@ def reconcile_statement(
         missing_from_ap_count=missing_ap,
         missing_from_statement_count=len(missing_from_statement),
         duplicate_count=duplicates,
+        credit_line_count=credit_lines,
+        credit_total=round(credit_total, 2),
+        low_confidence_count=low_confidence_lines,
         statement_total=round(statement_total, 2),
         ap_total=ap_total,
         claimed_total=claimed_total,
@@ -257,6 +308,25 @@ def _compose_summary(report: StatementReconciliation) -> str:
             f"{entry['invoice_number']}: processed by AP "
             f"({entry['invoice_id']}, {(entry['total_amount'] or 0):.2f}) but "
             "absent from the statement."
+        )
+    if report.credit_line_count:
+        parts.append(
+            f"The statement also shows {report.credit_line_count} credit "
+            f"line(s) totalling {report.credit_total:.2f} — credits "
+            "against the account, reconciled as credits, not as invoices "
+            "to pay."
+        )
+    if report.low_confidence_count:
+        flagged = ", ".join(
+            line.invoice_number
+            for line in report.lines
+            if line.low_confidence
+        )
+        parts.append(
+            f"{report.low_confidence_count} line(s) were read from the "
+            f"document at low confidence ({flagged}) — the figures are "
+            "reconciled as read, but verify them against the document "
+            "itself before acting on them."
         )
     if (
         report.differs_count == 0
