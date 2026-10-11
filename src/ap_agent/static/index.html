@@ -125,6 +125,25 @@
     </div>
     <div id="payrunsbody"></div>
   </section>
+  <section id="sec-statements">
+    <h2>Supplier statements &amp; credit notes (reconciled in code — a human confirms)</h2>
+    <div class="gate">
+      <select id="stmt-sample"></select>
+      <button id="reconcile" class="secondary">Reconcile statement</button>
+      <input type="text" id="stmtactor" placeholder="Your name (to confirm)" size="20">
+      <button id="confirmstmt" class="secondary">Confirm report</button>
+      <span class="note" id="stmtnote">A supplier statement is lined up against the processed invoices in code: matched, amount differs, never processed, missing from the statement — duplicates screened, totals recomputed, and the statement's own printed total checked against its lines. The report drafts a supplier query letter for the exceptions; nobody sends it. Confirming touches the report only.</span>
+    </div>
+    <div id="stmtbody"></div>
+    <div class="gate" style="margin-top:12px">
+      <select id="cn-sample"></select>
+      <button id="matchcn" class="secondary">Match credit note</button>
+      <input type="text" id="cnactor" placeholder="Approver (to record application)" size="24">
+      <button id="applycn" class="secondary">Record application</button>
+      <span class="note" id="cnnote">Matching is a report: does the credit settle a variance the pipeline computed? Recording an application is the approver's step — the credit then nets into the invoice's payable position and into payment-run proposals. A credit is never recorded twice, never above the remaining variance, never above the open amount.</span>
+    </div>
+    <div id="cnbody"></div>
+  </section>
   <section id="sec-profiles">
     <h2>Hand-off profiles (governed routing — per supplier / per currency)</h2>
     <p class="note">The payee side's say in the export: which format its bank or ERP ingests, how many lead days a pain.001 requested execution date needs, whether its bank rejects at-import creditor markers, and whether it books per value date (batch booking: one PmtInf per requested execution date, the lead days flooring every group's date). /metrics grades each profile — exports routed, marker rate against ungoverned exports, flag follow-through, lead promises kept. Setting a profile names its actor and appends to the profile's audit trail. Exports resolve it deterministically — a format named on the export wins, then the currency profile, then a supplier profile the run's members agree on, else the CSV default. A supplier whose bank rejects markers is flagged on the run at proposal time while the master holds no bank details for it.</p>
@@ -956,7 +975,80 @@ async function loadDigestHistory() {
 }
 $("loadhistory").onclick = loadDigestHistory;
 
-loadSamples(); loadEvals(); loadRuns(); loadChanges();
+const fmt = n => (n === null || n === undefined ? "—" : Number(n).toFixed(2));
+let currentStatementId = null;
+async function loadApDocs() {
+  try {
+    const [stmts, notes] = await Promise.all([
+      fetch("/samples/statements", {headers: headers()}).then(r => r.json()),
+      fetch("/samples/credit-notes", {headers: headers()}).then(r => r.json()),
+    ]);
+    window._statements = Object.fromEntries(stmts.map(x => [x.statement_id, x]));
+    window._creditNotes = Object.fromEntries(notes.map(x => [x.credit_note_id, x]));
+    $("stmt-sample").innerHTML = stmts.map(x => `<option value="${esc(x.statement_id)}">${esc(x.statement_id)} — ${esc(x.supplier_name)}</option>`).join("");
+    $("cn-sample").innerHTML = notes.map(x => `<option value="${esc(x.credit_note_id)}">${esc(x.credit_note_id)} — ${esc(x.supplier_name)} · ${esc(x.currency)} ${fmt(x.amount)} vs ${esc(x.referenced_invoice_number)}</option>`).join("");
+  } catch (e) { /* samples unavailable */ }
+}
+function renderStatement(r) {
+  currentStatementId = r.statement_id;
+  const claimed = (r.claimed_total_difference !== null && r.claimed_total_difference !== undefined && Math.abs(r.claimed_total_difference) > 0.01)
+    ? `<p class="kv">${pill("claimed total disagrees", "bad")} The statement prints ${fmt(r.claimed_total)} ${esc(r.currency)}; its lines sum to ${fmt(r.statement_total)} — the recomputed figure is used.</p>` : "";
+  const rows = (r.lines || []).map(l => `<tr><td>${esc(l.invoice_number)}</td><td>${pill(l.status, l.status === "matched" ? "ok" : "warn")}${l.duplicate_suspected ? " " + pill("duplicate suspected", "bad") : ""}</td><td>${fmt(l.statement_amount)}</td><td>${fmt(l.ap_amount)}</td><td>${l.difference === null || l.difference === undefined ? "—" : fmt(l.difference)}</td><td>${esc(l.ap_invoice_id || "—")}</td></tr>`).join("");
+  const missing = (r.missing_from_statement || []).length ? `<p class="kv"><b>Processed by AP, absent from the statement:</b> ${r.missing_from_statement.map(e => `${esc(e.invoice_number)} (${esc(e.invoice_id)}, ${fmt(e.total_amount)})`).join(" · ")}</p>` : "";
+  const draft = r.supplier_query_draft ? `<p class="kv"><b>Supplier query — draft, not sent</b></p><pre>${esc(r.supplier_query_draft)}</pre>` : "";
+  $("stmtbody").innerHTML = `<p class="kv" style="margin-top:10px"><b>${esc(r.statement_id)}</b> — ${esc(r.supplier_name)} · ${r.matched_count} matched · ${r.differs_count} differ · ${r.missing_from_ap_count} never processed · ${r.missing_from_statement_count} missing from statement · ${r.duplicate_count} duplicate-flagged<br>Statement lines total ${fmt(r.statement_total)} ${esc(r.currency)} · AP processed ${fmt(r.ap_total)} ${esc(r.currency)}${r.confirmed_by ? `<br>Confirmed by ${esc(r.confirmed_by)} at ${esc(r.confirmed_at)}` : " · awaiting confirmation"}</p>${claimed}<table><tr><th>Invoice</th><th>Status</th><th>Statement</th><th>AP</th><th>Difference</th><th>AP record</th></tr>${rows}</table>${missing}<p class="kv">${esc(r.summary)}</p>${draft}`;
+}
+async function reconcileStmt() {
+  const payload = window._statements[$("stmt-sample").value];
+  if (!payload) return;
+  const res = await fetch("/statements/reconcile", {method: "POST", headers: headers(), body: JSON.stringify(payload)});
+  const body = await res.json();
+  if (!res.ok) { $("stmtnote").textContent = `Reconcile refused (${res.status}): ${body.detail || ""}`; return; }
+  renderStatement(body);
+}
+$("reconcile").onclick = reconcileStmt;
+$("confirmstmt").onclick = async () => {
+  const actor = $("stmtactor").value.trim();
+  if (!currentStatementId) { $("stmtnote").textContent = "Reconcile a statement first."; return; }
+  if (!actor) { $("stmtnote").textContent = "Enter your name first — confirmations are attributable."; return; }
+  const res = await fetch(`/statements/${currentStatementId}/confirm`, {method: "POST", headers: headers(), body: JSON.stringify({actor})});
+  const body = await res.json();
+  if (!res.ok) { $("stmtnote").textContent = `Confirm refused (${res.status}): ${body.detail || ""}`; return; }
+  renderStatement(body);
+  $("stmtnote").textContent = `Report ${body.statement_id} confirmed by ${body.confirmed_by}. No invoice was changed.`;
+};
+function renderCreditMatch(m, payable) {
+  const pos = payable ? `<p class="kv"><b>Payable position — ${esc(payable.invoice_id)}</b>: gross ${fmt(payable.gross_amount)} ${esc(payable.currency)} · credits recorded ${fmt(payable.total_credits)} · <b>open ${fmt(payable.open_amount)}</b>${(payable.credits || []).map(c => `<br>${esc(c.credit_note_id)} — ${fmt(c.amount)} recorded by ${esc(c.applied_by)}`).join("")}</p>` : "";
+  $("cnbody").innerHTML = `<p class="kv" style="margin-top:10px"><b>${esc(m.credit_note_id)}</b> ${pill(m.status, m.status === "settles_variance" ? "ok" : m.status === "partial_settlement" ? "warn" : "bad")} ${m.matched_invoice_id ? `against ${esc(m.matched_invoice_id)}` : "no invoice matched"}<br>Credit ${fmt(m.credit_amount)} · computed variance ${fmt(m.overbilled_amount)} · already recorded ${fmt(m.applied_credits_total)} · remaining variance ${fmt(m.remaining_variance)}<br>${esc(m.note)}</p>${(m.basis || []).length ? `<p class="kv">${m.basis.map(esc).join("<br>")}</p>` : ""}${pos}`;
+}
+async function matchCn() {
+  const payload = window._creditNotes[$("cn-sample").value];
+  if (!payload) return null;
+  const res = await fetch("/credit-notes/match", {method: "POST", headers: headers(), body: JSON.stringify(payload)});
+  const m = await res.json();
+  if (!res.ok) { $("cnnote").textContent = `Match refused (${res.status}): ${m.detail || ""}`; return null; }
+  let payable = null;
+  if (m.matched_invoice_id) {
+    const pr = await fetch(`/invoices/${m.matched_invoice_id}/payable`, {headers: headers()});
+    if (pr.ok) payable = await pr.json();
+  }
+  renderCreditMatch(m, payable);
+  return m;
+}
+$("matchcn").onclick = matchCn;
+$("applycn").onclick = async () => {
+  const payload = window._creditNotes[$("cn-sample").value];
+  const actor = $("cnactor").value.trim();
+  if (!payload) return;
+  if (!actor) { $("cnnote").textContent = "Enter the approver's name first — applications are attributable."; return; }
+  const res = await fetch("/credit-notes/apply", {method: "POST", headers: headers(), body: JSON.stringify({note: payload, actor})});
+  const body = await res.json();
+  if (!res.ok) { $("cnnote").textContent = `Application refused (${res.status}): ${body.detail || ""}`; return; }
+  $("cnnote").textContent = `${body.credit_note_id} recorded against ${body.invoice_id} by ${body.applied_by} — ${fmt(body.amount)} now nets against its payable position. No payment was made.`;
+  await matchCn();
+};
+
+loadSamples(); loadEvals(); loadRuns(); loadChanges(); loadApDocs();
 </script>
 </body>
 </html>

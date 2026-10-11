@@ -1,0 +1,59 @@
+[
+ {
+  "statement_id": "STMT-NB-2026-10",
+  "supplier_name": "Northbeam Office Supplies",
+  "statement_date": "2026-10-05",
+  "currency": "USD",
+  "claimed_total": 2400.0,
+  "lines": [
+   {
+    "invoice_number": "NB-4471",
+    "amount": 1180.0,
+    "date": "2026-09-28"
+   },
+   {
+    "invoice_number": "NB-4480",
+    "amount": 1100.0,
+    "date": "2026-09-29"
+   },
+   {
+    "invoice_number": "NB-9999",
+    "amount": 75.0,
+    "date": "2026-09-30"
+   }
+  ]
+ },
+ {
+  "statement_id": "STMT-AW-2026-10",
+  "supplier_name": "Alpen Werkzeug GmbH",
+  "statement_date": "2026-10-05",
+  "currency": "EUR",
+  "claimed_total": 357.0,
+  "lines": [
+   {
+    "invoice_number": "AW-77",
+    "amount": 357.0,
+    "date": "2026-09-23"
+   }
+  ]
+ },
+ {
+  "statement_id": "STMT-CI-2026-10",
+  "supplier_name": "Cascade IT Hardware",
+  "statement_date": "2026-10-05",
+  "currency": "USD",
+  "claimed_total": 2548.8,
+  "lines": [
+   {
+    "invoice_number": "CI-2210",
+    "amount": 1274.4,
+    "date": "2026-09-27"
+   },
+   {
+    "invoice_number": "CI-2210",
+    "amount": 1274.4,
+    "date": "2026-09-27"
+   }
+  ]
+ }
+]
