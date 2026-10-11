@@ -59,6 +59,7 @@ from .queue import (
     information_escalation_follow_through,
     recovery_case_aging,
 )
+from .controlreport import build_control_report as _build_control_report
 from .recovery import build_recovery_pack
 from .reconciliation import reconcile_statement as _reconcile
 from .statement_intake import extract_statement_document
@@ -102,6 +103,8 @@ from .schemas import (
     MasterChangeRequest,
     OpenPostingItem,
     PaymentRun,
+    PaymentRunControlReport,
+    PaymentRunRecoveryAck,
     PostingEscalation,
     PostingReceipt,
     ProfileChangeProposal,
@@ -1796,12 +1799,18 @@ class InvoiceService:
 
     def payable_position(self, invoice_id: str) -> PayablePosition:
         """One invoice's payable position: its processed total less
-        the credits an approver recorded against it."""
+        the credits an approver recorded against it, with the open
+        recovery claims tied to the invoice as their own line —
+        money owed back to us, never netted into what we owe."""
         store = self._get_store()
         record = store.get(invoice_id)
         if record is None:
             raise KeyError(f"Unknown invoice_id: {invoice_id}")
-        return _payable_position(record, store.list_credit_applications())
+        return _payable_position(
+            record,
+            store.list_credit_applications(),
+            store.list_recovery_packs(),
+        )
 
     def list_credit_applications(
         self, invoice_id: str | None = None
@@ -1889,7 +1898,10 @@ class InvoiceService:
         A pure read over the store (``supplier_positions.py``):
         each row is the sum of its invoices' payable positions,
         so it cannot disagree with ``GET /invoices/{id}/payable``.
-        Nothing is written and no payment state changes."""
+        The recovery packs supply each row's recovery lines —
+        open claims and recorded receipts as their own figures,
+        never netted into the payable. Nothing is written and
+        no payment state changes."""
         store = self._get_store()
         anchor = _parse_date(as_of) if as_of else None
         return _supplier_positions(
@@ -1897,6 +1909,7 @@ class InvoiceService:
             store.list_credit_applications(),
             store.list_reconciliations(),
             as_of=anchor,
+            packs=store.list_recovery_packs(),
         )
 
     def propose_payment_runs(
@@ -2219,7 +2232,12 @@ class InvoiceService:
         return self._get_store().get_recovery_pack(invoice_id)
 
     def transition_recovery_case(
-        self, invoice_id: str, to_status: str, actor: str, note: str = ""
+        self,
+        invoice_id: str,
+        to_status: str,
+        actor: str,
+        note: str = "",
+        amount: float | None = None,
     ) -> RecoveryPack:
         """Walk a recovery case one step forward in its lifecycle
         (opened → supplier_contacted → credit_received → closed).
@@ -2231,6 +2249,15 @@ class InvoiceService:
         received the credit). A blocked pack (guardrails failed) has
         no workable case: its letter may not be sent, so it cannot
         be walked.
+
+        The move into ``credit_received`` is where the receipt
+        becomes a figure: ``amount`` records how much actually
+        landed (omitted, it means the full claim — the common
+        case), validated in code — above zero, never more than
+        claimed. The amount stamps the pack (``received_amount``)
+        and the history event, and it is what the supplier
+        position's recovery line moves by. An amount on any other
+        transition is refused: there is no receipt to record.
         """
         from .schemas import RECOVERY_CASE_FLOW, RecoveryCaseEvent
 
@@ -2265,6 +2292,31 @@ class InvoiceService:
                 f"next step is {expected or 'none (the case is closed)'}, "
                 f"not {to_status}"
             )
+        received: float | None = None
+        if to_status == "credit_received":
+            received = (
+                round(float(amount), 2) if amount is not None else pack.amount
+            )
+            if received <= 0:
+                raise ValueError(
+                    f"A receipt of {received:.2f} records nothing — the "
+                    "amount received must be above zero (omit it to "
+                    "record the full claim)"
+                )
+            if received > pack.amount + 0.005:
+                raise ValueError(
+                    f"Recorded receipt {received:.2f} exceeds the "
+                    f"recovery claim of {pack.amount:.2f} on "
+                    f"{pack.pack_id} — a case cannot receive more than "
+                    "was claimed"
+                )
+            pack.received_amount = received
+        elif amount is not None:
+            raise ValueError(
+                "An amount is recorded only on the move into "
+                f"credit_received — the case for {invoice_id} is "
+                f"moving to {to_status}, where no receipt lands"
+            )
         pack.case_status = to_status
         pack.case_history.append(
             RecoveryCaseEvent(
@@ -2272,6 +2324,7 @@ class InvoiceService:
                 actor=actor,
                 at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 note=note,
+                amount=received,
             )
         )
         store.save_recovery_pack(pack)
@@ -4097,6 +4150,107 @@ class InvoiceService:
     def get_payment_run(self, run_id: str) -> PaymentRun | None:
         return self._get_store().get_payment_run(run_id)
 
+    def payment_run_control_report(
+        self, run_id: str
+    ) -> PaymentRunControlReport:
+        """The control report over one proposed run (controlreport
+        .py): every payment traced to its invoice and match
+        verdict, credits recomputed from the applications ledger,
+        disputed invoices excluded with their reasons, open
+        recovery claims against a line's supplier flagged
+        ACK_REQUIRED, and the run's totals reconciled in code.
+
+        A read model — recomputed from the records on every call,
+        so it always speaks for the claims and disputes as they
+        stand now, not as they stood at proposal."""
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        return _build_control_report(
+            run,
+            store.list_records(),
+            store.list_credit_applications(),
+            store.list_recovery_packs(),
+            store.list_reconciliations(),
+        )
+
+    def acknowledge_run_recovery(
+        self, run_id: str, invoice_id: str, actor: str
+    ) -> PaymentRun:
+        """Record a named approver's recovery acknowledgement for
+        one flagged payment line of a run.
+
+        The acknowledgement is written against the control report
+        as it stands now: the line must currently be flagged
+        ACK_REQUIRED (an open recovery claim against its supplier,
+        unacknowledged) — acknowledging a line with nothing to
+        acknowledge is refused, as is a second acknowledgement of
+        the same line. The claims acknowledged (pack ids + the
+        open total) are stamped on the record, so the run shows
+        what was seen, not merely that something was clicked.
+        Confirmation is what the acknowledgement unlocks; it is
+        recorded before it, never after."""
+        store = self._get_store()
+        run = store.get_payment_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id} (propose it first)")
+        if run.status == "confirmed":
+            raise ValueError(
+                f"Payment run {run_id} is already confirmed — a "
+                "recovery acknowledgement is recorded before "
+                "confirmation, as part of the decision it gates"
+            )
+        report = _build_control_report(
+            run,
+            store.list_records(),
+            store.list_credit_applications(),
+            store.list_recovery_packs(),
+            store.list_reconciliations(),
+        )
+        line = next(
+            (l for l in report.lines if l.invoice_id == invoice_id), None
+        )
+        if line is None:
+            raise ValueError(
+                f"Invoice {invoice_id} is not a member of payment "
+                f"run {run_id} — there is no payment line to "
+                "acknowledge"
+            )
+        if line.acknowledged_by:
+            raise ValueError(
+                f"The recovery claims against {line.supplier_name} "
+                f"on {invoice_id} were already acknowledged by "
+                f"{line.acknowledged_by} — an acknowledgement is "
+                "recorded once"
+            )
+        if not line.ack_required:
+            raise ValueError(
+                f"Payment line {invoice_id} carries no open "
+                "recovery claim to acknowledge"
+                + (
+                    " — the line is excluded from the run's "
+                    "payable total, so it needs no acknowledgement"
+                    if line.excluded
+                    else f" ({line.supplier_name} has no open "
+                    "recovery claim in this run's currency)"
+                )
+            )
+        run.recovery_acknowledgements.append(
+            PaymentRunRecoveryAck(
+                invoice_id=line.invoice_id,
+                supplier_name=line.supplier_name,
+                pack_ids=[c.pack_id for c in line.recovery_claims],
+                claimed_amount=line.recovery_claimed_amount,
+                acknowledged_by=actor,
+                acknowledged_at=datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            )
+        )
+        store.save_payment_run(run)
+        return run
+
     def confirm_payment_run(self, run_id: str, actor: str) -> PaymentRun:
         """Record a finance lead's confirmation of a proposed run.
 
@@ -4126,6 +4280,34 @@ class InvoiceService:
             raise ValueError(
                 f"Payment run {run_id} was already confirmed by "
                 f"{run.confirmed_by}"
+            )
+        # The recovery gate: a payment to a supplier with an open
+        # recovery claim needs a recorded acknowledgement first
+        # (the control report is the approver's view of exactly
+        # this). Recomputed here, at decision time — a claim that
+        # opened after proposal still gates the confirmation.
+        report = _build_control_report(
+            run,
+            store.list_records(),
+            store.list_credit_applications(),
+            store.list_recovery_packs(),
+            store.list_reconciliations(),
+        )
+        outstanding = [l for l in report.lines if l.ack_required]
+        if outstanding:
+            named = "; ".join(
+                f"{l.invoice_id} pays {l.supplier_name}, who has "
+                f"{run.currency} {l.recovery_claimed_amount:.2f} of "
+                "open recovery claims"
+                for l in outstanding
+            )
+            raise ValueError(
+                f"Payment run {run_id} cannot be confirmed yet: "
+                f"{named}. Paying a supplier who owes us a recovery "
+                "needs a named approver's acknowledgement on the "
+                "run first (POST "
+                f"/payment-runs/{run_id}/recovery-acknowledgements "
+                "per line, or the console's control report)"
             )
         run.status = "confirmed"
         run.confirmed_by = actor

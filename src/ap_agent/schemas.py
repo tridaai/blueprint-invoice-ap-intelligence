@@ -881,11 +881,38 @@ class CreditNoteApplyRequest(BaseModel):
     actor: str = ""
 
 
+class RecoveryClaim(BaseModel):
+    """One duplicate-payment recovery case as the money views show
+    it: the amount claimed back from the supplier, what has been
+    recorded received against it, and what is still outstanding —
+    with the case status and the computed duplicate evidence the
+    claim rests on. A claim is a separate line in every money view,
+    never netted into what we owe: the supplier owing us money back
+    does not shrink a payable, it stands beside it until the money
+    (or the closing credit) actually lands and is recorded."""
+
+    pack_id: str
+    supplier_name: str = ""
+    currency: str = "USD"
+    invoice_number: str = ""  # the duplicated supplier invoice number
+    duplicate_invoice_id: str = ""
+    original_invoice_id: str = ""
+    case_status: str = "opened"  # opened | supplier_contacted | credit_received | closed
+    exposure_status: str = ""  # twin_approved | both_approved
+    amount_claimed: float = 0.0
+    amount_received: float = 0.0  # recorded when the case reached credit_received
+    amount_outstanding: float = 0.0  # claimed − received, while the case is open
+    evidence: list[str] = Field(default_factory=list)
+    created_at: str = ""
+
+
 class PayablePosition(BaseModel):
     """What an invoice still owes, computed in code: its processed
     total less the credits an approver recorded against it. This is
     the figure payment proposals net from — never a document's own
-    claim."""
+    claim. Open recovery claims tied to the invoice (it is the
+    duplicate, or the approved original a duplicate was taken of)
+    ride as their own line: they never reduce ``open_amount``."""
 
     invoice_id: str
     invoice_number: str = ""
@@ -895,6 +922,8 @@ class PayablePosition(BaseModel):
     credits: list[CreditApplication] = Field(default_factory=list)
     total_credits: float = 0.0
     open_amount: float = 0.0
+    recovery_claims: list[RecoveryClaim] = Field(default_factory=list)
+    recovery_open_amount: float = 0.0  # still owed back to us on those claims
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1096,15 @@ class SupplierPosition(BaseModel):
     oldest_open_invoice_id: str = ""
     oldest_open_invoice_number: str = ""
     oldest_open_age_days: Optional[int] = None
+    # The recovery side of the position, kept apart from the
+    # payable figures on purpose: open duplicate-payment claims
+    # against this supplier (their own line, never netted into
+    # open_amount) and the total recorded received against the
+    # supplier's claims — the case history on the packs is the
+    # record both figures are summed from.
+    recovery_claims: list[RecoveryClaim] = Field(default_factory=list)
+    recovery_open_amount: float = 0.0  # claimed and not yet received
+    recovery_received_amount: float = 0.0  # recorded received, all cases
 
 
 class SupplierPositions(BaseModel):
@@ -1471,6 +1509,25 @@ class HandoffGroupReexport(BaseModel):
     drift_total: float = 0.0
 
 
+class PaymentRunRecoveryAck(BaseModel):
+    """One approver acknowledgement on a payment run: the named
+    approver saw that this payment goes to a supplier with open
+    recovery claims — money that supplier owes us back — and
+    accepted paying anyway. Recorded per payment line, against
+    the claims open at acknowledgement time (pack ids + the total
+    claimed), because the control report's gate is per line: a
+    run is confirmable only when every flagged line carries one.
+    An acknowledgement moves no money and settles no claim; it is
+    the record that the conflict was seen by a named human."""
+
+    invoice_id: str
+    supplier_name: str = ""
+    pack_ids: list[str] = Field(default_factory=list)
+    claimed_amount: float = 0.0  # open claimed total acknowledged
+    acknowledged_by: str = ""
+    acknowledged_at: str = ""  # ISO timestamp
+
+
 class PaymentRun(BaseModel):
     """A proposed payment run: approved invoices grouped by currency
     and due window, totals computed in code. The run is a draft
@@ -1592,11 +1649,100 @@ class PaymentRun(BaseModel):
     # master holds no approved bank details for them — flagged
     # when the run is proposed, not discovered at import.
     handoff_profile_flags: list[str] = Field(default_factory=list)
+    # Recovery acknowledgements recorded against this run's
+    # flagged payment lines (see PaymentRunRecoveryAck): the
+    # control report's gate — confirmation refuses while any
+    # line the report marks ACK_REQUIRED carries none.
+    recovery_acknowledgements: list[PaymentRunRecoveryAck] = Field(
+        default_factory=list
+    )
 
 
 class PaymentRunRequest(BaseModel):
     window_days: int = 7
     as_of: str = ""  # ISO date the windows are anchored on; "" = today
+
+
+class RecoveryAckRequest(BaseModel):
+    """Record an approver's recovery acknowledgement for one
+    payment line of a run: the line's invoice plus the named
+    approver (the gate idiom — an unattributed acknowledgement
+    is refused)."""
+
+    invoice_id: str
+    actor: Optional[str] = None
+    approver: Optional[str] = None
+    reviewer: Optional[str] = None
+
+    def actor_name(self) -> Optional[str]:
+        return self.actor or self.approver or self.reviewer
+
+
+class PaymentRunControlLine(BaseModel):
+    """One proposed payment, traced: the invoice and its stored
+    match verdict, its gross, the credits the applications ledger
+    holds against it (recomputed — the run line's own stamped
+    credit rides beside it and a disagreement is named, never
+    smoothed over), its discount, and its net re-derived in code.
+
+    Two flags can land on a line. ``excluded``: the invoice is in
+    dispute on the supplier's latest reconciliation (an amount
+    difference) — it leaves the payable totals, with the reason
+    named. ``ack_required``: the supplier has open recovery
+    claims in the run's currency — the payment may proceed only
+    once a named approver has acknowledged the claims on the run
+    (``acknowledged_by`` then names them)."""
+
+    invoice_id: str
+    invoice_number: str = ""
+    supplier_name: str = ""
+    due_date: str = ""
+    record_status: str = ""  # the invoice's gate status at report time
+    match_status: str = ""  # the stored three-way match verdict
+    triage_outcome: str = ""
+    gross_amount: float = 0.0
+    discount_amount: float = 0.0
+    credit_amount: float = 0.0  # from the applications ledger, recomputed
+    line_credit_amount: float = 0.0  # the credit the run line stamped
+    credits_agree: bool = True
+    net_amount: float = 0.0  # gross − discount − ledger credits, floored
+    recovery_claims: list[RecoveryClaim] = Field(default_factory=list)
+    recovery_claimed_amount: float = 0.0  # open claimed vs the supplier
+    ack_required: bool = False
+    acknowledged_by: str = ""
+    excluded: bool = False
+    exclusion_reason: str = ""
+
+
+class PaymentRunControlReport(BaseModel):
+    """The control report over one proposed payment run — what
+    the approver reads before confirming. Every figure is
+    recomputed from the records at read time (the report is a
+    read model; it is never stored), the payable totals cover
+    the non-excluded lines only, and the totals reconciliation
+    says plainly whether the lines still add up to the totals
+    stamped on the run — a disagreement is reported, never
+    forced into agreement."""
+
+    run_id: str
+    currency: str = "USD"
+    run_status: str = ""  # the run's status at report time
+    lines: list[PaymentRunControlLine] = Field(default_factory=list)
+    payable_count: int = 0
+    excluded_count: int = 0
+    ack_required_count: int = 0  # flagged lines still unacknowledged
+    total_gross: float = 0.0  # payable lines only
+    total_discount: float = 0.0
+    total_credit: float = 0.0
+    total_net: float = 0.0  # what confirming this run would pay
+    excluded_net: float = 0.0  # net held back on excluded lines
+    lines_net_total: float = 0.0  # every line's net, excluded included
+    run_total_gross: float = 0.0  # as stamped on the run at proposal
+    run_total_net: float = 0.0
+    totals_agree: bool = True
+    totals_note: str = ""
+    acknowledgements: list[PaymentRunRecoveryAck] = Field(default_factory=list)
+    summary: str = ""
 
 
 class HandoffProfileEvent(BaseModel):
@@ -2399,6 +2545,10 @@ class RecoveryCaseEvent(BaseModel):
     actor: str = ""
     at: str = ""  # ISO timestamp
     note: str = ""
+    # The amount recorded received — set only on the transition
+    # into credit_received, where it is the figure the supplier
+    # position's recovery line moves by.
+    amount: Optional[float] = None
 
 
 # The recovery-case lifecycle, in order. A case opens when its pack
@@ -2456,6 +2606,12 @@ class RecoveryPack(BaseModel):
     # ``case_history`` is the audit trail of those transitions.
     case_status: str = "opened"
     case_history: list[RecoveryCaseEvent] = Field(default_factory=list)
+    # The amount the operator recorded as received when the case
+    # reached credit_received (0 until then). The claim's
+    # outstanding figure everywhere is amount − received_amount;
+    # a partial receipt leaves the remainder outstanding until
+    # the case closes.
+    received_amount: float = 0.0
     # SLA-breach escalations fired for this case (see
     # RecoveryEscalation): the webhook ledger, deduped per status
     # crossing. Empty until a sweep finds the case breached.
@@ -2470,6 +2626,9 @@ class RecoveryTransitionRequest(BaseModel):
     approver: Optional[str] = None
     reviewer: Optional[str] = None
     note: Optional[str] = None
+    # The amount received — recorded only on the move into
+    # credit_received; omitted there it means the full claim.
+    amount: Optional[float] = None
 
     def actor_name(self) -> Optional[str]:
         return self.actor or self.approver or self.reviewer

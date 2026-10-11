@@ -39,6 +39,7 @@ from .schemas import (
     CreditNoteInput,
     CreditNoteMatch,
     PayablePosition,
+    RecoveryPack,
 )
 from .store import ApprovalRecord
 
@@ -208,17 +209,25 @@ def evaluate_credit_note(
 
 
 def payable_position(
-    record: ApprovalRecord, applied: list[CreditApplication]
+    record: ApprovalRecord,
+    applied: list[CreditApplication],
+    packs: list[RecoveryPack] | None = None,
 ) -> PayablePosition:
     """One invoice's payable position: its processed total less the
     credits recorded against it. Computed, never narrated — this is
-    the figure payment proposals net from."""
+    the figure payment proposals net from. Open recovery claims
+    tied to the invoice ride as their own line (``packs`` — the
+    store's recovery packs): they are money owed *back to us* and
+    never reduce the open amount."""
+    from .recovery import open_claims_for_invoice
+
     invoice = record.invoice or {}
     gross = round(float(invoice.get("total_amount") or 0.0), 2)
     credits = [
         a for a in applied if a.invoice_id == record.result.invoice_id
     ]
     total_credits = round(sum(a.amount for a in credits), 2)
+    claims = open_claims_for_invoice(packs or [], record.result.invoice_id)
     return PayablePosition(
         invoice_id=record.result.invoice_id,
         invoice_number=str(invoice.get("invoice_number", "")),
@@ -229,4 +238,8 @@ def payable_position(
         credits=credits,
         total_credits=total_credits,
         open_amount=round(max(0.0, gross - total_credits), 2),
+        recovery_claims=claims,
+        recovery_open_amount=round(
+            sum(c.amount_outstanding for c in claims), 2
+        ),
     )

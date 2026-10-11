@@ -76,6 +76,7 @@ from .schemas import (
     MarkerWorklist,
     OpenPostingItem,
     PaymentRun,
+    PaymentRunControlReport,
     PostingReceiptRequest,
     ProfileChangeProposal,
     ProfileProposalDecisionRequest,
@@ -83,6 +84,7 @@ from .schemas import (
     PaymentRunRequest,
     DocumentInput,
     QueueView,
+    RecoveryAckRequest,
     RecoveryPack,
     RecoveryTransitionRequest,
     StatementReconciliation,
@@ -632,6 +634,37 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/payment-runs/{run_id}/control-report", response_model=PaymentRunControlReport, dependencies=_AUTH)
+    def payment_run_control_report(run_id: str) -> PaymentRunControlReport:
+        """The control report over a proposed run: every payment
+        traced to its invoice and match verdict, credits recomputed
+        from the applications ledger, disputed invoices excluded
+        with their reasons, open recovery claims against a line's
+        supplier flagged ACK_REQUIRED, run totals reconciled in
+        code. Read-only — recomputed on every call."""
+        try:
+            return svc.payment_run_control_report(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/payment-runs/{run_id}/recovery-acknowledgements", response_model=PaymentRun, dependencies=_AUTH)
+    def acknowledge_run_recovery(run_id: str, request: RecoveryAckRequest) -> PaymentRun:
+        """Record a named approver's acknowledgement that one
+        payment line goes to a supplier with open recovery claims.
+        Confirmation refuses while any flagged line carries none —
+        the acknowledgement is the gate's key, recorded on the run
+        with the claims it saw."""
+        try:
+            return svc.acknowledge_run_recovery(
+                run_id,
+                invoice_id=request.invoice_id,
+                actor=_decision_actor(request),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/handoff/profiles", response_model=list[HandoffProfile], dependencies=_AUTH)
     def list_handoff_profiles() -> list[HandoffProfile]:
         """The governed hand-off routing profiles in force: per
@@ -985,13 +1018,17 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         """Walk the recovery case one step forward (opened →
         supplier_contacted → credit_received → closed). The operator
         records work done outside the system; the transition joins
-        the case's audit history on the pack record."""
+        the case's audit history on the pack record. The move into
+        credit_received carries the amount received (omitted = the
+        full claim), which is what the supplier position's recovery
+        line moves by."""
         try:
             return svc.transition_recovery_case(
                 invoice_id,
                 to_status=request.to_status,
                 actor=_decision_actor(request),
                 note=request.note or "",
+                amount=request.amount,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

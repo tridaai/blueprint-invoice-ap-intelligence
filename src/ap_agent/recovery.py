@@ -31,7 +31,13 @@ from datetime import datetime, timezone
 
 from .guardrails import validate_drafts
 from .matching import format_match_summary
-from .schemas import Drafts, InvoiceInput, RecoveryCaseEvent, RecoveryPack
+from .schemas import (
+    Drafts,
+    InvoiceInput,
+    RecoveryCaseEvent,
+    RecoveryClaim,
+    RecoveryPack,
+)
 from .store import ApprovalRecord
 from .verify import verify_drafts
 
@@ -243,3 +249,105 @@ def build_recovery_pack(
             )
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# The claim as the money views read it
+# ---------------------------------------------------------------------------
+
+# A claim is money-owed-back while its case is unclosed and any of
+# the claimed amount is still unreceived; half a cent of rounding
+# is not a claim.
+_CLAIM_TOLERANCE = 0.005
+
+
+def claim_outstanding(pack: RecoveryPack) -> float:
+    """What one case is still owed back: claimed less recorded
+    received, never below zero."""
+    return round(max(0.0, pack.amount - pack.received_amount), 2)
+
+
+def is_open_claim(pack: RecoveryPack) -> bool:
+    """Whether a pack stands as an open claim in the money views.
+    A guardrail-blocked pack has no workable case — its letter may
+    not be sent, so it claims nothing yet; a closed case claims
+    nothing further, whatever its remainder (closing is the
+    operator's word that the chase is over)."""
+    return (
+        pack.status == "ready"
+        and pack.case_status != "closed"
+        and claim_outstanding(pack) > _CLAIM_TOLERANCE
+    )
+
+
+def recovery_claim(pack: RecoveryPack) -> RecoveryClaim:
+    """The claim summary for one pack: figures recomputed from the
+    pack record, the computed evidence carried with it."""
+    return RecoveryClaim(
+        pack_id=pack.pack_id,
+        supplier_name=pack.supplier_name,
+        currency=pack.currency,
+        invoice_number=pack.invoice_number,
+        duplicate_invoice_id=pack.duplicate_invoice_id,
+        original_invoice_id=pack.original_invoice_id,
+        case_status=pack.case_status,
+        exposure_status=pack.exposure_status,
+        amount_claimed=round(float(pack.amount), 2),
+        amount_received=round(float(pack.received_amount), 2),
+        amount_outstanding=claim_outstanding(pack),
+        evidence=list(pack.evidence),
+        created_at=pack.created_at,
+    )
+
+
+def open_claims_for_supplier(
+    packs: list[RecoveryPack], supplier_name: str, currency: str
+) -> list[RecoveryClaim]:
+    """The open claims against one supplier in one currency — the
+    supplier roll-up's and the control report's recovery line.
+    Figures never cross currencies, here as everywhere."""
+    return [
+        recovery_claim(pack)
+        for pack in packs
+        if pack.supplier_name == supplier_name
+        and pack.currency == currency
+        and is_open_claim(pack)
+    ]
+
+
+def open_claims_for_invoice(
+    packs: list[RecoveryPack], invoice_id: str
+) -> list[RecoveryClaim]:
+    """The open claims tied to one invoice: it is the duplicate a
+    pack was drafted on, or the approved original the duplicate
+    was taken of — the per-invoice payable position's line."""
+    return [
+        recovery_claim(pack)
+        for pack in packs
+        if invoice_id in (pack.duplicate_invoice_id, pack.original_invoice_id)
+        and is_open_claim(pack)
+    ]
+
+
+def recovery_totals(
+    packs: list[RecoveryPack], supplier_name: str, currency: str
+) -> tuple[float, float]:
+    """(Open claimed, recorded received) for one supplier in one
+    currency, summed over its workable cases. Received counts
+    every recorded receipt — open cases included (a partial
+    receipt is received money while its remainder stays open);
+    closed cases contribute what they received and nothing open.
+    Blocked packs contribute neither: no case, no claim."""
+    open_amount = 0.0
+    received = 0.0
+    for pack in packs:
+        if (
+            pack.supplier_name != supplier_name
+            or pack.currency != currency
+            or pack.status != "ready"
+        ):
+            continue
+        received += float(pack.received_amount)
+        if is_open_claim(pack):
+            open_amount += claim_outstanding(pack)
+    return round(open_amount, 2), round(received, 2)
