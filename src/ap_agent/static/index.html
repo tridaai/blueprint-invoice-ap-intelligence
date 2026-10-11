@@ -121,7 +121,7 @@
     <div class="gate">
       <button id="propose">Propose payment run</button>
       <input type="text" id="lead" placeholder="Finance lead (for confirm)" size="22">
-      <span class="note" id="paynote">Groups the approved invoices by currency + due window. Confirming records the lead's acceptance; the AP system of record executes the run. A run above the four-eyes threshold also needs a second, different confirmer before its hand-off file can be generated.</span>
+      <span class="note" id="paynote">Groups the approved invoices by currency + due window. Confirming records the lead's acceptance; the AP system of record executes the run. A run above the four-eyes threshold also needs a second, different confirmer before its hand-off file can be generated. Every run has a control report: disputed invoices are excluded from its payable totals, and a payment to a supplier with an open recovery claim cannot be confirmed until a named approver acknowledges the claim on the run.</span>
     </div>
     <div id="payrunsbody"></div>
   </section>
@@ -153,7 +153,7 @@
     <h2>Supplier positions (what we still owe, per supplier — read-only)</h2>
     <div class="gate">
       <button id="loadpositions" class="secondary">Load supplier positions</button>
-      <span class="note" id="posnote">One row per supplier per currency: gross invoiced, credits an approver recorded, the open payable — each row the sum of its invoices' payable positions — plus the amount in dispute from the supplier's latest reconciliation and the oldest open invoice's age. Figures never sum across currencies, and loading this changes nothing.</span>
+      <span class="note" id="posnote">One row per supplier per currency: gross invoiced, credits an approver recorded, the open payable — each row the sum of its invoices' payable positions — plus the amount in dispute from the supplier's latest reconciliation, the oldest open invoice's age, and the recovery side as its own line: open duplicate-payment claims against the supplier and what has been recorded received. Claims are never netted into the payable. Figures never sum across currencies, and loading this changes nothing.</span>
     </div>
     <div id="posbody"></div>
   </section>
@@ -542,8 +542,11 @@ function renderRuns(runs) {
     ${(run.drift_forecast || []).map(f => `<p class="note" style="margin:2px 0">${pill("drift forecast", "warn")} ${esc(f.invoice_id)} — ${esc(f.message)}</p>`).join("")}
     ${groupReceiptLines(run)}
     <table><tr><th>Invoice</th><th>Supplier</th><th>Due</th><th>Gross</th><th>Discount</th><th>Net</th></tr>
-    ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
+    ${run.lines.map(l => `<tr><td>${esc(l.invoice_id)}</td><td>${esc(l.supplier_name)}</td><td>${esc(l.due_date || "—")}</td><td>${l.gross_amount}</td><td>${l.discount_amount || "—"}</td><td>${l.net_amount}</td></tr>`).join("")}</table>
+    <p style="margin:6px 0"><button class="secondary" data-control="${esc(run.run_id)}">Control report</button> <span class="note">the approver's pre-confirmation read: every payment traced, credits from the ledger, disputed invoices excluded, recovery claims flagged — confirmation refuses while a flagged line is unacknowledged.</span></p>
+    <div id="ctrl-${esc(run.run_id)}"></div>`).join("") : `<p class="kv">No payment runs yet — approve some invoices, then propose.</p>`;
   document.querySelectorAll("[data-confirm]").forEach(btn => btn.onclick = () => confirmRun(btn.dataset.confirm));
+  document.querySelectorAll("[data-control]").forEach(btn => btn.onclick = () => loadControlReport(btn.dataset.control));
   document.querySelectorAll("[data-second]").forEach(btn => btn.onclick = () => confirmSecond(btn.dataset.second));
   document.querySelectorAll("[data-handoff]").forEach(btn => btn.onclick = () => exportHandoff(btn.dataset.handoff, btn.dataset.format));
   document.querySelectorAll("[data-download]").forEach(btn => btn.onclick = () => downloadHandoff(btn.dataset.download, btn.dataset.format));
@@ -652,6 +655,35 @@ async function loadRuns() {
   const res = await fetch("/payment-runs", {headers: headers()});
   if (!res.ok) return;
   renderRuns(await res.json());
+}
+async function loadControlReport(runId) {
+  const res = await fetch(`/payment-runs/${runId}/control-report`, {headers: headers()});
+  const body = await res.json();
+  const host = $("ctrl-" + runId);
+  if (!host) return;
+  if (!res.ok) { host.innerHTML = `<p class="note">Control report failed (${res.status}): ${esc(body.detail || "")}</p>`; return; }
+  const rows = body.lines.map(l => {
+    const flags = [];
+    if (l.excluded) flags.push(pill("EXCLUDED", "bad") + ` <span class="note">${esc(l.exclusion_reason)}</span>`);
+    if (l.ack_required) flags.push(pill("ACK_REQUIRED", "warn") + ` <span class="note">${esc(body.currency)} ${fmt(l.recovery_claimed_amount)} of open recovery claims (${(l.recovery_claims || []).map(c => esc(c.pack_id)).join(", ")}) — paying this supplier needs a named acknowledgement</span> <button class="secondary" data-ack="${esc(runId)}|${esc(l.invoice_id)}">Acknowledge</button>`);
+    if (l.acknowledged_by) flags.push(pill("recovery acknowledged by " + l.acknowledged_by, "ok"));
+    if (!l.credits_agree) flags.push(pill("credits moved since proposal", "warn") + ` <span class="note">line stamped ${fmt(l.line_credit_amount)}, ledger holds ${fmt(l.credit_amount)} — the ledger figure is netted</span>`);
+    (l.recovery_claims || []).forEach(c => flags.push(`<span class="note">claim ${esc(c.pack_id)}: ${esc(c.invoice_number)} duplicated — ${fmt(c.amount_claimed)} claimed, ${fmt(c.amount_received)} received, ${fmt(c.amount_outstanding)} outstanding (${esc(c.case_status)})</span>`));
+    return `<tr><td>${esc(l.invoice_id)}<br><span class="note">${esc(l.invoice_number || "")}</span></td><td>${esc(l.supplier_name)}</td><td>${esc(l.match_status || "—")}<br><span class="note">${esc(l.record_status || "")}</span></td><td>${fmt(l.gross_amount)}</td><td>${l.discount_amount ? fmt(l.discount_amount) : "—"}</td><td>${l.credit_amount ? fmt(l.credit_amount) : "—"}</td><td><b>${fmt(l.net_amount)}</b></td><td>${flags.join("<br>") || "—"}</td></tr>`;
+  }).join("");
+  host.innerHTML = `<p class="kv" style="margin-top:8px"><b>Control report</b> · ${esc(body.summary)}<br>Payable totals (${body.payable_count} line(s)): gross ${fmt(body.total_gross)} · discounts ${fmt(body.total_discount)} · credits ${fmt(body.total_credit)} · <b>net ${fmt(body.total_net)} ${esc(body.currency)}</b>${body.excluded_count ? ` · excluded ${fmt(body.excluded_net)} held back` : ""} · run stamps: gross ${fmt(body.run_total_gross)} / net ${fmt(body.run_total_net)} · ${body.totals_agree ? pill("totals agree", "ok") : pill("totals do not add up", "bad")}</p>${body.totals_note ? `<p class="note" style="margin:2px 0">${esc(body.totals_note)}</p>` : ""}<table><tr><th>Invoice</th><th>Supplier</th><th>Match</th><th>Gross</th><th>Discount</th><th>Credits</th><th>Net</th><th>Control flags</th></tr>${rows}</table>`;
+  host.querySelectorAll("[data-ack]").forEach(btn => btn.onclick = () => ackRecovery(btn.dataset.ack));
+}
+async function ackRecovery(key) {
+  const [runId, invoiceId] = key.split("|");
+  const actor = $("lead").value.trim();
+  if (!actor) { $("paynote").textContent = "Enter the finance lead's name first — an acknowledgement is a named approver's decision."; return; }
+  const res = await fetch(`/payment-runs/${runId}/recovery-acknowledgements`, {method: "POST", headers: headers(), body: JSON.stringify({invoice_id: invoiceId, actor})});
+  const body = await res.json();
+  if (!res.ok) { $("paynote").textContent = `Acknowledgement refused (${res.status}): ${body.detail || ""}`; return; }
+  const ack = (body.recovery_acknowledgements || []).filter(a => a.invoice_id === invoiceId).pop();
+  $("paynote").textContent = `Recovery claims on ${invoiceId} acknowledged by ${actor} (${body.currency} ${ack ? ack.claimed_amount : ""} claimed under ${(ack ? ack.pack_ids : []).join(", ")}) — recorded on run ${runId}. The acknowledgement settles nothing; the claim stays open until the money lands.`;
+  loadControlReport(runId);
 }
 async function confirmRun(runId) {
   const actor = $("lead").value.trim();
@@ -1044,10 +1076,10 @@ async function loadPositions() {
   const res = await fetch("/suppliers/positions", {headers: headers()});
   if (!res.ok) { $("posnote").textContent = `Positions failed to load (${res.status}).`; return; }
   const body = await res.json();
-  const rows = (body.suppliers || []).map(s => `<tr><td>${esc(s.supplier_name)}</td><td>${esc(s.currency)}</td><td>${s.invoice_count} (${s.open_invoice_count} open)</td><td>${fmt(s.gross_invoiced)}</td><td>${fmt(s.credits_applied)}</td><td><b>${fmt(s.open_amount)}</b></td><td>${s.disputed_amount > 0 ? `${pill(fmt(s.disputed_amount), "bad")}<br><span class="note">${(s.disputed_invoice_numbers || []).map(esc).join(", ")} — per ${esc(s.dispute_statement_id)}</span>` : "—"}</td><td>${s.oldest_open_invoice_number ? `${esc(s.oldest_open_invoice_number)} · ${s.oldest_open_age_days} days` : "—"}</td></tr>`).join("");
-  const totals = Object.entries(body.totals_by_currency || {}).map(([cur, t]) => `${cur}: open ${fmt(t.open_amount)} of ${fmt(t.gross_invoiced)} gross, ${fmt(t.credits_applied)} credited, ${fmt(t.disputed_amount)} in dispute`).join(" · ");
+  const rows = (body.suppliers || []).map(s => `<tr><td>${esc(s.supplier_name)}</td><td>${esc(s.currency)}</td><td>${s.invoice_count} (${s.open_invoice_count} open)</td><td>${fmt(s.gross_invoiced)}</td><td>${fmt(s.credits_applied)}</td><td><b>${fmt(s.open_amount)}</b></td><td>${s.disputed_amount > 0 ? `${pill(fmt(s.disputed_amount), "bad")}<br><span class="note">${(s.disputed_invoice_numbers || []).map(esc).join(", ")} — per ${esc(s.dispute_statement_id)}</span>` : "—"}</td><td>${s.recovery_open_amount > 0 ? `${pill(fmt(s.recovery_open_amount) + " claimed", "warn")}<br><span class="note">${(s.recovery_claims || []).map(c => esc(c.pack_id) + " · " + esc(c.case_status) + " · " + fmt(c.amount_outstanding) + " outstanding").join("<br>")}${s.recovery_received_amount > 0 ? `<br>${fmt(s.recovery_received_amount)} received so far` : ""}</span>` : (s.recovery_received_amount > 0 ? `${fmt(s.recovery_received_amount)} received` : "—")}</td><td>${s.oldest_open_invoice_number ? `${esc(s.oldest_open_invoice_number)} · ${s.oldest_open_age_days} days` : "—"}</td></tr>`).join("");
+  const totals = Object.entries(body.totals_by_currency || {}).map(([cur, t]) => `${cur}: open ${fmt(t.open_amount)} of ${fmt(t.gross_invoiced)} gross, ${fmt(t.credits_applied)} credited, ${fmt(t.disputed_amount)} in dispute${t.recovery_open_amount ? `, ${fmt(t.recovery_open_amount)} recovery claimed (${fmt(t.recovery_received_amount || 0)} received)` : ""}`).join(" · ");
   $("posbody").innerHTML = rows
-    ? `<p class="kv" style="margin-top:10px">As of ${esc(body.as_of)} · ${body.supplier_count} supplier(s)${totals ? `<br>${esc(totals)}` : ""}</p><table><tr><th>Supplier</th><th>Currency</th><th>Invoices</th><th>Gross</th><th>Credits</th><th>Open</th><th>In dispute</th><th>Oldest open</th></tr>${rows}</table>`
+    ? `<p class="kv" style="margin-top:10px">As of ${esc(body.as_of)} · ${body.supplier_count} supplier(s)${totals ? `<br>${esc(totals)}` : ""}</p><table><tr><th>Supplier</th><th>Currency</th><th>Invoices</th><th>Gross</th><th>Credits</th><th>Open</th><th>In dispute</th><th>Recovery (owed to us)</th><th>Oldest open</th></tr>${rows}</table>`
     : `<p class="kv" style="margin-top:10px">No processed invoices yet — the roll-up is empty.</p>`;
 }
 $("loadpositions").onclick = loadPositions;
