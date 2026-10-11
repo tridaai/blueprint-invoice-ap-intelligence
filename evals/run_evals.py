@@ -7,8 +7,12 @@ original invoice was analysed earlier in the same run, exactly like a
 real AP queue. Reports triage outcome accuracy and match-status
 accuracy, then matches the bundled sample credit notes against the
 populated store (a credit note only settles because its invoice was
-processed earlier in the run). All cases are synthetic. Run from the
-repo root:
+processed earlier in the run), and reconciles the bundled sample
+supplier statements against a dedicated store with exact per-statement
+expectations — matched / differs / missing / duplicate counts, the
+recomputed totals, the statement's own claimed total checked against
+them, and the drafted supplier query. All cases are synthetic. Run
+from the repo root:
 
     python evals/run_evals.py
 
@@ -25,8 +29,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ap_agent.samples import load_sample_credit_notes, load_sample_invoices  # noqa: E402
-from ap_agent.schemas import CreditNoteInput, InvoiceInput  # noqa: E402
+from ap_agent.samples import (  # noqa: E402
+    load_sample_credit_notes,
+    load_sample_invoices,
+    load_sample_statements,
+)
+from ap_agent.schemas import CreditNoteInput, InvoiceInput, SupplierStatement  # noqa: E402
 from ap_agent.service import InvoiceService  # noqa: E402
 from ap_agent.store import InMemoryStore  # noqa: E402
 
@@ -43,6 +51,72 @@ EXPECTED_CREDIT_NOTES = {
         "status": "settles_variance",
         "settles_variance": True,
         "overbilled_amount": 94.40,
+    },
+    "CN-3002": {
+        "matched_invoice_id": "INV-1003",
+        "status": "partial_settlement",
+        "settles_variance": False,
+        "overbilled_amount": 141.60,
+    },
+    "CN-3003": {
+        "matched_invoice_id": "INV-1002",
+        "status": "exceeds_variance",
+        "settles_variance": False,
+        "overbilled_amount": 94.40,
+    },
+    "CN-3004": {
+        "matched_invoice_id": "",
+        "status": "unmatched",
+        "settles_variance": False,
+        "overbilled_amount": 0.0,
+    },
+    "CN-3005": {
+        "matched_invoice_id": "INV-1001",
+        "status": "no_variance",
+        "settles_variance": False,
+        "overbilled_amount": 0.0,
+    },
+}
+
+# Statement reconciliation expectations, checked against a dedicated
+# store holding INV-1001 + INV-1008 (Northbeam), INV-1002 (Cascade)
+# and INV-1007 (Alpen). STMT-NB mixes a match, an amount difference
+# and a never-processed line, and its printed total disagrees with
+# its own lines; STMT-AW is fully clean; STMT-CI lists one invoice
+# twice, which the duplicate screen must flag.
+EXPECTED_RECONCILIATIONS = {
+    "STMT-NB-2026-10": {
+        "matched_count": 1,
+        "differs_count": 1,
+        "missing_from_ap_count": 1,
+        "missing_from_statement_count": 0,
+        "duplicate_count": 0,
+        "statement_total": 2355.00,
+        "ap_total": 2360.00,
+        "claimed_total_difference": 45.00,
+        "query_draft": True,
+    },
+    "STMT-AW-2026-10": {
+        "matched_count": 1,
+        "differs_count": 0,
+        "missing_from_ap_count": 0,
+        "missing_from_statement_count": 0,
+        "duplicate_count": 0,
+        "statement_total": 357.00,
+        "ap_total": 357.00,
+        "claimed_total_difference": 0.00,
+        "query_draft": False,
+    },
+    "STMT-CI-2026-10": {
+        "matched_count": 2,
+        "differs_count": 0,
+        "missing_from_ap_count": 0,
+        "missing_from_statement_count": 0,
+        "duplicate_count": 1,
+        "statement_total": 2548.80,
+        "ap_total": 1274.40,
+        "claimed_total_difference": 0.00,
+        "query_draft": True,
     },
 }
 
@@ -131,6 +205,43 @@ def evaluate(cases: list[dict]) -> dict:
                 f"credit-note {note.credit_note_id}: expected {expected}, got {got}"
             )
 
+    # Statement reconciliation runs against a dedicated store so the
+    # expectations stay exact whatever the golden cases did to the
+    # main one.
+    reconciliation_total = 0
+    reconciliation_correct = 0
+    recon_service = InvoiceService(store=InMemoryStore(), checkpointer=False)
+    samples_by_id = {s["invoice_id"]: s for s in load_sample_invoices()}
+    for sample_id in ("INV-1001", "INV-1008", "INV-1002", "INV-1007"):
+        recon_service.analyze(
+            InvoiceInput.model_validate(samples_by_id[sample_id])
+        )
+    for payload in load_sample_statements():
+        statement = SupplierStatement.model_validate(payload)
+        expected = EXPECTED_RECONCILIATIONS.get(statement.statement_id)
+        if expected is None:
+            continue
+        reconciliation_total += 1
+        report = recon_service.reconcile_statement(statement)
+        got = {
+            "matched_count": report.matched_count,
+            "differs_count": report.differs_count,
+            "missing_from_ap_count": report.missing_from_ap_count,
+            "missing_from_statement_count": report.missing_from_statement_count,
+            "duplicate_count": report.duplicate_count,
+            "statement_total": report.statement_total,
+            "ap_total": report.ap_total,
+            "claimed_total_difference": report.claimed_total_difference,
+            "query_draft": bool(report.supplier_query_draft),
+        }
+        if got == expected:
+            reconciliation_correct += 1
+        else:
+            failures.append(
+                f"reconciliation {statement.statement_id}: "
+                f"expected {expected}, got {got}"
+            )
+
     # Duplicate-payment recovery: INV-1013 duplicates INV-1001 (the
     # portal resend). Once the original is approved, the recovery
     # pack must draft — evidence computed, guardrails passed.
@@ -171,6 +282,8 @@ def evaluate(cases: list[dict]) -> dict:
         "total": total,
         "credit_note_total": credit_total,
         "credit_note_correct": credit_correct,
+        "reconciliation_total": reconciliation_total,
+        "reconciliation_correct": reconciliation_correct,
         "recovery_total": recovery_total,
         "recovery_correct": recovery_correct,
         "outcome_correct": outcome_correct,
@@ -203,6 +316,7 @@ def main() -> int:
         scored["outcome_accuracy"] >= THRESHOLD
         and scored["match_accuracy"] >= THRESHOLD
         and scored["credit_note_correct"] == scored["credit_note_total"]
+        and scored["reconciliation_correct"] == scored["reconciliation_total"]
         and scored["recovery_correct"] == scored["recovery_total"]
     )
 
@@ -215,6 +329,10 @@ def main() -> int:
             "match_status_match": f"{scored['match_correct']}/{total}",
             "credit_note_match": (
                 f"{scored['credit_note_correct']}/{scored['credit_note_total']}"
+            ),
+            "statement_reconciliation": (
+                f"{scored['reconciliation_correct']}/"
+                f"{scored['reconciliation_total']}"
             ),
             "recovery_pack": (
                 f"{scored['recovery_correct']}/{scored['recovery_total']}"
@@ -250,6 +368,10 @@ def main() -> int:
     print(
         f"Credit-note matching    : {scored['credit_note_correct']}/"
         f"{scored['credit_note_total']}"
+    )
+    print(
+        f"Statement reconciliation: {scored['reconciliation_correct']}/"
+        f"{scored['reconciliation_total']}"
     )
     print(
         f"Recovery pack           : {scored['recovery_correct']}/"
