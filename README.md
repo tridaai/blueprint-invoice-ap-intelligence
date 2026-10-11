@@ -18,6 +18,8 @@ The promises are precise, and enforced in code, not in prompts:
 
 Everything is synthetic data. There is no real supplier, invoice, or bank detail anywhere in this repository.
 
+**Deep-dive:** [Invoice AP Intelligence Blueprint on NVIDIA NIM](https://trida.ai/blog/invoice-ap-intelligence-blueprint-on-nvidia-nim) — how the agent works, where it stops, and what the evals actually prove.
+
 ---
 
 ## Try it in 3 commands
