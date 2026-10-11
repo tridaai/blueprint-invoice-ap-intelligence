@@ -19,12 +19,27 @@ facts — never from the note's own prose:
   clean invoice has no variance to settle.
 
 Matching is a report. It approves nothing, pays nothing, and changes
-no invoice's state — an approver acts on it.
+no invoice's state — an approver acts on it. Acting has its own step:
+an approver records the credit against the invoice (the service's
+``apply_credit_note``), and from then on the invoice's payable
+position — its processed total less recorded credits, computed by
+:func:`payable_position` — is what payment proposals net from.
+Evaluation is application-aware: credits already recorded against
+an invoice reduce the variance a later note can settle, and a note
+that was already recorded reports ``already_applied`` instead of
+settling twice. Two caps are enforced in code on the write path:
+recorded credits never exceed the invoice's remaining computed
+variance, and never exceed its open amount.
 """
 
 from __future__ import annotations
 
-from .schemas import CreditNoteInput, CreditNoteMatch
+from .schemas import (
+    CreditApplication,
+    CreditNoteInput,
+    CreditNoteMatch,
+    PayablePosition,
+)
 from .store import ApprovalRecord
 
 # Settlement tolerance: the larger of a cent or 1% of the variance.
@@ -78,9 +93,17 @@ def overbilled_amount(record: ApprovalRecord) -> tuple[float, list[str]]:
 
 
 def evaluate_credit_note(
-    note: CreditNoteInput, records: list[ApprovalRecord]
+    note: CreditNoteInput,
+    records: list[ApprovalRecord],
+    applied: list[CreditApplication] | None = None,
 ) -> CreditNoteMatch:
-    """Match one credit note against the processed invoice records."""
+    """Match one credit note against the processed invoice records.
+
+    ``applied`` is the store's recorded credit applications: credits
+    already recorded against the matched invoice reduce the variance
+    this note can settle, and a note whose id was already recorded
+    reports ``already_applied``. With no applications the evaluation
+    is exactly the historical one."""
     report = CreditNoteMatch(
         credit_note_id=note.credit_note_id,
         credit_note_number=note.credit_note_number,
@@ -106,6 +129,16 @@ def evaluate_credit_note(
         return report
     record = candidates[0]
     report.matched_invoice_id = record.result.invoice_id
+    applied = applied or []
+    invoice_applications = [
+        a for a in applied if a.invoice_id == record.result.invoice_id
+    ]
+    applied_total = round(sum(a.amount for a in invoice_applications), 2)
+    report.applied_credits_total = applied_total
+    already = next(
+        (a for a in invoice_applications if a.credit_note_id == note.credit_note_id),
+        None,
+    )
     invoice_currency = str(record.invoice.get("currency") or "").upper()
     if note.currency and invoice_currency and note.currency.upper() != invoice_currency:
         report.status = "currency_mismatch"
@@ -119,12 +152,32 @@ def evaluate_credit_note(
     report.overbilled_amount = overbilled
     report.basis = basis
     credit = report.credit_amount
+    if already is not None:
+        report.status = "already_applied"
+        report.remaining_variance = round(max(0.0, overbilled - applied_total), 2)
+        report.note = (
+            f"this credit note was already recorded against "
+            f"{record.result.invoice_id} by {already.applied_by or 'an approver'}"
+            f" on {already.applied_at or 'an earlier date'} — it is not "
+            "counted twice"
+        )
+        return report
+    # Credits already recorded settle part of the variance first:
+    # this note can only settle what remains.
+    overbilled = round(overbilled - applied_total, 2)
     if overbilled <= 0.005:
         report.status = "no_variance"
-        report.note = (
-            f"invoice {record.result.invoice_id} was not overbilled — its "
-            "match computed no variance for this credit to settle"
-        )
+        if applied_total > 0:
+            report.note = (
+                f"the computed variance on {record.result.invoice_id} is "
+                f"already settled by {applied_total:.2f} of recorded "
+                "credits — nothing remains for this credit to settle"
+            )
+        else:
+            report.note = (
+                f"invoice {record.result.invoice_id} was not overbilled — its "
+                "match computed no variance for this credit to settle"
+            )
         return report
     tolerance = max(_SETTLE_ABS, round(_SETTLE_PCT * overbilled, 2))
     difference = round(credit - overbilled, 2)
@@ -152,3 +205,28 @@ def evaluate_credit_note(
             "should ask why before accepting it"
         )
     return report
+
+
+def payable_position(
+    record: ApprovalRecord, applied: list[CreditApplication]
+) -> PayablePosition:
+    """One invoice's payable position: its processed total less the
+    credits recorded against it. Computed, never narrated — this is
+    the figure payment proposals net from."""
+    invoice = record.invoice or {}
+    gross = round(float(invoice.get("total_amount") or 0.0), 2)
+    credits = [
+        a for a in applied if a.invoice_id == record.result.invoice_id
+    ]
+    total_credits = round(sum(a.amount for a in credits), 2)
+    return PayablePosition(
+        invoice_id=record.result.invoice_id,
+        invoice_number=str(invoice.get("invoice_number", "")),
+        supplier_name=record.result.supplier_name
+        or str(invoice.get("supplier_name", "")),
+        currency=str(invoice.get("currency") or "USD"),
+        gross_amount=gross,
+        credits=credits,
+        total_credits=total_credits,
+        open_amount=round(max(0.0, gross - total_credits), 2),
+    )

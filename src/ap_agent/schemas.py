@@ -838,13 +838,63 @@ class CreditNoteMatch(BaseModel):
     supplier_name: str = ""
     referenced_invoice_number: str = ""
     matched_invoice_id: str = ""  # our invoice id; "" when unmatched
-    status: str = "unmatched"  # settles_variance | partial_settlement | exceeds_variance | no_variance | currency_mismatch | unmatched
+    status: str = "unmatched"  # settles_variance | partial_settlement | exceeds_variance | no_variance | currency_mismatch | already_applied | unmatched
     credit_amount: float = 0.0
     overbilled_amount: float = 0.0
+    applied_credits_total: float = 0.0  # credits already recorded against the matched invoice
     remaining_variance: float = 0.0
     settles_variance: bool = False
     basis: list[str] = Field(default_factory=list)
     note: str = ""
+
+
+class CreditApplication(BaseModel):
+    """A credit note an approver confirmed against its invoice — the
+    write path of credit-note matching. Matching itself stays a pure
+    query (creditnotes.py); an application is the human-gated record
+    that the credit counts against the invoice's payable position.
+    Applications are capped in code twice over: never more than the
+    invoice's remaining computed variance, and never more than its
+    open amount. Nothing here executes a payment — the credit is
+    netted where payables are proposed (payment runs), and the
+    invoice's own gate state is untouched."""
+
+    credit_note_id: str
+    credit_note_number: str = ""
+    supplier_name: str = ""
+    invoice_id: str  # our invoice id the credit was recorded against
+    invoice_number: str = ""  # the supplier invoice number credited
+    currency: str = "USD"
+    amount: float = 0.0
+    match_status: str = ""  # the match verdict the approver acted on
+    remaining_variance_after: float = 0.0
+    applied_by: str = ""
+    applied_at: str = ""
+
+
+class CreditNoteApplyRequest(BaseModel):
+    """The apply call: the credit note plus the approver recording
+    it. The actor is required — an application with no name on it is
+    not a gate decision."""
+
+    note: CreditNoteInput
+    actor: str = ""
+
+
+class PayablePosition(BaseModel):
+    """What an invoice still owes, computed in code: its processed
+    total less the credits an approver recorded against it. This is
+    the figure payment proposals net from — never a document's own
+    claim."""
+
+    invoice_id: str
+    invoice_number: str = ""
+    supplier_name: str = ""
+    currency: str = "USD"
+    gross_amount: float = 0.0
+    credits: list[CreditApplication] = Field(default_factory=list)
+    total_credits: float = 0.0
+    open_amount: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -873,7 +923,15 @@ class SupplierStatement(BaseModel):
     supplier_name: str = ""
     statement_date: str = ""
     currency: str = "USD"
+    claimed_total: Optional[float] = None  # the total the statement prints; never trusted
     lines: list[StatementLine] = Field(default_factory=list)
+
+    @field_validator("claimed_total", mode="before")
+    @classmethod
+    def _num_claimed(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        return _to_float(v)
 
 
 class StatementLineResult(BaseModel):
@@ -911,6 +969,9 @@ class StatementReconciliation(BaseModel):
     duplicate_count: int = 0  # lines flagged by the duplicate screen
     statement_total: float = 0.0
     ap_total: float = 0.0
+    claimed_total: Optional[float] = None  # what the statement claims its lines sum to
+    claimed_total_difference: Optional[float] = None  # claimed - recomputed, when claimed
+    supplier_query_draft: str = ""  # drafted supplier query letter for the exceptions; never sent
     summary: str = ""
     summary_source: str = "template"  # the deterministic composer; never an LLM figure
     confirmed_by: Optional[str] = None
@@ -1141,7 +1202,8 @@ class PaymentRunLine(BaseModel):
     gross_amount: float = 0.0
     discount_amount: float = 0.0  # capturable early-payment discount, else 0
     discount_deadline: str = ""
-    net_amount: float = 0.0  # gross - discount
+    credit_amount: float = 0.0  # approver-recorded credits netted against the invoice
+    net_amount: float = 0.0  # gross - discount - credits, floored at zero
 
 
 class PaymentRunDrift(BaseModel):
@@ -1324,6 +1386,7 @@ class PaymentRun(BaseModel):
     invoice_count: int = 0
     total_gross: float = 0.0
     total_discount: float = 0.0
+    total_credit: float = 0.0  # approver-recorded credits netted across members
     total_net: float = 0.0
     proposed_at: str = ""
     confirmed_by: Optional[str] = None

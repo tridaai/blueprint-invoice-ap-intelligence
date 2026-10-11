@@ -68,7 +68,9 @@ def _window_index(due: date, as_of: date, window_days: int) -> int:
     return delta // window_days
 
 
-def _line_for(record: ApprovalRecord, as_of: date) -> PaymentRunLine:
+def _line_for(
+    record: ApprovalRecord, as_of: date, credit_amount: float = 0.0
+) -> PaymentRunLine:
     result = record.result
     invoice = record.invoice or {}
     gross = float(invoice.get("total_amount") or 0.0)
@@ -88,7 +90,10 @@ def _line_for(record: ApprovalRecord, as_of: date) -> PaymentRunLine:
         gross_amount=gross,
         discount_amount=discount_amount,
         discount_deadline=discount_deadline,
-        net_amount=round(gross - discount_amount, 2),
+        credit_amount=round(float(credit_amount), 2),
+        net_amount=round(
+            max(0.0, gross - discount_amount - float(credit_amount)), 2
+        ),
     )
 
 
@@ -100,6 +105,7 @@ def propose_payment_runs(
     exclude_invoice_ids: set[str] | None = None,
     four_eyes_threshold: float | None = None,
     four_eyes_thresholds: dict[str, float] | None = None,
+    credits_by_invoice: dict[str, float] | None = None,
 ) -> list[PaymentRun]:
     """Group the approved, not-yet-run records into proposed runs.
 
@@ -134,8 +140,12 @@ def propose_payment_runs(
         groups.setdefault((currency, index), []).append(record)
 
     runs: list[PaymentRun] = []
+    credits = credits_by_invoice or {}
     for (currency, index), members in sorted(groups.items()):
-        lines = [_line_for(record, as_of) for record in members]
+        lines = [
+            _line_for(record, as_of, credits.get(record.result.invoice_id, 0.0))
+            for record in members
+        ]
         lines.sort(key=lambda line: (line.due_date or "9999", line.invoice_id))
         dues = [
             parsed
@@ -156,6 +166,7 @@ def propose_payment_runs(
             invoice_count=len(lines),
             total_gross=round(sum(line.gross_amount for line in lines), 2),
             total_discount=round(sum(line.discount_amount for line in lines), 2),
+            total_credit=round(sum(line.credit_amount for line in lines), 2),
             total_net=round(sum(line.net_amount for line in lines), 2),
         )
         threshold = four_eyes_threshold
@@ -1740,7 +1751,9 @@ def discount_drift(
             )
         )
         line.discount_amount = capturable
-        line.net_amount = round(line.gross_amount - capturable, 2)
+        line.net_amount = round(
+            max(0.0, line.gross_amount - capturable - line.credit_amount), 2
+        )
     if drift:
         adjusted.total_discount = round(
             sum(line.discount_amount for line in adjusted.lines), 2

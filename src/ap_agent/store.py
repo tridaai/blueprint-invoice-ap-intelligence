@@ -36,6 +36,7 @@ from .schemas import (
     PaymentRun,
     ProfileChangeProposal,
     RecoveryPack,
+    CreditApplication,
     StatementReconciliation,
 )
 
@@ -217,6 +218,7 @@ class InMemoryStore:
     def __init__(self) -> None:
         self._records: dict[str, ApprovalRecord] = {}
         self._reconciliations: dict[str, str] = {}
+        self._credit_applications: dict[str, str] = {}
         self._payment_runs: dict[str, str] = {}
         self._recovery_packs: dict[str, str] = {}
         self._master_changes: dict[str, str] = {}
@@ -246,6 +248,36 @@ class InMemoryStore:
             if payload
             else None
         )
+
+    def save_credit_application(self, application: CreditApplication) -> None:
+        with self._lock:
+            self._credit_applications[application.credit_note_id] = (
+                application.model_dump_json()
+            )
+
+    def get_credit_application(
+        self, credit_note_id: str
+    ) -> CreditApplication | None:
+        with self._lock:
+            payload = self._credit_applications.get(credit_note_id)
+        return (
+            CreditApplication.model_validate_json(payload) if payload else None
+        )
+
+    def list_credit_applications(
+        self, invoice_id: str | None = None
+    ) -> list[CreditApplication]:
+        with self._lock:
+            payloads = list(self._credit_applications.values())
+        applications = [
+            CreditApplication.model_validate_json(payload)
+            for payload in payloads
+        ]
+        if invoice_id is not None:
+            applications = [
+                a for a in applications if a.invoice_id == invoice_id
+            ]
+        return sorted(applications, key=lambda a: a.credit_note_id)
 
     def save_payment_run(self, run: PaymentRun) -> None:
         with self._lock:
@@ -593,6 +625,35 @@ class PostgresStore:
             json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"]
             for r in rows
         ]
+
+    def save_credit_application(self, application: CreditApplication) -> None:
+        self._save_blob(
+            "credit_applications",
+            "credit_note_id",
+            application.credit_note_id,
+            application.model_dump_json(),
+        )
+
+    def get_credit_application(
+        self, credit_note_id: str
+    ) -> CreditApplication | None:
+        data = self._get_blob(
+            "credit_applications", "credit_note_id", credit_note_id
+        )
+        return CreditApplication.model_validate(data) if data is not None else None
+
+    def list_credit_applications(
+        self, invoice_id: str | None = None
+    ) -> list[CreditApplication]:
+        applications = [
+            CreditApplication.model_validate(d)
+            for d in self._all_blobs("credit_applications")
+        ]
+        if invoice_id is not None:
+            applications = [
+                a for a in applications if a.invoice_id == invoice_id
+            ]
+        return sorted(applications, key=lambda a: a.credit_note_id)
 
     def save_payment_run(self, run: PaymentRun) -> None:
         self._save_blob(

@@ -20,6 +20,15 @@ twice. The flag rides alongside the match status and names the
 twin records; the recovery path for the underlying pair is the
 same one the invoice gate uses.
 
+The statement's own printed total is never trusted either: when a
+statement carries one, it is compared against the recomputed sum of
+its lines and any disagreement is reported as an exception in its
+own right — and no line is ever reclassified to make the totals
+agree. The report also carries a drafted supplier query letter for
+the exceptions (``draft_supplier_query``): deterministic prose over
+the computed lines, labelled a draft, sent by nobody — a human
+reviews it alongside the report they confirm.
+
 The comparison is arithmetic over stored history entries — the model
 computes none of it. Numbers are matched on the store's canonical
 duplicate key, so a number the statement writes as ``NB 4471``
@@ -157,6 +166,16 @@ def reconcile_statement(
         2,
     )
 
+    claimed_total = (
+        round(float(statement.claimed_total), 2)
+        if statement.claimed_total is not None
+        else None
+    )
+    claimed_difference = (
+        round(claimed_total - round(statement_total, 2), 2)
+        if claimed_total is not None
+        else None
+    )
     report = StatementReconciliation(
         statement_id=statement.statement_id,
         supplier_name=statement.supplier_name,
@@ -171,8 +190,11 @@ def reconcile_statement(
         duplicate_count=duplicates,
         statement_total=round(statement_total, 2),
         ap_total=ap_total,
+        claimed_total=claimed_total,
+        claimed_total_difference=claimed_difference,
     )
     report.summary = _compose_summary(report)
+    report.supplier_query_draft = draft_supplier_query(report)
     return report
 
 
@@ -195,6 +217,17 @@ def _compose_summary(report: StatementReconciliation) -> str:
             else ""
         )
     ]
+    if (
+        report.claimed_total_difference is not None
+        and abs(report.claimed_total_difference) > _AMOUNT_TOLERANCE
+    ):
+        parts.append(
+            f"The statement's own total of {report.claimed_total:.2f} "
+            f"disagrees with the sum of its lines "
+            f"({report.statement_total:.2f}) by "
+            f"{report.claimed_total_difference:+.2f}; the recomputed "
+            "figure is used throughout this report."
+        )
     for line in report.lines:
         if line.status == "amount_differs":
             parts.append(
@@ -230,6 +263,90 @@ def _compose_summary(report: StatementReconciliation) -> str:
         and report.missing_from_ap_count == 0
         and report.missing_from_statement_count == 0
         and report.duplicate_count == 0
+        and (
+            report.claimed_total_difference is None
+            or abs(report.claimed_total_difference) <= _AMOUNT_TOLERANCE
+        )
     ):
         parts.append("No exceptions: the statement and AP's records agree.")
     return " ".join(parts)
+
+
+def draft_supplier_query(report: StatementReconciliation) -> str:
+    """The supplier query letter for a reconciliation's exceptions —
+    drafted deterministically from the computed lines, every figure
+    traced to the report. It is a draft for the human who confirms
+    the reconciliation: nothing in this blueprint sends it. A clean
+    statement needs no query, so the draft is empty."""
+    exceptions = (
+        report.differs_count
+        + report.missing_from_ap_count
+        + report.missing_from_statement_count
+        + report.duplicate_count
+    )
+    claimed_off = (
+        report.claimed_total_difference is not None
+        and abs(report.claimed_total_difference) > _AMOUNT_TOLERANCE
+    )
+    if exceptions == 0 and not claimed_off:
+        return ""
+    cur = report.currency
+    out = [
+        "DRAFT — supplier query letter (not sent)",
+        f"To: {report.supplier_name or 'Supplier'}",
+        f"Subject: Statement {report.statement_id}"
+        + (f" dated {report.statement_date}" if report.statement_date else "")
+        + " — items we could not reconcile",
+        "",
+        "We reconciled your statement against our processed invoices. "
+        "The items below need your help before the affected amounts "
+        "can be settled:",
+        "",
+    ]
+    for line in report.lines:
+        if line.status == "missing_from_ap":
+            out.append(
+                f"- {line.invoice_number}: listed on your statement at "
+                f"{(line.statement_amount or 0):.2f} {cur}, but we have no "
+                "processed invoice with this number. Please send a copy "
+                "of the invoice."
+            )
+        elif line.status == "amount_differs":
+            out.append(
+                f"- {line.invoice_number}: your statement shows "
+                f"{line.statement_amount:.2f} {cur}; the invoice we "
+                f"processed ({line.ap_invoice_id}) totals "
+                f"{line.ap_amount:.2f} {cur} — a difference of "
+                f"{line.difference:+.2f}. Please confirm which figure "
+                "is correct, or issue a credit note for the difference."
+            )
+        if line.duplicate_suspected:
+            out.append(
+                f"- {line.invoice_number}: this number appears more "
+                "than once across your statement and our records, so "
+                "the line is held until the duplicate is resolved — "
+                "please confirm it was billed once only."
+            )
+    for entry in report.missing_from_statement:
+        out.append(
+            f"- {entry['invoice_number']}: we processed this invoice "
+            f"({entry['invoice_id']}, {(entry['total_amount'] or 0):.2f} "
+            f"{cur}) but it does not appear on your statement. Please "
+            "confirm whether it is already settled or credited at your "
+            "end."
+        )
+    if claimed_off:
+        out.append(
+            f"- Statement total: your statement prints a total of "
+            f"{report.claimed_total:.2f} {cur}, but its lines sum to "
+            f"{report.statement_total:.2f} {cur}. Please confirm the "
+            "correct total."
+        )
+    out += [
+        "",
+        "Amounts not listed here reconciled exactly. Thank you for "
+        "your help.",
+        "",
+        "Accounts Payable",
+    ]
+    return "\n".join(out)

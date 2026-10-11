@@ -40,6 +40,7 @@ from .checkpoints import get_checkpointer
 from .clarify import reanalysis_analytics
 from .config import env_float, env_int, env_str, load_dotenv
 from .creditnotes import evaluate_credit_note
+from .creditnotes import payable_position as _payable_position
 from .matching import _parse_date
 from .paymentruns import (
     discount_drift,
@@ -72,8 +73,10 @@ from .schemas import (
     ApprovedNotPostedReport,
     BundleInvoiceOutcome,
     BundleResult,
+    CreditApplication,
     CreditNoteInput,
     CreditNoteMatch,
+    PayablePosition,
     DigestHistory,
     DigestStoreSweep,
     DigestStoreSweepEntry,
@@ -1709,15 +1712,98 @@ class InvoiceService:
         it references (supplier + supplier invoice number), that
         invoice's overbilled amount is recomputed from its stored
         match facts, and the report says whether the credit settles
-        the variance. Nothing is written — an approver acts on the
-        report.
+        the variance that remains after any credits already recorded
+        against the invoice. Nothing is written — an approver acts on
+        the report (``apply_credit_note``).
         """
         model = (
             note
             if isinstance(note, CreditNoteInput)
             else CreditNoteInput.model_validate(note)
         )
-        return evaluate_credit_note(model, self._get_store().list_records())
+        store = self._get_store()
+        return evaluate_credit_note(
+            model,
+            store.list_records(),
+            applied=store.list_credit_applications(),
+        )
+
+    def apply_credit_note(
+        self, note: CreditNoteInput | dict, actor: str
+    ) -> CreditApplication:
+        """Record a matched credit note against its invoice — the
+        human-gated write path of credit-note matching.
+
+        The match is recomputed at apply time, applications included,
+        and only a credit that settles a remaining variance in full or
+        in part may be recorded. Two caps are enforced here in code:
+        recorded credits never exceed the invoice's remaining computed
+        variance (the match status itself), and never exceed its open
+        amount. Recording changes no invoice's gate state and executes
+        no payment — the credit nets into the invoice's payable
+        position and into future payment-run proposals."""
+        model = (
+            note
+            if isinstance(note, CreditNoteInput)
+            else CreditNoteInput.model_validate(note)
+        )
+        store = self._get_store()
+        if store.get_credit_application(model.credit_note_id) is not None:
+            raise ValueError(
+                f"Credit note {model.credit_note_id} was already recorded "
+                "against its invoice — a credit is never applied twice"
+            )
+        match = evaluate_credit_note(
+            model,
+            store.list_records(),
+            applied=store.list_credit_applications(),
+        )
+        if match.status not in ("settles_variance", "partial_settlement"):
+            raise ValueError(
+                f"Credit note {model.credit_note_id} cannot be recorded: "
+                f"its match status is {match.status} ({match.note})"
+            )
+        record = store.get(match.matched_invoice_id)
+        if record is None:  # pragma: no cover - the match came from the store
+            raise KeyError(f"Unknown invoice_id: {match.matched_invoice_id}")
+        position = _payable_position(record, store.list_credit_applications())
+        if match.credit_amount > position.open_amount + 0.005:
+            raise ValueError(
+                f"Credit note {model.credit_note_id} is for "
+                f"{match.credit_amount:.2f} but invoice "
+                f"{match.matched_invoice_id} has only "
+                f"{position.open_amount:.2f} open — a credit never "
+                "exceeds its invoice's open amount"
+            )
+        application = CreditApplication(
+            credit_note_id=model.credit_note_id,
+            credit_note_number=model.credit_note_number,
+            supplier_name=model.supplier_name or match.supplier_name,
+            invoice_id=match.matched_invoice_id,
+            invoice_number=match.referenced_invoice_number,
+            currency=model.currency or position.currency,
+            amount=match.credit_amount,
+            match_status=match.status,
+            remaining_variance_after=match.remaining_variance,
+            applied_by=actor,
+            applied_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+        store.save_credit_application(application)
+        return application
+
+    def payable_position(self, invoice_id: str) -> PayablePosition:
+        """One invoice's payable position: its processed total less
+        the credits an approver recorded against it."""
+        store = self._get_store()
+        record = store.get(invoice_id)
+        if record is None:
+            raise KeyError(f"Unknown invoice_id: {invoice_id}")
+        return _payable_position(record, store.list_credit_applications())
+
+    def list_credit_applications(
+        self, invoice_id: str | None = None
+    ) -> list[CreditApplication]:
+        return self._get_store().list_credit_applications(invoice_id)
 
     def reconcile_statement(
         self, statement: SupplierStatement | dict
@@ -1765,6 +1851,13 @@ class InvoiceService:
             if existing.status == "confirmed":
                 confirmed_ids.add(existing.run_id)
                 confirmed_members |= run_member_ids(existing)
+        credits_by_invoice: dict[str, float] = {}
+        for application in store.list_credit_applications():
+            credits_by_invoice[application.invoice_id] = round(
+                credits_by_invoice.get(application.invoice_id, 0.0)
+                + application.amount,
+                2,
+            )
         runs = _propose_runs(
             store.list_records(),
             window_days=window_days,
@@ -1772,6 +1865,7 @@ class InvoiceService:
             exclude_invoice_ids=confirmed_members,
             four_eyes_threshold=payment_run_four_eyes_threshold(),
             four_eyes_thresholds=payment_run_four_eyes_thresholds(),
+            credits_by_invoice=credits_by_invoice,
         )
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # Hand-off profile flags, stamped at proposal: a member

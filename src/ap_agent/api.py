@@ -35,13 +35,20 @@ from .errors import ProviderError
 from .events import CallbackSink, RunEvent
 from .logging_config import configure_logging, new_request_id, request_id_var
 from .policies_data import POLICIES
-from .samples import load_sample_invoices
+from .samples import (
+    load_sample_credit_notes,
+    load_sample_invoices,
+    load_sample_statements,
+)
 from .schemas import (
     AgentResult,
     BundleResult,
     ApprovedNotPostedReport,
+    CreditApplication,
+    CreditNoteApplyRequest,
     CreditNoteInput,
     CreditNoteMatch,
+    PayablePosition,
     DecisionRequest,
     DigestHistory,
     DigestStoreSweep,
@@ -273,6 +280,14 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
     def list_samples() -> list[dict]:
         return load_sample_invoices()
 
+    @app.get("/samples/statements", dependencies=_AUTH)
+    def list_sample_statements() -> list[dict]:
+        return load_sample_statements()
+
+    @app.get("/samples/credit-notes", dependencies=_AUTH)
+    def list_sample_credit_notes() -> list[dict]:
+        return load_sample_credit_notes()
+
     @app.post("/invoices/analyze", response_model=AgentResult, dependencies=_AUTH)
     def analyze(invoice: InvoiceInput) -> AgentResult:
         return svc.analyze(invoice)
@@ -345,6 +360,41 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
         it settle a variance the pipeline computed? Report only — the
         call changes no invoice's state."""
         return svc.match_credit_note(note)
+
+    @app.post("/credit-notes/apply", response_model=CreditApplication, dependencies=_AUTH)
+    def apply_credit_note(request: CreditNoteApplyRequest) -> CreditApplication:
+        """Record a matched credit note against its invoice — the
+        human-gated write path. Only a credit that settles a remaining
+        variance (in full or in part) can be recorded, never more
+        than the invoice's open amount, and never twice. The credit
+        then nets into the invoice's payable position and future
+        payment-run proposals; no payment is executed."""
+        actor = (request.actor or "").strip()
+        if not actor:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide 'actor' — the approver recording the credit.",
+            )
+        try:
+            return svc.apply_credit_note(request.note, actor=actor)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/credit-notes/applications", response_model=list[CreditApplication], dependencies=_AUTH)
+    def list_credit_applications(invoice_id: str | None = None) -> list[CreditApplication]:
+        """The recorded credit applications, optionally for one invoice."""
+        return svc.list_credit_applications(invoice_id)
+
+    @app.get("/invoices/{invoice_id}/payable", response_model=PayablePosition, dependencies=_AUTH)
+    def get_payable_position(invoice_id: str) -> PayablePosition:
+        """The invoice's payable position: processed total less the
+        credits recorded against it, computed in code."""
+        try:
+            return svc.payable_position(invoice_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/statements/reconcile", response_model=StatementReconciliation, dependencies=_AUTH)
     def reconcile(statement: SupplierStatement) -> StatementReconciliation:
