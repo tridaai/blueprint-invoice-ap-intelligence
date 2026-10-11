@@ -1,10 +1,8 @@
 <p align="center">
-  <img src="assets/tridaai-logo.png" alt="Trida AI" width="360">
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI" width="96">
 </p>
 
-# Trida AI
-
-## Blueprint — Invoice & Accounts-Payable Document Intelligence Agent
+# Blueprint — Invoice & Accounts-Payable Document Intelligence Agent
 
 **Built on NVIDIA NIM.** A working prototype of the agent an accounts-payable team actually needs at the inbox: a supplier invoice arrives (scanned document + email), and the agent does the intake work end to end — OCR, document verification, field extraction, a **three-way match computed in code** (invoice vs purchase order vs goods receipt), duplicate detection, triage, policy-grounded diagnosis, scored next steps, and a drafted AP packet + supplier query letter — then **stops at the finance approver's gate**.
 
@@ -17,6 +15,12 @@ The promises are precise, and enforced in code, not in prompts:
 - **The agent never approves its own work.** A named finance approver decides, with a reason, at a checkpointed gate.
 
 Everything is synthetic data. There is no real supplier, invoice, or bank detail anywhere in this repository.
+
+<p align="center">
+  <a href="https://trida.ai/blog/invoice-ap-intelligence-blueprint-on-nvidia-nim">
+    <img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1791677281610-cover.webp" alt="Invoice AP Intelligence Blueprint on NVIDIA NIM" width="600">
+  </a>
+</p>
 
 **Deep-dive:** [Invoice AP Intelligence Blueprint on NVIDIA NIM](https://trida.ai/blog/invoice-ap-intelligence-blueprint-on-nvidia-nim) — how the agent works, where it stops, and what the evals actually prove.
 
