@@ -136,6 +136,11 @@
     </div>
     <div id="stmtbody"></div>
     <div class="gate" style="margin-top:12px">
+      <select id="stmt-doc-sample"></select>
+      <button id="reconciledoc" class="secondary">Reconcile from document</button>
+      <span class="note" id="stmtdocnote">A statement that arrives as a document is read through the OCR + vision ports and parsed in code into the same reconciliation — every figure carrying the confidence of its read, lines read at low confidence flagged on the report, credit lines reconciled as credits. A document that is not a statement is refused, with the reason on the record.</span>
+    </div>
+    <div class="gate" style="margin-top:12px">
       <select id="cn-sample"></select>
       <button id="matchcn" class="secondary">Match credit note</button>
       <input type="text" id="cnactor" placeholder="Approver (to record application)" size="24">
@@ -143,6 +148,14 @@
       <span class="note" id="cnnote">Matching is a report: does the credit settle a variance the pipeline computed? Recording an application is the approver's step — the credit then nets into the invoice's payable position and into payment-run proposals. A credit is never recorded twice, never above the remaining variance, never above the open amount.</span>
     </div>
     <div id="cnbody"></div>
+  </section>
+  <section id="sec-positions">
+    <h2>Supplier positions (what we still owe, per supplier — read-only)</h2>
+    <div class="gate">
+      <button id="loadpositions" class="secondary">Load supplier positions</button>
+      <span class="note" id="posnote">One row per supplier per currency: gross invoiced, credits an approver recorded, the open payable — each row the sum of its invoices' payable positions — plus the amount in dispute from the supplier's latest reconciliation and the oldest open invoice's age. Figures never sum across currencies, and loading this changes nothing.</span>
+    </div>
+    <div id="posbody"></div>
   </section>
   <section id="sec-profiles">
     <h2>Hand-off profiles (governed routing — per supplier / per currency)</h2>
@@ -979,24 +992,32 @@ const fmt = n => (n === null || n === undefined ? "—" : Number(n).toFixed(2));
 let currentStatementId = null;
 async function loadApDocs() {
   try {
-    const [stmts, notes] = await Promise.all([
+    const [stmts, notes, stmtDocs] = await Promise.all([
       fetch("/samples/statements", {headers: headers()}).then(r => r.json()),
       fetch("/samples/credit-notes", {headers: headers()}).then(r => r.json()),
+      fetch("/samples/statement-documents", {headers: headers()}).then(r => r.json()),
     ]);
     window._statements = Object.fromEntries(stmts.map(x => [x.statement_id, x]));
     window._creditNotes = Object.fromEntries(notes.map(x => [x.credit_note_id, x]));
+    window._statementDocs = Object.fromEntries(stmtDocs.map(x => [x.document_id, x]));
     $("stmt-sample").innerHTML = stmts.map(x => `<option value="${esc(x.statement_id)}">${esc(x.statement_id)} — ${esc(x.supplier_name)}</option>`).join("");
     $("cn-sample").innerHTML = notes.map(x => `<option value="${esc(x.credit_note_id)}">${esc(x.credit_note_id)} — ${esc(x.supplier_name)} · ${esc(x.currency)} ${fmt(x.amount)} vs ${esc(x.referenced_invoice_number)}</option>`).join("");
+    $("stmt-doc-sample").innerHTML = stmtDocs.map(x => `<option value="${esc(x.document_id)}">${esc(x.document_id)} — statement as a document</option>`).join("");
   } catch (e) { /* samples unavailable */ }
 }
 function renderStatement(r) {
   currentStatementId = r.statement_id;
+  if (r.refused) {
+    $("stmtbody").innerHTML = `<p class="kv" style="margin-top:10px">${pill("refused — not a statement", "bad")} <b>${esc(r.statement_id)}</b><br>${esc(r.refusal_reason || "")}</p>`;
+    return;
+  }
   const claimed = (r.claimed_total_difference !== null && r.claimed_total_difference !== undefined && Math.abs(r.claimed_total_difference) > 0.01)
     ? `<p class="kv">${pill("claimed total disagrees", "bad")} The statement prints ${fmt(r.claimed_total)} ${esc(r.currency)}; its lines sum to ${fmt(r.statement_total)} — the recomputed figure is used.</p>` : "";
-  const rows = (r.lines || []).map(l => `<tr><td>${esc(l.invoice_number)}</td><td>${pill(l.status, l.status === "matched" ? "ok" : "warn")}${l.duplicate_suspected ? " " + pill("duplicate suspected", "bad") : ""}</td><td>${fmt(l.statement_amount)}</td><td>${fmt(l.ap_amount)}</td><td>${l.difference === null || l.difference === undefined ? "—" : fmt(l.difference)}</td><td>${esc(l.ap_invoice_id || "—")}</td></tr>`).join("");
+  const rows = (r.lines || []).map(l => `<tr><td>${esc(l.invoice_number)}</td><td>${pill(l.status, l.status === "matched" ? "ok" : l.status === "credit_line" ? "ok" : "warn")}${l.duplicate_suspected ? " " + pill("duplicate suspected", "bad") : ""}${l.low_confidence ? " " + pill("low-confidence read — verify", "bad") : ""}</td><td>${fmt(l.statement_amount)}</td><td>${fmt(l.ap_amount)}</td><td>${l.difference === null || l.difference === undefined ? "—" : fmt(l.difference)}</td><td>${esc(l.ap_invoice_id || "—")}</td></tr>`).join("");
   const missing = (r.missing_from_statement || []).length ? `<p class="kv"><b>Processed by AP, absent from the statement:</b> ${r.missing_from_statement.map(e => `${esc(e.invoice_number)} (${esc(e.invoice_id)}, ${fmt(e.total_amount)})`).join(" · ")}</p>` : "";
+  const extraction = r.extraction ? `<p class="kv">Read from document <b>${esc(r.extraction.document_id)}</b> — classified as ${esc(r.extraction.detected_type)} by the ${esc(r.extraction.classification_source)} vision verdict · OCR (${esc(r.extraction.ocr_engine)}) confidence ${fmt(r.extraction.ocr_confidence)}${r.extraction.skipped_rows ? ` · ${r.extraction.skipped_rows} row(s) could not be read and were skipped` : ""}${(r.extraction.notes || []).length ? `<br>${r.extraction.notes.map(esc).join("<br>")}` : ""}</p>` : "";
   const draft = r.supplier_query_draft ? `<p class="kv"><b>Supplier query — draft, not sent</b></p><pre>${esc(r.supplier_query_draft)}</pre>` : "";
-  $("stmtbody").innerHTML = `<p class="kv" style="margin-top:10px"><b>${esc(r.statement_id)}</b> — ${esc(r.supplier_name)} · ${r.matched_count} matched · ${r.differs_count} differ · ${r.missing_from_ap_count} never processed · ${r.missing_from_statement_count} missing from statement · ${r.duplicate_count} duplicate-flagged<br>Statement lines total ${fmt(r.statement_total)} ${esc(r.currency)} · AP processed ${fmt(r.ap_total)} ${esc(r.currency)}${r.confirmed_by ? `<br>Confirmed by ${esc(r.confirmed_by)} at ${esc(r.confirmed_at)}` : " · awaiting confirmation"}</p>${claimed}<table><tr><th>Invoice</th><th>Status</th><th>Statement</th><th>AP</th><th>Difference</th><th>AP record</th></tr>${rows}</table>${missing}<p class="kv">${esc(r.summary)}</p>${draft}`;
+  $("stmtbody").innerHTML = `<p class="kv" style="margin-top:10px"><b>${esc(r.statement_id)}</b> — ${esc(r.supplier_name)} · ${pill(r.source === "document" ? "from document" : "structured", "ok")} · ${r.matched_count} matched · ${r.differs_count} differ · ${r.missing_from_ap_count} never processed · ${r.missing_from_statement_count} missing from statement · ${r.duplicate_count} duplicate-flagged${r.credit_line_count ? ` · ${r.credit_line_count} credit line(s) ${fmt(r.credit_total)}` : ""}${r.low_confidence_count ? ` · ${r.low_confidence_count} low-confidence read(s)` : ""}<br>Statement lines total ${fmt(r.statement_total)} ${esc(r.currency)} · AP processed ${fmt(r.ap_total)} ${esc(r.currency)}${r.confirmed_by ? `<br>Confirmed by ${esc(r.confirmed_by)} at ${esc(r.confirmed_at)}` : " · awaiting confirmation"}</p>${claimed}${extraction}<table><tr><th>Invoice</th><th>Status</th><th>Statement</th><th>AP</th><th>Difference</th><th>AP record</th></tr>${rows}</table>${missing}<p class="kv">${esc(r.summary)}</p>${draft}`;
 }
 async function reconcileStmt() {
   const payload = window._statements[$("stmt-sample").value];
@@ -1007,6 +1028,29 @@ async function reconcileStmt() {
   renderStatement(body);
 }
 $("reconcile").onclick = reconcileStmt;
+async function reconcileDoc() {
+  const payload = (window._statementDocs || {})[$("stmt-doc-sample").value];
+  if (!payload) return;
+  const res = await fetch("/statements/reconcile-document", {method: "POST", headers: headers(), body: JSON.stringify(payload)});
+  const body = await res.json();
+  if (!res.ok) { $("stmtdocnote").textContent = `Document reconcile failed (${res.status}): ${body.detail || ""}`; return; }
+  renderStatement(body);
+  $("stmtdocnote").textContent = body.refused
+    ? `Document ${body.statement_id} was refused — the reason is on the stored record. Nothing was reconciled.`
+    : `Document read and reconciled as ${body.statement_id} — figures carry the confidence of their read; low-confidence lines are flagged on the report.`;
+}
+$("reconciledoc").onclick = reconcileDoc;
+async function loadPositions() {
+  const res = await fetch("/suppliers/positions", {headers: headers()});
+  if (!res.ok) { $("posnote").textContent = `Positions failed to load (${res.status}).`; return; }
+  const body = await res.json();
+  const rows = (body.suppliers || []).map(s => `<tr><td>${esc(s.supplier_name)}</td><td>${esc(s.currency)}</td><td>${s.invoice_count} (${s.open_invoice_count} open)</td><td>${fmt(s.gross_invoiced)}</td><td>${fmt(s.credits_applied)}</td><td><b>${fmt(s.open_amount)}</b></td><td>${s.disputed_amount > 0 ? `${pill(fmt(s.disputed_amount), "bad")}<br><span class="note">${(s.disputed_invoice_numbers || []).map(esc).join(", ")} — per ${esc(s.dispute_statement_id)}</span>` : "—"}</td><td>${s.oldest_open_invoice_number ? `${esc(s.oldest_open_invoice_number)} · ${s.oldest_open_age_days} days` : "—"}</td></tr>`).join("");
+  const totals = Object.entries(body.totals_by_currency || {}).map(([cur, t]) => `${cur}: open ${fmt(t.open_amount)} of ${fmt(t.gross_invoiced)} gross, ${fmt(t.credits_applied)} credited, ${fmt(t.disputed_amount)} in dispute`).join(" · ");
+  $("posbody").innerHTML = rows
+    ? `<p class="kv" style="margin-top:10px">As of ${esc(body.as_of)} · ${body.supplier_count} supplier(s)${totals ? `<br>${esc(totals)}` : ""}</p><table><tr><th>Supplier</th><th>Currency</th><th>Invoices</th><th>Gross</th><th>Credits</th><th>Open</th><th>In dispute</th><th>Oldest open</th></tr>${rows}</table>`
+    : `<p class="kv" style="margin-top:10px">No processed invoices yet — the roll-up is empty.</p>`;
+}
+$("loadpositions").onclick = loadPositions;
 $("confirmstmt").onclick = async () => {
   const actor = $("stmtactor").value.trim();
   if (!currentStatementId) { $("stmtnote").textContent = "Reconcile a statement first."; return; }

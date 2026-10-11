@@ -197,3 +197,34 @@ def test_bundled_sample_statements_reconcile(service):
     assert ci.matched_count == 2
     assert ci.duplicate_count == 1  # CI-2210 is listed twice
     assert "CI-2210" in ci.supplier_query_draft
+
+
+def test_credit_lines_reconcile_as_credits_not_invoices(service):
+    report = service.reconcile_statement(
+        _statement(
+            statement_id="STMT-NB-CREDITS",
+            claimed_total=1060.00,
+            lines=[
+                {"invoice_number": "NB-4471", "amount": 1180.00, "date": "2026-09-28"},
+                {
+                    "invoice_number": "CN-118",
+                    "amount": -120.00,
+                    "date": "2026-09-30",
+                    "is_credit": True,
+                },
+            ],
+        )
+    )
+    by_number = {line.invoice_number: line for line in report.lines}
+    assert by_number["NB-4471"].status == "matched"
+    credit = by_number["CN-118"]
+    assert credit.status == "credit_line"
+    assert report.credit_line_count == 1
+    assert report.credit_total == -120.00
+    # The signed credit enters the recomputed total, so a claimed
+    # total that nets it agrees — and the credit is not a missing
+    # invoice, nor does it hide INV-1008's absence from the statement.
+    assert report.statement_total == 1060.00
+    assert report.claimed_total_difference == 0.00
+    assert report.missing_from_ap_count == 0
+    assert report.missing_from_statement_count == 1

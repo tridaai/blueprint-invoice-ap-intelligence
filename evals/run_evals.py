@@ -11,7 +11,11 @@ processed earlier in the run), and reconciles the bundled sample
 supplier statements against a dedicated store with exact per-statement
 expectations — matched / differs / missing / duplicate counts, the
 recomputed totals, the statement's own claimed total checked against
-them, and the drafted supplier query. All cases are synthetic. Run
+them, and the drafted supplier query. The Northbeam statement is then
+reconciled a second time from its document form (OCR + vision ports,
+parsed in code) and must land on exactly the structured twin's
+expectations, its one garbled line flagged as a low-confidence read.
+All cases are synthetic. Run
 from the repo root:
 
     python evals/run_evals.py
@@ -32,9 +36,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ap_agent.samples import (  # noqa: E402
     load_sample_credit_notes,
     load_sample_invoices,
+    load_sample_statement_documents,
     load_sample_statements,
 )
-from ap_agent.schemas import CreditNoteInput, InvoiceInput, SupplierStatement  # noqa: E402
+from ap_agent.schemas import (  # noqa: E402
+    CreditNoteInput,
+    DocumentInput,
+    InvoiceInput,
+    SupplierStatement,
+)
 from ap_agent.service import InvoiceService  # noqa: E402
 from ap_agent.store import InMemoryStore  # noqa: E402
 
@@ -240,6 +250,50 @@ def evaluate(cases: list[dict]) -> dict:
             failures.append(
                 f"reconciliation {statement.statement_id}: "
                 f"expected {expected}, got {got}"
+            )
+
+    # The same Northbeam statement, arrived as a document: read
+    # through the OCR + vision ports and parsed in code, it must
+    # reconcile to exactly its structured twin's expectations —
+    # and its one garbled line (75.0O) must ride on the report as
+    # a flagged low-confidence read, amount recovered.
+    for payload in load_sample_statement_documents():
+        document = DocumentInput.model_validate(payload)
+        if document.document_id != "DOC-STMT-NB-2026-10":
+            continue
+        reconciliation_total += 1
+        report = recon_service.reconcile_statement_document(document)
+        expected = EXPECTED_RECONCILIATIONS["STMT-NB-2026-10"]
+        got = {
+            "matched_count": report.matched_count,
+            "differs_count": report.differs_count,
+            "missing_from_ap_count": report.missing_from_ap_count,
+            "missing_from_statement_count": report.missing_from_statement_count,
+            "duplicate_count": report.duplicate_count,
+            "statement_total": report.statement_total,
+            "ap_total": report.ap_total,
+            "claimed_total_difference": report.claimed_total_difference,
+            "query_draft": bool(report.supplier_query_draft),
+        }
+        flagged = {
+            line.invoice_number: line
+            for line in report.lines
+            if line.low_confidence
+        }
+        if (
+            got == expected
+            and report.source == "document"
+            and not report.refused
+            and set(flagged) == {"NB-9999"}
+            and flagged["NB-9999"].statement_amount == 75.00
+        ):
+            reconciliation_correct += 1
+        else:
+            failures.append(
+                f"reconciliation document {document.document_id}: "
+                f"expected {expected} with NB-9999 flagged at 75.00, "
+                f"got {got}, source={report.source}, "
+                f"flagged={sorted(flagged)}"
             )
 
     # Duplicate-payment recovery: INV-1013 duplicates INV-1001 (the
