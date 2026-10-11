@@ -142,6 +142,8 @@ Beyond the single invoice, the follow-on surfaces work over the processed queue:
 82. **The documents-up-front listings are graded — and a listing that fails drafts its own release** — a listing is an intervention, and round 19 left it judged only by the re-analysis pattern. `documents_upfront_effectiveness` in `/metrics` reads each listed supplier's information waits and clarification loops per case, before vs after the listing moment: `working` (both rates fell, or one fell and the other held), `no_effect` (measured, and neither moved), or `unmeasured` (no cases since, or no pre-listing pattern to compare). A `no_effect` listing drafts a release proposal on the grade's evidence through the same governed discipline, and approval is re-graded at decision time — a listing that started working since the draft is refused, in the grade's own terms. The loop the collect opened is closed by measurement.
 83. **The posting ladder is graded by the rung the posting followed** — the escalation ledger recorded that a crossing was pushed; `/metrics`' `escalation_ladder` now reads each escalated episode against the record as it stands: a posted receipt after rung 1 (before rung 2) credits rung 1, one after rung 2 credits rung 2 — the first shout had its window, which is why the second exists — an episode closed by a failure or a posting that didn't follow the push credits neither, and an episode with no resolution stands open, named. Days-to-post runs from the resolving rung. The two waiting loops (the supplier's, the ERP's) now carry the same follow-through grading in one read.
 84. **The supplier position is one read, not three** — the payable position answered per invoice, the credits per credit note, the disputes per statement report; "what do we still owe Northbeam, and what is in dispute" took an afternoon of joining them by hand. `GET /suppliers/positions` rolls the store up in code — one row per supplier per currency: gross invoiced, credits an approver recorded, the open payable (the sum of that row's payable positions, so it cannot disagree with `GET /invoices/{id}/payable`), the amount in dispute from the supplier's *latest* reconciliation (the differences plus the lines never processed), and the oldest open invoice's age. Figures never sum across currencies and the totals are per currency too. A pure read model — nothing writes, nothing pays.
+85. **Recovery claims stand in the money views, as their own line** — the recovery case recorded that a credit landed but never how much, and the money views never mentioned the claim at all: a supplier could owe us a duplicate payment back while the position showed only what we owed them. The `credit_received` transition now records the amount received (omitted = the full claim; validated above zero, never above the claim) on the pack and its audit history, and both money views carry the claim: `GET /invoices/{id}/payable` lists the open claims tied to the invoice with their computed duplicate evidence, and the supplier roll-up gains claimed-outstanding and recorded-received lines per supplier and per currency total. A claim is never netted into the payable — gross payable, credits applied, and recoveries claimed stay three separate lines until the money actually lands and is recorded.
+86. **The payment-run control report** — a run used to be confirmable on its totals alone. Before confirmation the approver now gets one code-composed report over the run (`GET /payment-runs/{run_id}/control-report`, console panel per run): every payment traced to its invoice with its stored match verdict, credits recomputed from the applications ledger (a credit recorded after proposal moves the line and is named as a disagreement with the run's stamp), disputed invoices — an amount difference on the supplier's latest statement — excluded from the payable totals with the reason on the line, and run totals reconciled against the run's stamps, the report saying plainly when they do not add up. A payment to a supplier with an open recovery claim is flagged **ACK_REQUIRED**: confirmation refuses until a named approver acknowledges the claims on the run (`POST /payment-runs/{run_id}/recovery-acknowledgements`, stamped with the pack ids and amounts seen). Paying a supplier who owes us money back is a decision — the report makes it an explicit, recorded one.
 
 ## Quickstart
 
@@ -172,8 +174,8 @@ This runs **the real stack locally** — the same components a production deploy
 ```bash
 uv sync --extra dev
 make demo        # traced run over a sample invoice
-make test        # 675 tests
-make evals       # golden set: 30/30 outcome + match status, credit-note 5/5, statement reconciliation 4/4, recovery 1/1
+make test        # 716 tests
+make evals       # golden set: 30/30 outcome + match status, credit-note 5/5, statement reconciliation 4/4, recovery 1/1, payment-run control 1/1
 ```
 
 The offline path uses a deterministic template backend and the documents' provided text layer. It is labelled everywhere it appears: it proves the plumbing, not the model quality. The LLM-judge eval pack (`make llm-evals`) refuses to run without a real provider — exit code 2 — rather than grade its own templates.
@@ -232,7 +234,7 @@ Read [`docs/architecture.md`](docs/architecture.md) for the production topology,
 
 ## Eval results
 
-Golden set: 30 synthetic cases (the 14 samples + 16 variants), run through one service instance in queue order. Current: **outcome 30/30, match status 30/30**, plus the bundled credit-note cases **5/5** (a full settlement, a partial settlement, an over-shooting credit, an unmatched reference, a credit against a clean invoice) and the bundled statement reconciliations **4/4** (an exceptions statement whose printed total disagrees with its lines, a fully clean statement, a statement listing one invoice twice, and the exceptions statement again — arrived as a document, read through the OCR + vision ports — held to exactly its structured twin's expectations with its one garbled line flagged a low-confidence read) and the duplicate-recovery case **1/1** (pack drafted for the approved original, guardrails passed) — a regression gate (≥95% required), not a real-world accuracy claim. The opt-in LLM pack (`evals/run_llm_evals.py`) additionally judges draft grounding/cleanliness with a live provider.
+Golden set: 30 synthetic cases (the 14 samples + 16 variants), run through one service instance in queue order. Current: **outcome 30/30, match status 30/30**, plus the bundled credit-note cases **5/5** (a full settlement, a partial settlement, an over-shooting credit, an unmatched reference, a credit against a clean invoice) and the bundled statement reconciliations **4/4** (an exceptions statement whose printed total disagrees with its lines, a fully clean statement, a statement listing one invoice twice, and the exceptions statement again — arrived as a document, read through the OCR + vision ports — held to exactly its structured twin's expectations with its one garbled line flagged a low-confidence read) and the duplicate-recovery case **1/1** (pack drafted for the approved original, guardrails passed) and the payment-run control case **1/1** (a seeded run — a credit-netted payment, a recovery-flagged payment whose confirmation is refused until the acknowledgement is recorded, and a disputed invoice excluded — held to exact control-report figures, with the recovery receipt checked against the supplier roll-up: only the recovery line moves, by exactly the received amount) — a regression gate (≥95% required), not a real-world accuracy claim. The opt-in LLM pack (`evals/run_llm_evals.py`) additionally judges draft grounding/cleanliness with a live provider.
 
 ## Repository structure
 
@@ -243,7 +245,7 @@ src/ap_agent/migrations/   packaged SQL migrations (mirrored at repo root)
 migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 checkpoints, 0004 reconciliations, 0005 payment runs, 0006 recovery packs, 0007 bundles, 0008 supplier master)
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
-tests/            675 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
+tests/            716 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
 data/sample/      mirrors of the bundled samples + policy corpus
 docs/             architecture.md
 ```
@@ -251,8 +253,8 @@ docs/             architecture.md
 ## QA checklist (for reviewers)
 
 1. `uv sync --extra dev --extra llm --extra postgres --extra s3` — clean install.
-2. `make test` — expect 675 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
-3. `make evals` — expect 30/30 + credit-note 5/5 + statement reconciliation 4/4 + recovery pack 1/1 and PASS.
+2. `make test` — expect 716 passed, 3 skipped (the Postgres integration tests skip without `DATABASE_URL`).
+3. `make evals` — expect 30/30 + credit-note 5/5 + statement reconciliation 4/4 + recovery pack 1/1 + payment-run control 1/1 and PASS.
 4. `make demo` — trace a clean invoice; `uv run ap-agent-demo --index 9` traces the bank-fraud sample (blocked, details masked).
 5. `docker compose up --build` — console at :8000; `/readiness` reports the Postgres store. (Build-verified 2026-10-10: the image builds and the stack runs healthy.)
 6. With `DATABASE_URL=postgresql://ap:ap@localhost:5432/ap` (compose Postgres published via the local override), re-run the test suite — the 3 integration tests now run: Postgres store round-trip, checkpointer pause/resume across instances, pgvector retrieval.

@@ -15,6 +15,12 @@ them, and the drafted supplier query. The Northbeam statement is then
 reconciled a second time from its document form (OCR + vision ports,
 parsed in code) and must land on exactly the structured twin's
 expectations, its one garbled line flagged as a low-confidence read.
+Finally, a dedicated store seeds a payment run — a credit-netted
+payment, a payment flagged ACK_REQUIRED by an open recovery claim
+(confirmation refused until the acknowledgement is recorded), and a
+disputed invoice excluded — held to exact control-report figures,
+and the recovery receipt is checked against the supplier roll-up:
+it may move only the recovery line, by exactly the received amount.
 All cases are synthetic. Run
 from the repo root:
 
@@ -331,6 +337,190 @@ def evaluate(cases: list[dict]) -> dict:
     except Exception as exc:  # a broken recovery path is a failed case
         failures.append(f"recovery pack: {type(exc).__name__}: {exc}")
 
+    # Payment-run control report, on a dedicated store: a seeded
+    # run holding one clean payment (Cascade's INV-1002, its
+    # recorded credit netted), one payment to a supplier with an
+    # open recovery claim (Northbeam's INV-1001 — ACK_REQUIRED,
+    # and confirmation refuses until the acknowledgement lands),
+    # and one disputed invoice excluded (INV-1008, whose amount
+    # Northbeam's statement disagrees with). Then the receipt:
+    # the supplier roll-up must move by exactly the received
+    # amount in its recovery line and nowhere else.
+    control_total = 1
+    control_correct = 0
+    try:
+        cs = InvoiceService(store=InMemoryStore(), checkpointer=False)
+        by_id = {s["invoice_id"]: s for s in load_sample_invoices()}
+        for sample_id in ("INV-1001", "INV-1008", "INV-1002", "INV-1013"):
+            cs.analyze(InvoiceInput.model_validate(by_id[sample_id]))
+        for invoice_id in ("INV-1001", "INV-1002", "INV-1008"):
+            cs.approve(
+                invoice_id,
+                approver="eval-harness",
+                reason="eval: seed the control run",
+            )
+        cs.draft_duplicate_recovery("INV-1013")
+        note_payload = next(
+            p
+            for p in load_sample_credit_notes()
+            if p["credit_note_id"] == "CN-3001"
+        )
+        cs.apply_credit_note(
+            CreditNoteInput.model_validate(note_payload),
+            actor="eval-harness",
+        )
+        statement_payload = next(
+            p
+            for p in load_sample_statements()
+            if p["statement_id"] == "STMT-NB-2026-10"
+        )
+        cs.reconcile_statement(
+            SupplierStatement.model_validate(statement_payload)
+        )
+
+        def northbeam_row():
+            roll = cs.supplier_positions(as_of="2026-10-05")
+            return next(
+                r.model_dump()
+                for r in roll.suppliers
+                if r.supplier_name == "Northbeam Office Supplies"
+            )
+
+        roll_before = northbeam_row()
+        run = next(
+            r
+            for r in cs.propose_payment_runs(as_of="2026-10-05")
+            if r.currency == "USD"
+        )
+        report = cs.payment_run_control_report(run.run_id)
+        lines = {l.invoice_id: l for l in report.lines}
+        gate_refused = False
+        try:
+            cs.confirm_payment_run(run.run_id, actor="eval-harness")
+        except ValueError:
+            gate_refused = True
+        cs.acknowledge_run_recovery(
+            run.run_id, "INV-1001", actor="eval-harness"
+        )
+        confirmed = (
+            cs.confirm_payment_run(run.run_id, actor="eval-harness").status
+            == "confirmed"
+        )
+        cs.transition_recovery_case(
+            "INV-1013", to_status="supplier_contacted", actor="eval-harness"
+        )
+        cs.transition_recovery_case(
+            "INV-1013", to_status="credit_received", actor="eval-harness"
+        )
+        roll_after = northbeam_row()
+        got = {
+            "inv1001": {
+                "match_status": lines["INV-1001"].match_status,
+                "gross": lines["INV-1001"].gross_amount,
+                "discount": lines["INV-1001"].discount_amount,
+                "credit": lines["INV-1001"].credit_amount,
+                "net": lines["INV-1001"].net_amount,
+                "ack_required": lines["INV-1001"].ack_required,
+                "excluded": lines["INV-1001"].excluded,
+                "claimed": lines["INV-1001"].recovery_claimed_amount,
+            },
+            "inv1002": {
+                "gross": lines["INV-1002"].gross_amount,
+                "credit": lines["INV-1002"].credit_amount,
+                "net": lines["INV-1002"].net_amount,
+                "ack_required": lines["INV-1002"].ack_required,
+                "excluded": lines["INV-1002"].excluded,
+            },
+            "inv1008_excluded": lines["INV-1008"].excluded,
+            "inv1008_net": lines["INV-1008"].net_amount,
+            "inv1008_reason_names_statement": (
+                "STMT-NB-2026-10" in lines["INV-1008"].exclusion_reason
+            ),
+            "payable_count": report.payable_count,
+            "excluded_count": report.excluded_count,
+            "ack_required_count": report.ack_required_count,
+            "total_gross": report.total_gross,
+            "total_discount": report.total_discount,
+            "total_credit": report.total_credit,
+            "total_net": report.total_net,
+            "excluded_net": report.excluded_net,
+            "lines_net_total": report.lines_net_total,
+            "totals_agree": report.totals_agree,
+            "gate_refused": gate_refused,
+            "confirmed_after_ack": confirmed,
+            "roll_before_recovery": {
+                "open": roll_before["recovery_open_amount"],
+                "received": roll_before["recovery_received_amount"],
+            },
+            "roll_after_recovery": {
+                "open": roll_after["recovery_open_amount"],
+                "received": roll_after["recovery_received_amount"],
+            },
+            "roll_payable_unchanged": {
+                k: roll_before[k]
+                for k in (
+                    "gross_invoiced",
+                    "credits_applied",
+                    "open_amount",
+                    "disputed_amount",
+                )
+            }
+            == {
+                k: roll_after[k]
+                for k in (
+                    "gross_invoiced",
+                    "credits_applied",
+                    "open_amount",
+                    "disputed_amount",
+                )
+            },
+        }
+        expected = {
+            "inv1001": {
+                "match_status": "full_match",
+                "gross": 1180.00,
+                "discount": 23.60,
+                "credit": 0.00,
+                "net": 1156.40,
+                "ack_required": True,
+                "excluded": False,
+                "claimed": 1180.00,
+            },
+            "inv1002": {
+                "gross": 1274.40,
+                "credit": 94.40,
+                "net": 1180.00,
+                "ack_required": False,
+                "excluded": False,
+            },
+            "inv1008_excluded": True,
+            "inv1008_net": 1180.00,
+            "inv1008_reason_names_statement": True,
+            "payable_count": 2,
+            "excluded_count": 1,
+            "ack_required_count": 1,
+            "total_gross": 2454.40,
+            "total_discount": 23.60,
+            "total_credit": 94.40,
+            "total_net": 2336.40,
+            "excluded_net": 1180.00,
+            "lines_net_total": 3516.40,
+            "totals_agree": True,
+            "gate_refused": True,
+            "confirmed_after_ack": True,
+            "roll_before_recovery": {"open": 1180.00, "received": 0.00},
+            "roll_after_recovery": {"open": 0.00, "received": 1180.00},
+            "roll_payable_unchanged": True,
+        }
+        if got == expected:
+            control_correct = 1
+        else:
+            failures.append(
+                f"payment-run control: expected {expected}, got {got}"
+            )
+    except Exception as exc:  # a broken control path is a failed case
+        failures.append(f"payment-run control: {type(exc).__name__}: {exc}")
+
     total = len(cases)
     return {
         "total": total,
@@ -340,6 +530,8 @@ def evaluate(cases: list[dict]) -> dict:
         "reconciliation_correct": reconciliation_correct,
         "recovery_total": recovery_total,
         "recovery_correct": recovery_correct,
+        "control_total": control_total,
+        "control_correct": control_correct,
         "outcome_correct": outcome_correct,
         "outcome_accuracy": round(outcome_correct / total, 4) if total else 0.0,
         "match_correct": match_correct,
@@ -372,6 +564,7 @@ def main() -> int:
         and scored["credit_note_correct"] == scored["credit_note_total"]
         and scored["reconciliation_correct"] == scored["reconciliation_total"]
         and scored["recovery_correct"] == scored["recovery_total"]
+        and scored["control_correct"] == scored["control_total"]
     )
 
     _write_results(
@@ -390,6 +583,9 @@ def main() -> int:
             ),
             "recovery_pack": (
                 f"{scored['recovery_correct']}/{scored['recovery_total']}"
+            ),
+            "payment_run_control": (
+                f"{scored['control_correct']}/{scored['control_total']}"
             ),
             "outcome_correct": scored["outcome_correct"],
             "outcome_accuracy": scored["outcome_accuracy"],
@@ -430,6 +626,10 @@ def main() -> int:
     print(
         f"Recovery pack           : {scored['recovery_correct']}/"
         f"{scored['recovery_total']}"
+    )
+    print(
+        f"Payment-run control     : {scored['control_correct']}/"
+        f"{scored['control_total']}"
     )
     for outcome, row in scored["per_outcome"].items():
         print(f"  {outcome:<20} {row['correct']}/{row['total']}")
