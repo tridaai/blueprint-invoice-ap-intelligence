@@ -18,8 +18,27 @@ what stop it. See the guardrail-trap sample.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .schemas import Drafts, GuardrailCheck, InvoiceInput, Validation
+
+# Typography a model emits that would otherwise hide text from the
+# checks below: non-breaking / figure / en / em hyphens and the minus
+# sign read as "-"; non-breaking and thin spaces read as " "; a digit
+# group split by a thin space ("9 999.00") reads as one number. The
+# checks judge the normalised text — "[AP‑FAKE‑99]" with non-breaking
+# hyphens is the same invented citation as "[AP-FAKE-99]".
+_HYPHENS = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"), "-")
+_SPACES = dict.fromkeys(map(ord, "\u00a0\u2007\u2009\u202f\u2002\u2003"), " ")
+_DIGIT_GROUP = re.compile(r"(?<=\d)[\u00a0\u2007\u2009\u202f](?=\d{3}\b)")
+
+
+def normalize_text(text: str) -> str:
+    """Draft text with its typography made plain for the checks."""
+    text = _DIGIT_GROUP.sub("", text or "")
+    text = unicodedata.normalize("NFKC", text)
+    return text.translate(_HYPHENS).translate(_SPACES)
+
 
 # Affirmative payment language. Each match is checked against a
 # negation window (see _affirmative): "no payment is made by this
@@ -33,6 +52,11 @@ _PAYMENT_PATTERNS = [
     r"\bpaid (on|by) (the )?\d",
     r"\bremittance (has been|was) sent\b",
     r"\bfunds (have been|were|will be) (transferred|sent|released)\b",
+    # Scheduling is a payment promise too: "payment is scheduled for
+    # 30 October", "your invoice is scheduled for payment".
+    r"\bpayment (is|has been|was|will be) (now )?(scheduled|queued|released|initiated|authori[sz]ed)\b",
+    r"\b(scheduled|queued|cleared|released|lined up) for payment\b",
+    r"\b(we|ap|accounts payable) (will|shall) (release|remit|process|issue|send|transfer) (the |your |this )?(payment|funds|remittance)\b",
 ]
 
 # Bank-detail content in a draft: quoting account identifiers or
@@ -52,11 +76,24 @@ _BANK_PATTERNS = [
 _NEGATION = re.compile(r"\b(not|never|no|n't|nor)\b", re.IGNORECASE)
 
 
+_CLAUSE_BREAK = re.compile(r"[.;:!?\n]")
+
+
 def _affirmative(pattern: str, text: str) -> str | None:
-    """First match of ``pattern`` not preceded by a negation within
-    30 characters — returns the matched phrase, or None."""
+    """First match of ``pattern`` not negated in its own clause —
+    returns the matched phrase, or None.
+
+    The negation must sit in the same clause, within 30 characters
+    before the match: "no payment is made by this letter" is the
+    required disclaimer, but in "No further info needed; payment
+    will be made Friday" the "No" belongs to a different clause and
+    negates nothing about the payment."""
     for match in re.finditer(pattern, text, re.IGNORECASE):
-        window = text[max(0, match.start() - 30):match.start()]
+        start = max(0, match.start() - 30)
+        breaks = list(_CLAUSE_BREAK.finditer(text, start, match.start()))
+        if breaks:
+            start = breaks[-1].end()
+        window = text[start:match.start()]
         if _NEGATION.search(window):
             continue
         return match.group(0)
@@ -88,7 +125,7 @@ _PROMISE_PATTERNS = [
 # stated as 1000.00 against a computed 1070.00).
 _AMOUNT_SYMBOL = re.compile(r"[$€£]\s?(\d[\d,]*(?:\.\d{1,2})?)")
 _AMOUNT_CODE_AFTER = re.compile(
-    r"\b(?:USD|EUR|GBP|INR|CAD|AUD|CHF|JPY)\s?(\d[\d,]*(?:\.\d{1,2})?)", re.I
+    r"\b(?:USD|EUR|GBP|INR|CAD|AUD|CHF|JPY)\s?[-+]?\s?(\d[\d,]*(?:\.\d{1,2})?)", re.I
 )
 _AMOUNT_CODE_BEFORE = re.compile(
     r"(\d[\d,]*(?:\.\d{1,2})?)\s?(?:USD|EUR|GBP|INR|CAD|AUD|CHF|JPY)\b", re.I
@@ -96,6 +133,14 @@ _AMOUNT_CODE_BEFORE = re.compile(
 _AMOUNT_LABELLED = re.compile(
     r"\b(?:subtotal|total|amount|tax|balance|gross|net|sum)\b"
     r"[^.\d]{0,24}?(\d[\d,]*\.\d{1,2})\b",
+    re.I,
+)
+# A whole-number amount stated against a money label ("a total of
+# 9999"). "net" / "gross" are left out: payment terms ("2/10 net 30")
+# put a day count after them, not an amount.
+_AMOUNT_LABELLED_WHOLE = re.compile(
+    r"\b(?:subtotal|total|amount|tax|balance|sum)\b"
+    r"(?:\s+(?:of|is|was|due|amount|owed))?[\s:=]{1,3}(\d[\d,]*)(?![\d,]*\.\d)(?!\d)",
     re.I,
 )
 
@@ -108,6 +153,7 @@ def _letter_amounts(letter: str) -> list[float]:
         _AMOUNT_CODE_AFTER,
         _AMOUNT_CODE_BEFORE,
         _AMOUNT_LABELLED,
+        _AMOUNT_LABELLED_WHOLE,
     ):
         for match in pattern.finditer(letter):
             try:
@@ -168,6 +214,17 @@ _OUTCOME_CLAIM_PATTERNS = [
     r"\bclean match\b",
 ]
 _FULL_MATCH_CLAIM_PATTERN = r"\bfull match\b"
+
+
+# A policy citation, bracketed or bare: "[AP-MATCH-01]", "AP-MATCH-01".
+POLICY_ID = re.compile(r"(?<![A-Za-z0-9-])(AP-[A-Z]+-\d+)(?![A-Za-z0-9-])")
+
+
+def cited_policies(text: str) -> list[str]:
+    """Every policy id ``text`` cites, bracketed or not, in order of
+    first appearance — read from the normalised text, so typography
+    cannot hide a citation from the checks."""
+    return list(dict.fromkeys(POLICY_ID.findall(normalize_text(text))))
 
 
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
@@ -272,9 +329,10 @@ def validate_drafts(
     claims are traced against; the production paths (graph,
     recovery) always supply them — a caller that cannot is told
     in the check's detail that the claims went unevaluated."""
-    letter = drafts.supplier_letter or ""
-    packet = drafts.ap_packet or ""
-    combined = f"{drafts.subject}\n{letter}\n{packet}"
+    letter = normalize_text(drafts.supplier_letter or "")
+    packet = normalize_text(drafts.ap_packet or "")
+    subject = normalize_text(drafts.subject or "")
+    combined = f"{subject}\n{letter}\n{packet}"
     checks: list[GuardrailCheck] = []
 
     present = invoice.invoice_id in combined
@@ -350,14 +408,21 @@ def validate_drafts(
         )
     )
 
+    # The drafts themselves must cite at least one retrieved policy —
+    # a retrieved set the drafts never mention grounds nothing.
+    cited = sorted(set(cited_policies(combined)))
+    grounded = [c for c in cited if c in citations]
     checks.append(
         GuardrailCheck(
             name="policy_citations_present",
-            passed=bool(citations),
+            passed=bool(grounded),
             detail=(
-                f"policy citations present: {citations}"
-                if citations
-                else "no policy citations — every triage must cite its policies"
+                f"policy citations present: {grounded}"
+                if grounded
+                else (
+                    "the drafts cite no retrieved policy — every triage must "
+                    f"cite its policies (retrieved: {citations or 'none'})"
+                )
             ),
         )
     )
@@ -366,8 +431,8 @@ def validate_drafts(
     # that cites a plausible-but-unretrieved policy (the judge pack
     # caught [AP-DOC-02] in a letter) is inventing authority — the
     # verify checklist flags it as ungrounded, and this check makes
-    # it blocking, over letter and packet alike.
-    cited = sorted(set(re.findall(r"\[(AP-[A-Z]+-\d+)\]", combined)))
+    # it blocking, over letter and packet alike. Bracketed or bare,
+    # any typography: the ids are read from the normalised text.
     unretrieved = [c for c in cited if c not in citations]
     checks.append(
         GuardrailCheck(
@@ -430,7 +495,7 @@ def validate_drafts(
     # judge's catch on the quantity-variance case. Scoped to the
     # subject + letter (the supplier-facing claims); the packet
     # prints the computed facts and is exempt.
-    claim_text = f"{drafts.subject}\n{letter}"
+    claim_text = f"{subject}\n{letter}"
     if outcome is None:
         checks.append(
             GuardrailCheck(
@@ -484,15 +549,17 @@ def validate_drafts(
             )
         )
 
-    next_step = "next step" in combined.lower()
+    # The supplier is the one who needs the next step: it must be in
+    # the letter, not only in the internal packet.
+    next_step = "next step" in letter.lower()
     checks.append(
         GuardrailCheck(
             name="states_next_step",
             passed=next_step,
             detail=(
-                "the drafts state the next step"
+                "the supplier letter states the next step"
                 if next_step
-                else "the drafts never state the next step for the supplier"
+                else "the supplier letter never states the next step for the supplier"
             ),
         )
     )

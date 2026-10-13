@@ -214,6 +214,7 @@ def build_recovery_pack(
         drafts=drafts,
         retrieved_ids=citations,
         backend=backend,
+        policies=[p.model_dump() for p in dup_result.policies],
     )
     validation = validate_drafts(
         invoice,

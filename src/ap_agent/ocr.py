@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from .config import completion_budget, env_float, env_str, load_dotenv
 from .errors import translate_provider_error
+from .resilience import call_with_transient_retry
 from .schemas import DocumentInput, OcrResult
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
@@ -112,7 +113,7 @@ class NimOcrEngine:
         from .model_backends import parse_json_object
 
         try:
-            response = self._client.chat.completions.create(
+            response = call_with_transient_retry(lambda: self._client.chat.completions.create(
                 model=self._model,
                 temperature=0,
                 max_tokens=completion_budget(
@@ -122,7 +123,7 @@ class NimOcrEngine:
                     {"role": "system", "content": _OCR_SYSTEM},
                     {"role": "user", "content": document.text_layer},
                 ],
-            )
+            ))
         except Exception as exc:
             raise translate_provider_error(
                 exc, backend="nim-ocr", base_url=self.base_url

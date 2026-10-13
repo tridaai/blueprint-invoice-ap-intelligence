@@ -37,7 +37,7 @@ def test_postgres_store_roundtrip():
         assert result.triage.outcome == "clean_match"
         stored = store.get_result("INV-1001")
         assert stored is not None and stored.invoice_id == "INV-1001"
-        service.approve("INV-1001", approver="integration-test")
+        service.approve("INV-1001", approver="integration-test", reason="approved in test")
         assert store.get_result("INV-1001").status == "approved"
     finally:
         store.close()

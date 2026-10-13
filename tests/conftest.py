@@ -49,7 +49,7 @@ _SCRUB_EXACT = {
 }
 
 # Variable families scrubbed by prefix / suffix.
-_SCRUB_PREFIXES = ("OPENAI_", "ANTHROPIC_", "OLLAMA_", "LLM_", "REVIEWER", "S3_", "NVIDIA_")
+_SCRUB_PREFIXES = ("OPENAI_", "ANTHROPIC_", "OLLAMA_", "LLM_", "REVIEWER", "S3_", "NVIDIA_", "NIM_")
 _SCRUB_SUFFIXES = ("_API_KEY", "_MODEL", "_BASE_URL")
 
 

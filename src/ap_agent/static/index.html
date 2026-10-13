@@ -340,16 +340,19 @@ function render(r) {
     ${(r.fraud_flags || []).map(x => `<p class="kv">Fraud screen: ${esc(x)}</p>`).join("")}
     ${(r.injection_flags || []).map(x => `<p class="kv">Injection screen: ${esc(x)}</p>`).join("")}
     <p class="kv">Status: <b>${esc(r.status)}</b>${r.decided_by ? ` · decided by ${esc(r.decided_by)}${r.decision_reason ? " — " + esc(r.decision_reason) : ""}` : ""}</p>
-    <div class="gate">
+    ${(fraud || (r.facts && r.facts.duplicate_suspected)) && r.status === "awaiting_approver" ? `<p class="kv"><b>On hold:</b> ${[r.facts && r.facts.duplicate_suspected ? `suspected duplicate of ${esc(r.facts.duplicate_of || "an invoice on file")}` : "", fraud ? "bank-detail change request" : ""].filter(Boolean).join("; ")}. Approving requires acknowledging the hold, with a reason stating how it was resolved. Unacknowledged holds never reach a payment run.</p>` : ""}
+    ${(r.holds_acknowledged || []).length ? `<p class="kv">Holds acknowledged at approval: ${r.holds_acknowledged.map(esc).join(", ")}</p>` : ""}
+    ${r.status === "awaiting_approver" ? `<div class="gate">
       <input type="text" id="actor" placeholder="Your name (approver)" size="20">
-      <input type="text" id="reason" placeholder="Reason (recorded; teaches later runs)" size="34">
+      <input type="text" id="reason" placeholder="Reason (required; recorded)" size="34">
+      ${(fraud || (r.facts && r.facts.duplicate_suspected)) ? `<label class="note"><input type="checkbox" id="ackholds"> I acknowledge the hold</label>` : ""}
       <button id="approve">Approve packet</button>
       <button id="reject" class="secondary">Reject</button>
     </div>
-    <p class="note">Approving records the decision only — it never pays the invoice. Drafts that fail guardrails cannot be approved (the API returns 422).</p>
+    <p class="note">Approving records the decision only — it never pays the invoice. Drafts that fail guardrails cannot be approved (the API returns 422). Overriding a hold needs a reason that says how it was resolved.</p>` : `<p class="note">Decided — the decision and its reason stand; a decided invoice is not re-analysed or re-decided.</p>`}
     ${r.status === "approved" ? receiptHtml(r) : ""}`;
-  $("approve").onclick = () => decide("approve");
-  $("reject").onclick = () => decide("reject");
+  if ($("approve")) $("approve").onclick = () => decide("approve");
+  if ($("reject")) $("reject").onclick = () => decide("reject");
   const recBtn = $("recordreceipt");
   if (recBtn) recBtn.onclick = recordReceipt;
   renderRecovery(r);
@@ -458,7 +461,9 @@ async function recordReply() {
 async function decide(kind) {
   const actor = $("actor").value.trim(), reason = $("reason").value.trim();
   if (!actor) { $("status").textContent = "Enter your name first — decisions are attributable."; return; }
-  const res = await fetch(`/invoices/${currentId}/${kind}`, {method: "POST", headers: headers(), body: JSON.stringify({actor, reason})});
+  if (kind === "approve" && !reason) { $("status").textContent = "Enter a reason — an approval records why."; return; }
+  const acknowledge_holds = !!($("ackholds") && $("ackholds").checked);
+  const res = await fetch(`/invoices/${currentId}/${kind}`, {method: "POST", headers: headers(), body: JSON.stringify({actor, reason, acknowledge_holds})});
   const body = await res.json();
   if (!res.ok) { $("status").textContent = `Decision refused (${res.status}): ${body.detail || "unknown error"}`; return; }
   $("status").textContent = `Recorded: ${body.status} by ${body.decided_by}. No payment was made — approval readies the packet for the AP system of record.`;
@@ -472,6 +477,13 @@ $("run").onclick = async () => {
   try {
     const res = await fetch("/invoices/analyze", {method: "POST", headers: headers(), body: JSON.stringify(sample)});
     const body = await res.json();
+    if (res.status === 409) {
+      // Already decided: show the decision on record instead of re-running it.
+      const existing = await fetch(`/invoices/${encodeURIComponent(sample.invoice_id)}`, {headers: headers()});
+      if (existing.ok) { render(await existing.json()); }
+      $("status").textContent = `${sample.invoice_id} was already decided — showing the decision on record (a decided invoice is not re-analysed).`;
+      return;
+    }
     if (!res.ok) { $("status").textContent = `Analysis failed (${res.status}): ${body.detail || ""}`; return; }
     render(body);
     $("status").textContent = `Analysed ${body.invoice_id}: ${body.triage.outcome} — awaiting a finance approver.`;

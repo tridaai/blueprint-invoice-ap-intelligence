@@ -25,7 +25,7 @@ def test_inmemory_store_roundtrip_and_decision():
     record = store.get("INV-1001")
     assert record is not None and record.result.invoice_id == "INV-1001"
     assert [h["invoice_id"] for h in store.prior_invoices(exclude_invoice_id="")] == ["INV-1001"]
-    service.approve("INV-1001", approver="priya")
+    service.approve("INV-1001", approver="priya", reason="approved in test")
     assert store.get("INV-1001").result.status == "approved"
     assert store.ping() is True
 

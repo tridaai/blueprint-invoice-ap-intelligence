@@ -54,6 +54,7 @@ from .paymentruns import price_four_eyes_wait as _price_four_eyes_wait
 from .paymentruns import drift_forecast as _drift_forecast
 from .paymentruns import propose_payment_runs as _propose_runs
 from .paymentruns import run_member_ids
+from .paymentruns import unacknowledged_holds as _unacknowledged_holds
 from .queue import (
     build_queue,
     information_escalation_follow_through,
@@ -685,6 +686,12 @@ def dispatch_information_wait_webhook(
     return _post_signed_webhook(payload)
 
 
+# An approval that overrides a hold (a suspected duplicate, a held
+# bank change) must say how the hold was resolved — "looks fine" is
+# not a record an auditor can rely on.
+MIN_HOLD_OVERRIDE_REASON = 25
+
+
 @dataclass
 class InvoiceService:
     backend: ModelBackend | None = None
@@ -791,9 +798,30 @@ class InvoiceService:
         # this supplier becomes diagnosis evidence for the new analysis.
         # The raw entries ride along too — the diagnosis tool loop
         # (provider mode) reads supplier / supplier history through them.
-        priors = self._get_store().prior_invoices(
-            exclude_invoice_id=model.invoice_id
-        )
+        store = self._get_store()
+        existing = store.get(model.invoice_id)
+        # A decision stands. Re-analysing a decided invoice would
+        # overwrite its record — status, approver, reason, holds — and
+        # erase the audit trail; it is refused instead.
+        if existing is not None and existing.result.status != "awaiting_approver":
+            raise ValueError(
+                f"Invoice {model.invoice_id} was already decided "
+                f"({existing.result.status} by {existing.result.decided_by or 'unknown'}) "
+                "— a decided invoice is not re-analysed; its decision and "
+                "audit trail stand"
+            )
+        priors = store.prior_invoices(exclude_invoice_id=model.invoice_id)
+        if existing is not None:
+            # Re-running an undecided invoice: it is judged against
+            # what had arrived before it, as on its first run — a copy
+            # that arrived later never makes the original a duplicate
+            # of its own copy.
+            earlier: set[str] = set()
+            for record in store.list_records():
+                if record.result.invoice_id == model.invoice_id:
+                    break
+                earlier.add(record.result.invoice_id)
+            priors = [p for p in priors if p.get("invoice_id") in earlier]
         history = self._history_summary(model, priors)
         # Feedback loop: what approvers said about earlier cases
         # for this supplier (with their reasons) joins the same
@@ -962,8 +990,20 @@ class InvoiceService:
             close()
 
     def approve(
-        self, invoice_id: str, approver: str, reason: str = ""
+        self,
+        invoice_id: str,
+        approver: str,
+        reason: str = "",
+        acknowledge_holds: bool = False,
     ) -> AgentResult:
+        """Record a named approver's approval, with their reason.
+
+        Refused when the reason is blank, when the drafts failed their
+        guardrails, or when the invoice carries a hold — a suspected
+        duplicate or a bank-detail change the fraud screen held —
+        that the approver did not explicitly acknowledge. Acknowledged
+        holds are stamped on the result; unacknowledged ones keep an
+        invoice out of every payment run."""
         store = self._get_store()
         record = store.get(invoice_id)
         if record is None:
@@ -982,9 +1022,38 @@ class InvoiceService:
             raise ValueError(
                 "Draft failed guardrail validation and cannot be approved: " + failed
             )
+        if not (reason or "").strip():
+            raise ValueError(
+                f"An approval of {invoice_id} needs a reason — the record "
+                "states why the approver decided as they did"
+            )
+        holds = _unacknowledged_holds(record.result)
+        if holds and acknowledge_holds and len(reason.strip()) < MIN_HOLD_OVERRIDE_REASON:
+            raise ValueError(
+                f"Overriding the hold on {invoice_id} needs a specific reason "
+                f"(at least {MIN_HOLD_OVERRIDE_REASON} characters) stating how the hold was "
+                "resolved — for a duplicate, why this is not the same bill; for "
+                "a bank change, who verified it and how"
+            )
+        if holds and not acknowledge_holds:
+            named = []
+            if "duplicate_suspected" in holds:
+                named.append(
+                    "suspected duplicate of "
+                    f"{record.result.facts.duplicate_of or 'an invoice on file'}"
+                )
+            if "bank_change_blocked" in holds:
+                named.append("bank-detail change request held by the fraud screen")
+            raise ValueError(
+                f"Invoice {invoice_id} is on hold ({'; '.join(named)}). "
+                "Approving it requires acknowledge_holds, with a reason "
+                "stating how the hold was resolved (for a bank change: the "
+                "out-of-band verification)"
+            )
         record.approved = True
         record.approver = approver
         record.approve_reason = reason
+        record.result.holds_acknowledged = list(holds)
         record.result.status = "approved"
         record.result.decision = "approved"
         record.result.decided_by = approver

@@ -61,24 +61,24 @@ def test_approve_and_reject_flow(client):
     assert decided.status_code == 200
     assert decided.json()["status"] == "approved"
     assert decided.json()["decided_by"] == "priya.finance"
-    again = client.post("/invoices/INV-1001/approve", json={"approver": "priya"})
+    again = client.post("/invoices/INV-1001/approve", json={"approver": "priya", "reason": "approved in test"})
     assert again.status_code == 422
 
 
 def test_decision_requires_actor(client):
     client.post("/invoices/analyze", json=SAMPLES[0])
-    assert client.post("/invoices/INV-1001/approve", json={}).status_code == 422
+    assert client.post("/invoices/INV-1001/approve", json={"reason": "approved in test"}).status_code == 422
 
 
 def test_unknown_invoice_404(client):
     assert client.get("/invoices/INV-9999").status_code == 404
-    assert client.post("/invoices/INV-9999/approve", json={"approver": "x"}).status_code == 404
+    assert client.post("/invoices/INV-9999/approve", json={"approver": "x", "reason": "approved in test"}).status_code == 404
 
 
 def test_guardrail_failed_draft_cannot_be_approved_via_api(client):
     trap = next(s for s in SAMPLES if s["invoice_id"] == "INV-1012")
     client.post("/invoices/analyze", json=trap)
-    response = client.post("/invoices/INV-1012/approve", json={"approver": "priya"})
+    response = client.post("/invoices/INV-1012/approve", json={"approver": "priya", "reason": "approved in test"})
     assert response.status_code == 422
     assert "guardrail" in response.text.lower()
 

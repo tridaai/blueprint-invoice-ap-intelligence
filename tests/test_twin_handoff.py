@@ -6,8 +6,9 @@ graph attached — but working it still meant opening every
 member and deciding record by record, the exact chore the
 escalation existed to end. The hand-off is one act:
 ``approve_all`` approves every waiting member THROUGH the
-cluster (each via the standard approval path, guardrails
-included), or ``split`` dissolves the grouping with a named
+cluster (each via the standard approval path, guardrails and
+holds included — a copy on a duplicate hold is refused by name,
+so the bulk act never approves the same bill twice), or ``split`` dissolves the grouping with a named
 reason when the members are not the same invoice after all.
 Either way the act is stamped on every member's own record —
 cluster, action, actor, reason, and that member's outcome —
@@ -67,19 +68,32 @@ def test_approve_all_decides_every_member_through_the_cluster(service):
     )
     assert report["cluster_id"] == CLUSTER_ID
     outcomes = {m["invoice_id"]: m["outcome"] for m in report["members"]}
-    assert outcomes == {member: "approved" for member in MEMBERS}
+    # One payment, approved once: the original is approved through the
+    # cluster; the copies carry a duplicate hold, and the bulk act does
+    # not acknowledge holds — it refuses them by name, exactly as it
+    # refuses a guardrail-blocked member. Approving all three would put
+    # the same bill in a payment run three times.
+    assert outcomes["INV-1001"] == "approved"
+    for copy_id in ("INV-1004", "INV-9001"):
+        assert outcomes[copy_id].startswith("blocked:")
+        assert "suspected duplicate of INV-1001" in outcomes[copy_id]
+        assert service._get_store().get(copy_id).result.status == "awaiting_approver"
+    original = service._get_store().get("INV-1001")
+    assert original.result.status == "approved"
+    assert original.result.decided_by == "Priya Nair"
     for member in MEMBERS:
-        record = service._get_store().get(member)
-        assert record.result.status == "approved"
-        assert record.result.decided_by == "Priya Nair"
         (stamp,) = _stamps(service, member)
         assert stamp["cluster_id"] == CLUSTER_ID
         assert stamp["action"] == "approve_all"
         assert stamp["actor"] == "Priya Nair"
-        assert stamp["outcome"] == "approved"
+        assert stamp["outcome"] == outcomes[member]
         assert "verified against the PO" in stamp["reason"]
-    # The case is closed: nothing is left at the gate.
-    assert service.queue_view().twin_escalation_count == 0
+    # The copies still wait for a decision (a rejection, or an
+    # acknowledged approval), so the case stays on the worklist — and
+    # only the original reaches a payment run.
+    assert service.queue_view().twin_escalation_count == 1
+    runs = service.propose_payment_runs(window_days=60, as_of="2026-10-01")
+    assert {line.invoice_id for run in runs for line in run.lines} == {"INV-1001"}
 
 
 def test_approve_all_keeps_a_decision_already_made(service):
@@ -93,8 +107,9 @@ def test_approve_all_keeps_a_decision_already_made(service):
     )
     outcomes = {m["invoice_id"]: m["outcome"] for m in report["members"]}
     assert outcomes["INV-1001"] == "already_approved"
-    assert outcomes["INV-1004"] == "approved"
-    assert outcomes["INV-9001"] == "approved"
+    # The copies are on a duplicate hold; the bulk act refuses them by name.
+    assert outcomes["INV-1004"].startswith("blocked:")
+    assert outcomes["INV-9001"].startswith("blocked:")
     # The earlier decision stands untouched; the cluster act is
     # recorded beside it, not over it.
     original = service._get_store().get("INV-1001")

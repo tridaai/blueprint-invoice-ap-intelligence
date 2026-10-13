@@ -20,7 +20,7 @@ def service() -> InvoiceService:
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     for invoice_id in ("INV-1001", "INV-1005", "INV-1006", "INV-1008"):
         svc.analyze(SAMPLES[invoice_id])
-    svc.approve("INV-1001", approver="Priya Nair")  # decided: leaves the queue
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")  # decided: leaves the queue
     return svc
 
 

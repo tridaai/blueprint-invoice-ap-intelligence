@@ -237,13 +237,14 @@ class DocumentExtraction(BaseModel):
 class LineMatch(BaseModel):
     line_no: int = 0
     description: str = ""
-    status: str = "matched"  # matched|price_variance|quantity_variance|short_received|missing_on_po|missing_on_invoice|unmatched
+    status: str = "matched"  # matched|price_variance|line_total_mismatch|quantity_variance|short_received|missing_on_po|missing_on_invoice|unmatched
     invoice_qty: float = 0.0
     po_qty: float = 0.0
     received_qty: float = 0.0
     invoice_price: float = 0.0
     po_price: float = 0.0
     price_variance_pct: float = 0.0
+    stated_line_total: Optional[float] = None  # the invoice's own line total, when it states one
     detail: str = ""
 
 
@@ -551,6 +552,10 @@ class AgentResult(BaseModel):
     decided_by: Optional[str] = None
     decided_at: Optional[str] = None  # ISO timestamp of the gate decision
     decision_reason: Optional[str] = None
+    # Holds the approver explicitly acknowledged when approving
+    # (``duplicate_suspected`` / ``bank_change_blocked``). An approved
+    # invoice with an unacknowledged hold never reaches a payment run.
+    holds_acknowledged: list[str] = Field(default_factory=list)
     dispatch_status: Optional[str] = None  # sent | failed | None
     posting_receipt: Optional["PostingReceipt"] = None
     # Open-posting escalations fired for this invoice (see
@@ -2692,6 +2697,9 @@ class DecisionRequest(BaseModel):
     approver: Optional[str] = None
     reviewer: Optional[str] = None
     reason: Optional[str] = None
+    # Approving an invoice on hold (suspected duplicate, bank-detail
+    # change) requires saying so explicitly; the reason records why.
+    acknowledge_holds: bool = False
 
     def actor_name(self) -> Optional[str]:
         return self.actor or self.approver or self.reviewer

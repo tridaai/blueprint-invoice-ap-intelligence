@@ -71,7 +71,7 @@ def test_bundle_processes_each_invoice_as_its_own_run(bundle):
 def test_bundle_invoice_decisions_are_independent(bundle):
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze_bundle(bundle)
-    svc.approve("BND-4001-01", approver="Priya Nair")
+    svc.approve("BND-4001-01", approver="Priya Nair", reason="approved in test")
     assert svc.get("BND-4001-01").status == "approved"
     assert svc.get("BND-4001-02").status == "awaiting_approver"
 

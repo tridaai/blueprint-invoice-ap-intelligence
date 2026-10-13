@@ -6,7 +6,9 @@ confirms. The agent's part stops exactly where its authority stops:
 
 - Eligibility is a fact from the store: the invoice's human decision
   is ``approved``. Nothing awaiting, rejected, or already inside a
-  confirmed run is proposed again.
+  confirmed run is proposed again, and nothing carrying a hold its
+  approver did not acknowledge (a suspected duplicate, a held
+  bank-detail change) is proposed at all.
 - Grouping is arithmetic: by currency, then by due window —
   consecutive ``window_days``-long windows anchored on ``as_of``,
   with overdue invoices swept into the first window.
@@ -97,6 +99,21 @@ def _line_for(
     )
 
 
+def unacknowledged_holds(result) -> list[str]:
+    """The holds on an invoice result its approver did not explicitly
+    acknowledge: a suspected duplicate, or a bank-detail change the
+    fraud screen held. Either keeps the invoice out of a payment run —
+    paying it would pay the same bill twice, or pay a requested account
+    nobody verified."""
+    holds = []
+    if result.facts.duplicate_suspected:
+        holds.append("duplicate_suspected")
+    if result.bank_change_blocked:
+        holds.append("bank_change_blocked")
+    acknowledged = set(result.holds_acknowledged or [])
+    return [h for h in holds if h not in acknowledged]
+
+
 def propose_payment_runs(
     records: list[ApprovalRecord],
     *,
@@ -132,6 +149,8 @@ def propose_payment_runs(
         if result.status != "approved":
             continue
         if result.invoice_id in excluded:
+            continue
+        if unacknowledged_holds(result):
             continue
         invoice = record.invoice or {}
         currency = str(invoice.get("currency") or result.facts.currency or "USD")

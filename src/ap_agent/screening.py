@@ -116,12 +116,27 @@ def _is_bank_change(sentence: str) -> bool:
     return any(p.search(sentence) for p in _BANK_CHANGE_PATTERNS)
 
 
+# A sentence that states bank identifiers — an account-length digit
+# run, a sort code, or an IBAN — next to a bank word. Drafts never
+# carry bank details at all [AP-BANK-01], whether the sentence asks
+# for a change or merely restates the account on file.
+_BANK_WORD = re.compile(r"\b(bank|account|acc|acct|remit\w*|iban|sort code|s/c|routing|swift|bic)\b", re.I)
+_BANK_IDENTIFIER = re.compile(r"\d{6,}|\b\d{2}-\d{2}-\d{2}\b|\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")
+
+
+def _states_bank_details(sentence: str) -> bool:
+    return bool(_BANK_WORD.search(sentence) and _BANK_IDENTIFIER.search(sentence))
+
+
 def sanitize_text(text: str) -> str:
     """Remove flagged sentences (injection AND bank-change) — neither
-    may reach a prompt the model drafts from. The flags themselves
-    carry the evidence for the approver."""
+    may reach a prompt the model drafts from — and any sentence that
+    states bank identifiers, which no draft may echo. The flags
+    themselves carry the evidence for the approver."""
     return " ".join(
-        s for s in _sentences(text) if not _is_flagged(s) and not _is_bank_change(s)
+        s
+        for s in _sentences(text)
+        if not _is_flagged(s) and not _is_bank_change(s) and not _states_bank_details(s)
     ).strip()
 
 

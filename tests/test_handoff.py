@@ -100,7 +100,7 @@ def test_export_requires_a_confirmed_run():
         object_store=InMemoryObjectStore(),
     )
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     run = svc.propose_payment_runs(as_of="2026-10-20")[0]
     with pytest.raises(ValueError, match="only a confirmed run"):
         svc.export_payment_run_handoff(run.run_id, actor="Tomas Reid")
@@ -111,7 +111,7 @@ def test_export_requires_a_confirmed_run():
 def test_export_requires_object_storage():
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     run = svc.propose_payment_runs(as_of="2026-10-20")[0]
     svc.confirm_payment_run(run.run_id, actor="Tomas Reid")
     with pytest.raises(ValueError, match="Object storage is not configured"):

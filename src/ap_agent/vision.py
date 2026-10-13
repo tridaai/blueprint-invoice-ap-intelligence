@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from .config import completion_budget, env_float, env_str, load_dotenv
 from .errors import translate_provider_error
+from .resilience import call_with_transient_retry
 from .ocr import LOW_CONFIDENCE_THRESHOLD
 from .schemas import DocumentInput, InvoiceInput, OcrResult, VisionResult
 
@@ -134,7 +135,7 @@ class NimVision:
             f"Document text:\n---\n{primary.text_layer[:3000]}\n---"
         )
         try:
-            response = self._client.chat.completions.create(
+            response = call_with_transient_retry(lambda: self._client.chat.completions.create(
                 model=self._model,
                 temperature=0,
                 max_tokens=completion_budget(
@@ -144,7 +145,7 @@ class NimVision:
                     {"role": "system", "content": _VISION_SYSTEM},
                     {"role": "user", "content": user},
                 ],
-            )
+            ))
         except Exception as exc:
             raise translate_provider_error(
                 exc, backend="nim-vision", base_url=self.base_url

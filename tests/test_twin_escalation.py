@@ -141,7 +141,7 @@ def test_a_pair_escalates_on_combined_value(service):
 
 def test_an_approved_twin_spanning_a_waiting_one_always_escalates(service):
     _pair(service)
-    service.approve("INV-1001", approver="Priya Nair")
+    service.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     view = service.queue_view()
     assert view.twin_escalation_count == 1
     item = view.twin_escalations[0]
@@ -155,7 +155,7 @@ def test_an_approved_twin_spanning_a_waiting_one_always_escalates(service):
 def test_the_span_outranks_value_in_work_order(service):
     _pair(service)
     _big_pair(service)
-    service.approve("INV-1001", approver="Priya Nair")
+    service.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     view = service.queue_view()
     assert view.twin_escalation_count == 2
     # The live double-payment risk (2360 committed + waiting)

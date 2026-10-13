@@ -76,6 +76,12 @@ def overbilled_amount(record: ApprovalRecord) -> tuple[float, list[str]]:
         elif m.status == "missing_on_po":
             over = m.invoice_qty * m.invoice_price
             why = "no matching line on the purchase order"
+        elif m.status == "line_total_mismatch" and m.stated_line_total is not None:
+            over = m.stated_line_total - m.invoice_qty * m.invoice_price
+            why = (
+                f"stated line total {m.stated_line_total:.2f} vs "
+                f"{m.invoice_qty:g} x {m.invoice_price}"
+            )
         else:
             continue
         if over <= 0:

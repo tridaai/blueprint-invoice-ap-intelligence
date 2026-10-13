@@ -172,7 +172,12 @@ def test_recovery_refused_for_non_duplicate(service):
 
 
 def test_both_approved_is_the_worst_case_exposure(service):
-    service.approve("INV-1013", approver="Tomas Reid", reason="missed the flag")
+    # The worst case needs a deliberate override now: the duplicate hold
+    # must be acknowledged to approve the copy at all.
+    service.approve(
+        "INV-1013", approver="Tomas Reid",
+        reason="missed the flag: took the resend for a new delivery", acknowledge_holds=True,
+    )
     pack = service.draft_duplicate_recovery("INV-1013")
     assert pack.exposure_status == "both_approved"
     assert "two payments are in flight" in "\n".join(pack.evidence)
@@ -183,7 +188,7 @@ def test_both_approved_is_the_worst_case_exposure(service):
 def test_recovery_pack_endpoints():
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     svc.analyze(SAMPLES["INV-1013"])
     client = TestClient(create_app(svc))
     missing = client.get("/invoices/INV-1013/recovery-pack")

@@ -117,7 +117,7 @@ def test_proposing_and_confirming_change_no_invoice_state(service):
 def test_payment_run_endpoints():
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     client = TestClient(create_app(svc))
     proposed = client.post(
         "/payment-runs/propose", json={"window_days": 7, "as_of": "2026-10-20"}

@@ -123,6 +123,21 @@ def classify_invoice(
                      for m in facts.line_matches if m.status == "price_variance"],
         )
 
+    if "line_total_mismatch" in statuses:
+        return Triage(
+            outcome="price_variance",
+            severity=value_band,
+            confidence=0.92,
+            rationale=(
+                "A stated line total disagrees with quantity x unit price — "
+                "the invoice bills more (or less) than its own line arithmetic "
+                "supports; the line must be corrected before payment "
+                "preparation (AP-MATCH-01)."
+            ),
+            signals=[f"line {m.line_no}: {m.detail}"
+                     for m in facts.line_matches if m.status == "line_total_mismatch"],
+        )
+
     if any(s in statuses for s in ("quantity_variance", "short_received", "missing_on_po")):
         return Triage(
             outcome="quantity_variance",

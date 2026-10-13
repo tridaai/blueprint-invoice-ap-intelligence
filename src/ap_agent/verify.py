@@ -91,8 +91,15 @@ def verify_drafts(
     drafts: Drafts,
     retrieved_ids: list[str],
     backend,
+    policies: list[dict] | None = None,
 ) -> VerifyResult:
-    """Verify a draft pair: LLM critique in provider mode, checklist otherwise."""
+    """Verify a draft pair: LLM critique in provider mode, checklist otherwise.
+
+    ``policies`` are the retrieved policies the drafts were grounded
+    in (id, title, text). The LLM critique is shown them so it can
+    judge citations against the set that was actually retrieved —
+    without them its prompt reads "none retrieved" and every
+    citation looks invented."""
     issues = checklist_grounding(
         drafts=drafts,
         retrieved_ids=retrieved_ids,
@@ -117,7 +124,7 @@ def verify_drafts(
         subject=drafts.subject,
         supplier_letter=drafts.supplier_letter,
         ap_packet=drafts.ap_packet,
-        policy_details=[],
+        policy_details=list(policies or []),
     )
     try:
         critique = verify_fn(context)

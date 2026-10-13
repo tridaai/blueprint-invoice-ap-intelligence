@@ -122,7 +122,7 @@ def test_queue_view_carries_the_case_aging(monkeypatch):
 def test_real_case_ages_from_its_draft(service=None):
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     svc.analyze(SAMPLES["INV-1013"])
     svc.draft_duplicate_recovery("INV-1013")
     future = (date.today() + timedelta(days=40)).isoformat()

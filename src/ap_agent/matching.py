@@ -10,7 +10,13 @@ tolerance rules an AP department actually works to:
 - **Quantity**: an invoice line passes when the invoiced quantity is
   no more than the ordered quantity AND no more than the received
   quantity. Invoicing more than was ordered is a quantity variance;
-  invoicing more than arrived is a short-receipt exception.
+  invoicing more than arrived is a short-receipt exception. Quantity
+  is judged cumulatively per item: an item billed across several
+  lines draws down one order and one receipt, so splitting a line in
+  two cannot bill the same goods twice.
+- **Line arithmetic**: a line that states its own total must equal
+  quantity x unit price within the totals tolerance — an inflated
+  line total is a mismatch even when quantity and price agree.
 - **Totals**: the stated invoice total must agree with the computed
   line total plus stated tax within the same tolerance family, and
   the stated tax must equal (stated total − computed subtotal) — a
@@ -99,19 +105,41 @@ def compute_match(
 
     matches: list[LineMatch] = []
     matched = 0
+    # Quantity already billed per item by earlier lines of this
+    # invoice: the order and the receipt are drawn down cumulatively,
+    # and each line is judged against what is still left on them.
+    billed: dict[str, float] = {}
     for i, inv_line in enumerate(invoice.line_items, start=1):
         key = _line_key(inv_line)
         po_line = po_lines.get(key)
         grn_line = grn_lines.get(key)
+        already = billed.get(key, 0.0)
+        billed[key] = already + inv_line.quantity
+        split = already > 0
         base = dict(
             line_no=i,
             description=inv_line.description,
             invoice_qty=inv_line.quantity,
             invoice_price=inv_line.unit_price,
-            po_qty=po_line.quantity if po_line else 0.0,
-            received_qty=grn_line.quantity if grn_line else 0.0,
+            po_qty=max(0.0, po_line.quantity - already) if po_line else 0.0,
+            received_qty=max(0.0, grn_line.quantity - already) if grn_line else 0.0,
             po_price=po_line.unit_price if po_line else 0.0,
+            stated_line_total=inv_line.line_total,
         )
+        earlier = f" (after {already:g} billed on earlier lines)" if split else ""
+        if inv_line.line_total is not None:
+            computed = round(inv_line.quantity * inv_line.unit_price, 2)
+            stated = float(inv_line.line_total)
+            allowed = max(TOTALS_TOLERANCE_ABS, abs(computed) * TOTALS_TOLERANCE_PCT)
+            if abs(stated - computed) > allowed:
+                matches.append(LineMatch(
+                    status="line_total_mismatch",
+                    detail=(
+                        f"stated line total {stated:.2f} vs {inv_line.quantity:g} x "
+                        f"{inv_line.unit_price} = {computed:.2f}"
+                    ),
+                    **base))
+                continue
         if po is not None and po_line is None:
             matches.append(LineMatch(status="missing_on_po",
                                      detail="no matching line on the purchase order", **base))
@@ -125,18 +153,17 @@ def compute_match(
                     detail=f"unit price {inv_line.unit_price} vs PO {po_line.unit_price} ({var_pct:+.2f}%)",
                     **base))
                 continue
-            if inv_line.quantity > po_line.quantity:
+            if billed[key] > po_line.quantity:
                 matches.append(LineMatch(
                     status="quantity_variance",
-                    detail=f"invoiced {inv_line.quantity} vs ordered {po_line.quantity}",
+                    detail=f"invoiced {inv_line.quantity} vs ordered {base['po_qty']:g}{earlier}",
                     **base))
                 continue
         if grn is not None:
-            if grn_line is None or inv_line.quantity > grn_line.quantity:
-                received = grn_line.quantity if grn_line else 0.0
+            if grn_line is None or billed[key] > grn_line.quantity:
                 matches.append(LineMatch(
                     status="short_received",
-                    detail=f"invoiced {inv_line.quantity} vs received {received}",
+                    detail=f"invoiced {inv_line.quantity} vs received {base['received_qty']:g}{earlier}",
                     **base))
                 continue
         matches.append(LineMatch(status="matched", detail="price, quantity and receipt agree", **base))
@@ -167,7 +194,7 @@ def compute_match(
     elif matched > 0:
         match_status = "partial_match"
     elif any(
-        m.status in {"price_variance", "quantity_variance", "short_received"}
+        m.status in {"price_variance", "line_total_mismatch", "quantity_variance", "short_received"}
         for m in matches
     ):
         # Lines correspond to the order/receipt but disagree on price

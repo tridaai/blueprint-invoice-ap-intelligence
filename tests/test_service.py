@@ -34,21 +34,21 @@ def test_reject_records_decision(service):
 
 def test_approve_unknown_invoice_404s(service):
     with pytest.raises(KeyError):
-        service.approve("INV-9999", approver="x")
+        service.approve("INV-9999", approver="x", reason="approved in test")
 
 
 def test_double_decision_refused(service):
     result = service.analyze(SAMPLES[0])
-    service.approve(result.invoice_id, approver="a")
+    service.approve(result.invoice_id, approver="a", reason="approved in test")
     with pytest.raises(ValueError):
-        service.approve(result.invoice_id, approver="a")
+        service.approve(result.invoice_id, approver="a", reason="approved in test")
 
 
 def test_guardrail_failed_draft_cannot_be_approved(service):
     result = service.analyze(SAMPLES[11])  # INV-1012, the guardrail trap
     assert result.validation.passed is False
     with pytest.raises(ValueError, match="guardrail"):
-        service.approve(result.invoice_id, approver="a")
+        service.approve(result.invoice_id, approver="a", reason="approved in test")
 
 
 def test_batch_preserves_order_and_isolates_errors(service):
@@ -114,7 +114,7 @@ def test_webhook_dispatch_when_configured(service, monkeypatch):
     monkeypatch.setattr(service_module.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("ACTION_WEBHOOK_URL", "https://example.invalid/hook")
     result = service.analyze(SAMPLES[0])
-    decided = service.approve(result.invoice_id, approver="a")
+    decided = service.approve(result.invoice_id, approver="a", reason="approved in test")
     assert decided.dispatch_status == "sent"
     assert decided.external_action_taken is True
     assert captured["url"] == "https://example.invalid/hook"

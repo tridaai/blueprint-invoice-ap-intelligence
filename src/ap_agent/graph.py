@@ -57,7 +57,8 @@ from .discounts import evaluate_discount, format_discount_line
 from .errors import ProviderError
 from .events import NullSink, RunEvent
 from .extractor import extract_documents, extraction_discrepancies
-from .guardrails import repair_directive, validate_drafts
+from .guardrails import cited_policies, repair_directive, validate_drafts
+from .policies_data import POLICIES as _POLICY_CORPUS
 from .matching import compute_match, format_match_summary
 from .model_backends import (
     DraftContext,
@@ -604,6 +605,27 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
             if part
         )
         policies = retriever.retrieve(query, top_k=4)
+        # The policies the triage rationale itself cites govern the case
+        # by construction (the rule that fired names them): carry them
+        # into the retrieved set when the search missed them, so the
+        # drafts may cite what the rationale cites — a not-an-invoice
+        # case is governed by AP-DOC-02 whether or not the keyword
+        # search ranked it.
+        have = {g.policy_id for g in policies}
+        corpus = {p["id"]: p for p in _POLICY_CORPUS}
+        for policy_id in cited_policies(triage.rationale):
+            if policy_id not in have and policy_id in corpus:
+                entry = corpus[policy_id]
+                policies.append(
+                    RetrievedPolicy(
+                        policy_id=policy_id,
+                        title=entry["title"],
+                        text=entry["text"],
+                        score=0.0,
+                        sources=["triage"],
+                    )
+                )
+                have.add(policy_id)
         return {
             "policies": [g.model_dump() for g in policies],
             "retrieval_info": getattr(retriever, "vector_store", "") or "",
@@ -706,6 +728,7 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
             drafts=drafts,
             retrieved_ids=retrieved_ids,
             backend=backend,
+            policies=list(state.get("policies", [])),
         )
         return {"verification": result.model_dump()}
 
@@ -723,6 +746,7 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
             drafts=drafts,
             retrieved_ids=retrieved_ids,
             backend=backend,
+            policies=list(state.get("policies", [])),
         )
         return {
             "review": result.model_dump(),
@@ -903,10 +927,14 @@ def _build_graph(backend, retriever, sink, checkpointer=None, ocr_engine=None, v
     builder.add_edge("history", "diagnose")
     builder.add_edge("diagnose", "options")
     builder.add_edge("options", "draft")
-    builder.add_edge("draft", "verify")
+    # Guardrails (and their bounded repair) run before the critics, so
+    # the self-check and the independent reviewer judge the drafts the
+    # approver will actually read — a repaired draft replaces the first
+    # one, and a verdict about the replaced draft would be stale.
+    builder.add_edge("draft", "validate")
+    builder.add_edge("validate", "verify")
     builder.add_edge("verify", "review")
-    builder.add_edge("review", "validate")
-    builder.add_edge("validate", "gate")
+    builder.add_edge("review", "gate")
     builder.add_edge("gate", "approval_gate")
     builder.add_edge("approval_gate", END)
     return builder.compile(checkpointer=checkpointer)
@@ -1058,6 +1086,17 @@ def _build_trace(state: AgentState) -> list[TraceStep]:
             ],
         ),
     ]
+    # Execution order: guardrails (+ repair) run before the critics.
+    validate_details = [
+        f"[{'PASS' if c.passed else 'FAIL'}] {c.name} — {c.detail}"
+        for c in validation.checks
+    ]
+    if state.get("repair_attempted"):
+        validate_details.append(
+            f"repair: {state.get('repair_attempts')} attempt(s) — "
+            f"{'repaired' if state.get('repaired') else 'still failing'}"
+        )
+    steps.append(step("validate", "Guardrail checks", validate_details))
     if verification is not None:
         steps.append(
             step(
@@ -1087,16 +1126,6 @@ def _build_trace(state: AgentState) -> list[TraceStep]:
                 ],
             )
         )
-    validate_details = [
-        f"[{'PASS' if c.passed else 'FAIL'}] {c.name} — {c.detail}"
-        for c in validation.checks
-    ]
-    if state.get("repair_attempted"):
-        validate_details.append(
-            f"repair: {state.get('repair_attempts')} attempt(s) — "
-            f"{'repaired' if state.get('repaired') else 'still failing'}"
-        )
-    steps.append(step("validate", "Guardrail checks", validate_details))
     autonomy = state.get("autonomy") or {}
     gate_details = [
         f"autonomy recommendation: "

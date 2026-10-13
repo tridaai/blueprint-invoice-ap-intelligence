@@ -147,3 +147,51 @@ class ResilientBackend:
             ) from None
         finally:
             executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Transient-error retry for the document ports (OCR, vision)
+# ---------------------------------------------------------------------------
+#
+# The language steps above retry through ResilientBackend; the OCR and
+# vision ports call their endpoints directly and had no retry at all,
+# so one "503 worker limit reached" from a hosted catalog sent the
+# vision verdict to the metadata fallback. Only transient failures
+# retry — rate limits, 5xx, timeouts, dropped connections — never an
+# auth or request error, which fails on the first attempt as before.
+
+_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
+_TRANSIENT_NAMES = {"APITimeoutError", "APIConnectionError", "Timeout", "ConnectError", "ReadTimeout"}
+DEFAULT_PORT_MAX_RETRIES = 2
+DEFAULT_PORT_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def is_transient(exc: BaseException) -> bool:
+    """A provider failure worth retrying: rate limit, 5xx, timeout,
+    dropped connection."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUS
+    return type(exc).__name__ in _TRANSIENT_NAMES
+
+
+def call_with_transient_retry(fn, *, sleep=time.sleep):
+    """``fn()`` with up to ``NIM_PORT_MAX_RETRIES`` retries (default 2)
+    on transient failures, backing off exponentially from
+    ``NIM_PORT_RETRY_BACKOFF_SECONDS`` (default 2.0). Anything else —
+    and the last transient failure — propagates unchanged."""
+    load_dotenv()
+    retries = max(0, env_int("NIM_PORT_MAX_RETRIES", DEFAULT_PORT_MAX_RETRIES))
+    from .config import env_float
+
+    backoff = max(0.0, env_float("NIM_PORT_RETRY_BACKOFF_SECONDS", DEFAULT_PORT_RETRY_BACKOFF_SECONDS))
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt >= retries or not is_transient(exc):
+                raise
+            sleep(backoff * (2 ** attempt))
+            attempt += 1
+

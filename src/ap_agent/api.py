@@ -299,7 +299,11 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
 
     @app.post("/invoices/analyze", response_model=AgentResult, dependencies=_AUTH)
     def analyze(invoice: InvoiceInput) -> AgentResult:
-        return svc.analyze(invoice)
+        try:
+            return svc.analyze(invoice)
+        except ValueError as exc:
+            # An invoice that was already decided is not re-analysed.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/invoices/analyze/stream", dependencies=_AUTH)
     def analyze_stream(invoice: InvoiceInput) -> StreamingResponse:
@@ -1261,7 +1265,10 @@ def create_app(service: InvoiceService | None = None) -> FastAPI:
     def approve(invoice_id: str, request: DecisionRequest) -> AgentResult:
         try:
             return svc.approve(
-                invoice_id, approver=_decision_actor(request), reason=request.reason or ""
+                invoice_id,
+                approver=_decision_actor(request),
+                reason=request.reason or "",
+                acknowledge_holds=request.acknowledge_holds,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

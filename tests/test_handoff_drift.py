@@ -147,8 +147,8 @@ def test_mixed_run_only_the_drifted_member_moves():
     )
     svc.analyze(SAMPLES["INV-1001"])
     svc.analyze(SAMPLES["INV-1003"])  # Harborline — no discount terms
-    svc.approve("INV-1001", approver="Priya Nair")
-    svc.approve("INV-1003", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
+    svc.approve("INV-1003", approver="Priya Nair", reason="approved in test")
     svc.propose_payment_runs(window_days=7, as_of="2026-10-05")
     runs = svc.list_payment_runs()
     assert len(runs) == 1 and runs[0].invoice_count == 2

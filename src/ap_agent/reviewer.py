@@ -95,8 +95,12 @@ def review_drafts(
     drafts: Drafts,
     retrieved_ids: list[str],
     backend,
+    policies: list[dict] | None = None,
 ) -> ReviewResult:
-    """Review a draft pair: LLM reviewer in provider mode, checklist otherwise."""
+    """Review a draft pair: LLM reviewer in provider mode, checklist otherwise.
+
+    ``policies`` are the retrieved policies (id, title, text) — the
+    reviewer judges the packet's citations against them."""
     if not reviewer_enabled():
         return ReviewResult(verdict="skipped", source="checklist", enabled=False)
     contents = packet_contents(drafts=drafts, diagnosis=diagnosis, options=options, retrieved_ids=retrieved_ids)
@@ -126,7 +130,7 @@ def review_drafts(
         subject=drafts.subject,
         supplier_letter=drafts.supplier_letter,
         ap_packet=drafts.ap_packet,
-        policy_details=[],
+        policy_details=list(policies or []),
     )
     note = ""
     try:

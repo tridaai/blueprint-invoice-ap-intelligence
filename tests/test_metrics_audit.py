@@ -51,7 +51,7 @@ def test_webhook_signed_when_secret_configured(service, monkeypatch):
     monkeypatch.setenv("ACTION_WEBHOOK_URL", "https://example.invalid/hook")
     monkeypatch.setenv("ACTION_WEBHOOK_SECRET", "test-secret")
     result = service.analyze(SAMPLES[0])
-    decided = service.approve(result.invoice_id, approver="a")
+    decided = service.approve(result.invoice_id, approver="a", reason="approved in test")
     assert decided.dispatch_status == "sent"
     request = captured["request"]
     body = request.data
@@ -65,7 +65,7 @@ def test_webhook_unsigned_without_secret(service, monkeypatch):
     captured = _capture(monkeypatch)
     monkeypatch.setenv("ACTION_WEBHOOK_URL", "https://example.invalid/hook")
     result = service.analyze(SAMPLES[0])
-    service.approve(result.invoice_id, approver="a")
+    service.approve(result.invoice_id, approver="a", reason="approved in test")
     assert captured["request"].headers.get("X-trida-signature") is None
 
 

@@ -106,7 +106,7 @@ def test_credits_are_recomputed_from_the_ledger_not_the_stamp():
     followed, and the totals say they no longer add up."""
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1002"])
-    svc.approve("INV-1002", approver="Priya Nair")
+    svc.approve("INV-1002", approver="Priya Nair", reason="approved in test")
     run = svc.propose_payment_runs(as_of="2026-10-05")[0]
     assert run.total_credit == 0.00  # nothing recorded at proposal
     svc.apply_credit_note(NOTES["CN-3001"], actor="Priya Nair")
@@ -173,7 +173,7 @@ def test_a_claim_that_lands_after_proposal_still_gates():
     case opened after the run was proposed still blocks it."""
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     svc.analyze(SAMPLES["INV-1013"])
     run = svc.propose_payment_runs(as_of="2026-10-05")[0]
     svc.draft_duplicate_recovery("INV-1013")  # the claim opens now
@@ -184,7 +184,7 @@ def test_a_claim_that_lands_after_proposal_still_gates():
 def test_a_clean_run_confirms_without_acknowledgements():
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1002"])
-    svc.approve("INV-1002", approver="Priya Nair")
+    svc.approve("INV-1002", approver="Priya Nair", reason="approved in test")
     run = svc.propose_payment_runs(as_of="2026-10-05")[0]
     report = svc.payment_run_control_report(run.run_id)
     assert report.ack_required_count == 0
@@ -198,7 +198,7 @@ def test_receipt_clears_the_flag():
     is no longer flagged — the gate follows the money."""
     svc = InvoiceService(store=InMemoryStore(), checkpointer=False)
     svc.analyze(SAMPLES["INV-1001"])
-    svc.approve("INV-1001", approver="Priya Nair")
+    svc.approve("INV-1001", approver="Priya Nair", reason="approved in test")
     svc.analyze(SAMPLES["INV-1013"])
     svc.draft_duplicate_recovery("INV-1013")
     run = svc.propose_payment_runs(as_of="2026-10-05")[0]

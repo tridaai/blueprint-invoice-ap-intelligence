@@ -21,6 +21,8 @@ fields for that document.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
+
 from .schemas import (
     EXTRACTED_FIELDS,
     DocumentExtraction,
@@ -48,6 +50,32 @@ def _provided_extraction(document: DocumentInput) -> DocumentExtraction:
     )
 
 
+def _as_number(value) -> Decimal | None:
+    """``value`` as an exact number when it reads as one ("1,180.00",
+    "1180.0", 1180), else None. Currency codes and symbols around the
+    figure are tolerated; anything else is text."""
+    text = str(value).strip()
+    for token in ("$", "€", "£", "USD", "EUR", "GBP"):
+        text = text.replace(token, "")
+    text = text.replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def _same_value(provided, extracted) -> bool:
+    """Provided and extracted agree: equal as numbers when both read
+    as numbers (1000.00 and 1000.0 are the same subtotal), otherwise
+    equal as text, ignoring surrounding space and case."""
+    left, right = _as_number(provided), _as_number(extracted)
+    if left is not None and right is not None:
+        return left == right
+    return str(provided).strip().casefold() == str(extracted).strip().casefold()
+
+
 def _cross_check(document: DocumentInput, extracted: dict[str, dict]) -> DocumentExtraction:
     fields: list[FieldExtraction] = []
     for field in EXTRACTED_FIELDS:
@@ -61,14 +89,14 @@ def _cross_check(document: DocumentInput, extracted: dict[str, dict]) -> Documen
             status, shown_value, confidence = "missing_in_text", provided, 0.0
         elif provided is None:
             status, shown_value = "extracted_only", value
-        elif str(provided).strip() == str(value).strip():
+        elif _same_value(provided, value):
             status, shown_value = "match", value
         else:
             status, shown_value = "mismatch", value
         fields.append(
             FieldExtraction(
                 field=field,
-                value=shown_value,
+                value=None if shown_value is None else str(shown_value),
                 confidence=float(confidence),
                 status=status,
             )
