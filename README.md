@@ -14,8 +14,6 @@ The promises are precise, and enforced in code, not in prompts:
 - **The agent never acts on bank-detail changes.** A "remit to our new account" request inside a document is treated as a fraud pattern: flagged, blocked, and never echoed into a draft.
 - **The agent never approves its own work.** A named finance approver decides, with a reason, at a checkpointed gate.
 
-Everything is synthetic data. There is no real supplier, invoice, or bank detail anywhere in this repository.
-
 <p align="center">
   <a href="https://trida.ai/blog/invoice-ap-intelligence-blueprint-on-nvidia-nim">
     <img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1791677281610-cover.webp" alt="Invoice AP Intelligence Blueprint on NVIDIA NIM" width="600">
@@ -246,7 +244,7 @@ migrations/       numbered SQL schema versions (0001 core, 0002 vectors, 0003 ch
 evals/            golden.jsonl + deterministic runner + opt-in LLM-judge pack
 examples/         worked seam examples (erp_posting.py: approved result → ERP journal)
 tests/            716 hermetic tests + Postgres integration tests (gated on DATABASE_URL)
-data/sample/      mirrors of the bundled samples + policy corpus
+data/sample/      mirrors of the bundled synthetic samples + policy corpus
 docs/             architecture.md
 ```
 
@@ -262,7 +260,7 @@ docs/             architecture.md
 
 ## Limitations
 
-- Synthetic data only; the policy corpus is illustrative, not legal or accounting advice.
+- The policy corpus is illustrative, not legal or accounting advice.
 - Live NVIDIA NIM verification has run end to end against the hosted endpoints (2026-10-10); the NIM OCR/vision/LLM seams are additionally fake-tested, and the OCR chat-shape is an adapter assumption documented in code and architecture docs. The opt-in live judge pack has run as a small slice so far, not the full set.
 - The Docker image and compose stack are build-verified (built and run healthy on a developer machine, 2026-10-10); the dev sandbox itself has no daemon.
 - This is a reference prototype, not a production AP system: no ERP integration, no real payment rails, no SSO. The production-hardening notes in `docs/architecture.md` describe what changes.
